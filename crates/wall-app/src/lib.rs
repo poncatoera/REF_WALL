@@ -10,7 +10,7 @@ pub mod video;
 use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
-use wall_format::{ArrowEnd, Board, BoardItem, Frame, ItemKind, ItemSidecar, Library, MediaKind};
+use wall_format::{ArrowEnd, Board, BoardItem, Frame, ItemKind, Rect, ItemSidecar, Library, MediaKind};
 use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
@@ -114,6 +114,8 @@ enum Gesture {
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
     /// Alt-dragging out a new arrow.
     Connect { from: ArrowEnd, start: [f32; 2], now: [f32; 2] },
+    /// Ctrl/Cmd-dragging a corner of a picture: crops instead of scaling.
+    Crop { original: BoardItem, start: [f32; 2], left: bool, top: bool },
     /// Dragging an item's bottom-right handle.
     Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64> },
     /// Dragging along a video's scrub strip.
@@ -710,6 +712,12 @@ impl App {
             self.gesture = Gesture::Connect { from, start: board, now: board };
             return;
         }
+        if mods.command {
+            if let Some((item, left, top)) = self.crop_corner_at(board) {
+                self.gesture = Gesture::Crop { original: item, start: board, left, top };
+                return;
+            }
+        }
         if let Some(item) = self.resize_handle_at(board) {
             // Pictures and videos keep their shape unless Shift is held.
             let aspect = matches!(item.kind, ItemKind::Media { .. }).then(|| item.frame.w / item.frame.h.max(1e-6)).filter(|_| !mods.shift);
@@ -783,6 +791,10 @@ impl App {
         match &mut self.gesture {
             Gesture::Idle => return,
             Gesture::Connect { now, .. } => *now = board,
+            Gesture::Crop { original, start, left, top } => {
+                let item = crop_item(original, [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64], *left, *top);
+                self.doc.preview(item);
+            }
             Gesture::Resize { original, start, aspect } => {
                 let mut item = original.clone();
                 let min = 20.0;
@@ -844,7 +856,7 @@ impl App {
                     self.selection = [id].into();
                 }
             }
-            Gesture::Resize { original, .. } => {
+            Gesture::Crop { original, .. } | Gesture::Resize { original, .. } => {
                 if let Some(after) = self.doc.board.items.get(&original.id).cloned() {
                     self.doc.commit_edit(Some(&original), after);
                 }
@@ -946,6 +958,7 @@ impl App {
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
             Key::Left | Key::Right | Key::Home | Key::End => {}
+            Key::Char(c @ '0'..='7') => self.set_color(c),
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::BringToFront => self.restack(true),
@@ -983,6 +996,40 @@ impl App {
         let r = HANDLE_PX / self.camera.zoom;
         let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
         ((board[0] - hx).abs() <= r && (board[1] - hy).abs() <= r).then(|| item.clone())
+    }
+
+    /// A corner of the single selected picture under a board point:
+    /// (item, is left corner, is top corner).
+    fn crop_corner_at(&self, board: [f32; 2]) -> Option<(BoardItem, bool, bool)> {
+        let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] else { return None };
+        let item = self.doc.item(&id).filter(|i| matches!(i.kind, ItemKind::Media { .. }))?;
+        let r = (HANDLE_PX * 1.5 / self.camera.zoom) as f64;
+        let f = item.frame;
+        let (x, y) = (board[0] as f64, board[1] as f64);
+        let left = (x - f.x).abs() <= r;
+        let right = (x - (f.x + f.w)).abs() <= r;
+        let top = (y - f.y).abs() <= r;
+        let bottom = (y - (f.y + f.h)).abs() <= r;
+        ((left || right) && (top || bottom)).then(|| (item.clone(), left, top))
+    }
+
+    /// Number keys colour the selected notes and groups: 0 resets, 1-7 pick
+    /// red, orange, yellow, green, blue, purple, grey. One undo step.
+    fn set_color(&mut self, key: char) {
+        const PALETTE: [&str; 7] = ["#e5534b", "#e8a15d", "#e6c84f", "#57ab5a", "#7aa2f7", "#b083f0", "#8b8f98"];
+        let color = key.to_digit(10).filter(|d| *d > 0).map(|d| PALETTE[d as usize - 1].to_owned());
+        let afters: Vec<BoardItem> = self
+            .selected_items()
+            .into_iter()
+            .filter_map(|mut i| {
+                match &mut i.kind {
+                    ItemKind::Note { color: c, .. } | ItemKind::Group { color: c, .. } => *c = color.clone(),
+                    _ => return None,
+                }
+                Some(i)
+            })
+            .collect();
+        self.doc.replace(afters);
     }
 
     /// Selected items, ordered back to front.
@@ -1289,6 +1336,41 @@ impl App {
     }
 }
 
+/// A picture with one corner moved by `d` board units, cropping: the image
+/// keeps its scale on the board and only the visible part changes.
+fn crop_item(original: &BoardItem, d: [f64; 2], left: bool, top: bool) -> BoardItem {
+    let mut item = original.clone();
+    let ItemKind::Media { crop, .. } = &mut item.kind else { return item };
+    let c = crop.unwrap_or(Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+    let f = original.frame;
+    // Board units per texture unit, fixed while cropping.
+    let (sx, sy) = (f.w / c.w, f.h / c.h);
+    let min = 10.0;
+    let (mut x0, mut y0) = (f.x, f.y);
+    let (mut x1, mut y1) = (f.x + f.w, f.y + f.h);
+    // Limits: the full image's edges on the board.
+    let (full_x0, full_y0) = (f.x - c.x * sx, f.y - c.y * sy);
+    let (full_x1, full_y1) = (full_x0 + sx, full_y0 + sy);
+    if left {
+        x0 = (x0 + d[0]).clamp(full_x0, x1 - min);
+    } else {
+        x1 = (x1 + d[0]).clamp(x0 + min, full_x1);
+    }
+    if top {
+        y0 = (y0 + d[1]).clamp(full_y0, y1 - min);
+    } else {
+        y1 = (y1 + d[1]).clamp(y0 + min, full_y1);
+    }
+    item.frame.x = x0;
+    item.frame.y = y0;
+    item.frame.w = x1 - x0;
+    item.frame.h = y1 - y0;
+    let new = Rect { x: (x0 - full_x0) / sx, y: (y0 - full_y0) / sy, w: (x1 - x0) / sx, h: (y1 - y0) / sy };
+    let whole = new.x.abs() < 1e-9 && new.y.abs() < 1e-9 && (new.w - 1.0).abs() < 1e-9 && (new.h - 1.0).abs() < 1e-9;
+    *crop = (!whole).then_some(new);
+    item
+}
+
 fn norm_rect(a: [f32; 2], b: [f32; 2]) -> [f32; 4] {
     [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
 }
@@ -1567,6 +1649,48 @@ mod tests {
         a.pointer_move([250.0, 625.0]);
         a.pointer_up(Button::Primary, [250.0, 625.0]);
         assert_eq!(a.doc.item(&free).unwrap().kind, ItemKind::Arrow { from: ArrowEnd::Point { x: 150.0, y: 600.0 }, to: ArrowEnd::Point { x: 350.0, y: 650.0 } });
+    }
+
+    #[test]
+    fn ctrl_drag_corner_crops_without_rescaling() {
+        let mut a = app();
+        let f = Frame { x: 100.0, y: 100.0, w: 400.0, h: 200.0, ..Default::default() };
+        let hash = a.add_picture(vec![0; 4], 1, 1);
+        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        a.selection = [id].into();
+        let cmd = Mods { command: true, ..Default::default() };
+        // Top-left corner in by (100, 50): a quarter of the width, a quarter of the height.
+        a.pointer_down(Button::Primary, [100.0, 100.0], cmd);
+        a.pointer_move([200.0, 150.0]);
+        a.pointer_up(Button::Primary, [200.0, 150.0]);
+        let item = a.doc.item(&id).unwrap().clone();
+        assert_eq!((item.frame.x, item.frame.y, item.frame.w, item.frame.h), (200.0, 150.0, 300.0, 150.0));
+        let ItemKind::Media { crop: Some(c), .. } = item.kind else { panic!("no crop") };
+        assert_eq!((c.x, c.y, c.w, c.h), (0.25, 0.25, 0.75, 0.75));
+        // Pulling the corner back past the image edge stops at the edge and clears the crop.
+        a.pointer_down(Button::Primary, [200.0, 150.0], cmd);
+        a.pointer_move([0.0, 0.0]);
+        a.pointer_up(Button::Primary, [0.0, 0.0]);
+        let item = a.doc.item(&id).unwrap();
+        assert_eq!((item.frame.x, item.frame.w), (100.0, 400.0));
+        assert!(matches!(item.kind, ItemKind::Media { crop: None, .. }));
+        a.key(Key::Undo);
+        a.key(Key::Undo);
+        let back = a.doc.item(&id).unwrap().frame;
+        assert_eq!((back.x, back.y, back.w, back.h), (f.x, f.y, f.w, f.h));
+    }
+
+    #[test]
+    fn number_keys_colour_notes() {
+        let mut a = app();
+        let n = add_note(&mut a, 100.0, 100.0);
+        a.selection = [n].into();
+        a.key(Key::Char('5'));
+        assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: Some(c), .. } if c == "#7aa2f7"));
+        a.key(Key::Char('0'));
+        assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: None, .. }));
+        a.key(Key::Undo);
+        assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: Some(_), .. }));
     }
 
     #[test]

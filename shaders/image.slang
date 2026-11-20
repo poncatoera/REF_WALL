@@ -19,6 +19,7 @@ struct ImageInstance
 {
     float4 rect : RECT;      // x, y, w, h on the board
     float4 params : PARAMS;  // opacity, corner radius, -, -
+    float4 uv_rect : UVRECT; // visible part of the texture: u, v, width, height (crop)
 };
 
 struct VsOut
@@ -44,7 +45,7 @@ VsOut vs_main(uint vid : SV_VulkanVertexID, ImageInstance img)
     float2 board = img.rect.xy + c * img.rect.zw;
     VsOut o;
     o.position = float4(board * view.scale + view.offset, 0.0, 1.0);
-    o.uv = c;
+    o.uv = img.uv_rect.xy + c * img.uv_rect.zw;
     o.local = (c * 2.0 - 1.0) * half_size;
     o.half_size = half_size;
     o.params = img.params;

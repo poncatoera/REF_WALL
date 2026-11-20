@@ -24,6 +24,8 @@ layout(std140) uniform View_std140_block_0 { View_std140_ _group_0_binding_0; };
 
 vec4 img_u002e_params_1 = vec4(0.0);
 
+vec4 img_u002e_uv_rect_1 = vec4(0.0);
+
 vec4 global_1 = vec4(0.0, 0.0, 0.0, 1.0);
 
 vec2 entryPointParam_vs_main_u002e_uv = vec2(0.0);
@@ -36,6 +38,7 @@ vec4 entryPointParam_vs_main_u002e_params = vec4(0.0);
 
 layout(location = 0) in vec4 _p2vs_location0;
 layout(location = 1) in vec4 _p2vs_location1;
+layout(location = 2) in vec4 _p2vs_location2;
 smooth out vec2 _vs2fs_location0;
 smooth out vec2 _vs2fs_location1;
 smooth out vec2 _vs2fs_location2;
@@ -60,7 +63,8 @@ void vs_main_1() {
     vec2 _e44 = _group_0_binding_0.offset;
     vec4 _e50 = img_u002e_params_1;
     global_1 = vec4((((_e34.xy + (_e30 * _e36.zw)) * _e41) + _e44), 0.0, 1.0);
-    entryPointParam_vs_main_u002e_uv = _e30;
+    vec4 _e51 = img_u002e_uv_rect_1;
+    entryPointParam_vs_main_u002e_uv = (_e51.xy + (_e30 * _e51.zw));
     entryPointParam_vs_main_u002e_local = (((_e30 * 2.0) - vec2(1.0, 1.0)) * _e33);
     entryPointParam_vs_main_u002e_half_size = _e33;
     entryPointParam_vs_main_u002e_params = _e50;
@@ -71,9 +75,11 @@ void main() {
     uint param = uint(gl_VertexID);
     vec4 img_u002e_rect = _p2vs_location0;
     vec4 img_u002e_params = _p2vs_location1;
+    vec4 img_u002e_uv_rect = _p2vs_location2;
     global = int(param);
     img_u002e_rect_1 = img_u002e_rect;
     img_u002e_params_1 = img_u002e_params;
+    img_u002e_uv_rect_1 = img_u002e_uv_rect;
     vs_main_1();
     float _e13 = global_1.y;
     global_1.y = -(_e13);

@@ -126,15 +126,21 @@ impl Scene {
                     });
                     label = Some((name.as_str(), [c[0], c[1], c[2], 1.0]));
                 }
-                ItemKind::Media { hash, .. } => {
+                ItemKind::Media { hash, crop } => {
                     // Placeholder under the picture, seen until its pixels (or a
                     // video's first frame) arrive.
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [6.0, 1.0] });
-                    run.images.push((hash.clone(), ImageInstance { rect, params: [1.0, 6.0, 0.0, 0.0] }));
+                    run.images.push((hash.clone(), ImageInstance {
+                        rect,
+                        params: [1.0, 6.0, 0.0, 0.0],
+                        uv_rect: crop.map_or([0.0, 0.0, 1.0, 1.0], |c| [c.x as f32, c.y as f32, c.w as f32, c.h as f32]),
+                    }));
                 }
                 ItemKind::Note { text, color } => {
-                    let fill = parse_hex(color.as_deref()).map(|c| [c[0] * 0.25, c[1] * 0.25, c[2] * 0.25, 1.0]).unwrap_or(NOTE_FILL);
-                    run.boxes.push(BoxInstance { rect, fill, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
+                    let tint = parse_hex(color.as_deref());
+                    let fill = tint.map(|c| [c[0] * 0.42, c[1] * 0.42, c[2] * 0.42, 1.0]).unwrap_or(NOTE_FILL);
+                    let stroke = tint.map(|c| [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, 1.0]).unwrap_or(NOTE_STROKE);
+                    run.boxes.push(BoxInstance { rect, fill, stroke, shape: [8.0, 1.0] });
                     label = Some((text.as_str(), TEXT));
                 }
                 ItemKind::Label { text } => {

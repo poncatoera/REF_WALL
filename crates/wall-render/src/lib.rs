@@ -85,6 +85,8 @@ pub struct ImageInstance {
     pub rect: [f32; 4],
     /// opacity, corner radius, unused, unused.
     pub params: [f32; 4],
+    /// Visible part of the texture in 0..1: u, v, width, height (crop).
+    pub uv_rect: [f32; 4],
 }
 
 /// Handle to an uploaded picture.
@@ -160,7 +162,7 @@ impl Renderer {
 
         let boxes = InstancedPass::new(&gl, BOX_VS, BOX_FS, target, std::mem::size_of::<BoxInstance>(), &[4, 4, 4, 2])?;
         let glyphs = InstancedPass::new(&gl, GLYPH_VS, GLYPH_FS, target, std::mem::size_of::<GlyphInstance>(), &[4, 4, 4, 4])?;
-        let images = InstancedPass::new(&gl, IMAGE_VS, IMAGE_FS, target, std::mem::size_of::<ImageInstance>(), &[4, 4])?;
+        let images = InstancedPass::new(&gl, IMAGE_VS, IMAGE_FS, target, std::mem::size_of::<ImageInstance>(), &[4, 4, 4])?;
         let curves = InstancedPass::new(&gl, CURVE_VS, CURVE_FS, target, std::mem::size_of::<CurveInstance>(), &[4, 4, 4])?;
 
         // Glyph samplers: texture unit 0 = curves, 1 = bands.
