@@ -2560,6 +2560,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "uuid",
  "wall-app",
  "wall-media",
  "wall-render",

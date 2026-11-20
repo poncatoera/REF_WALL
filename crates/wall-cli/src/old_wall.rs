@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
-use wall_format::{ArrowEnd, Board, BoardItem, ClipRange, Frame, ItemKind, Library, Rect, TodoEntry};
+use wall_format::{ArrowEnd, Board, BoardItem, ClipRange, ContentHash, Frame, ItemKind, Library, Rect, TodoEntry};
 
 use crate::Res;
 
@@ -126,6 +126,7 @@ pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
     let item_ids: HashMap<String, Uuid> = old_items.iter().map(|i| (text(i, "id").to_owned(), Uuid::new_v4())).collect();
     let mut by_board: HashMap<Uuid, Vec<BoardItem>> = HashMap::new();
     let mut unplaced: HashMap<Uuid, Vec<BoardItem>> = HashMap::new();
+    let mut converted: HashMap<String, ContentHash> = HashMap::new();
 
     for it in old_items {
         let kind = text(it, "kind");
@@ -139,7 +140,7 @@ pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
             continue;
         }
         let item_kind = match kind {
-            "image" | "video" => match import_media(&lib, old, it, now) {
+            "image" | "video" => match import_media(&lib, old, it, now, &mut converted) {
                 Ok(k) => k,
                 Err(e) => {
                     report.skipped.push(format!("{label}: {e}"));
@@ -330,10 +331,23 @@ fn card_text(kind: &str, it: &Value) -> String {
 }
 
 /// Imports one picture or video and carries its metadata into the sidecar.
-fn import_media(lib: &Library, old: &Path, it: &Value, now: u64) -> Res<ItemKind> {
+/// `done` maps an old file (its old content hash, else its path) to the
+/// media it became, so a clip on several boards is converted only once.
+fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut HashMap<String, ContentHash>) -> Res<ItemKind> {
     let file = media_file(old, text(it, "file")).ok_or_else(|| format!("its file {} is missing", text(it, "file")))?;
-    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
-    let (hash, _, _) = crate::import_one(lib, &file, &name, now)?;
+    let key = match text(it, "hash") {
+        "" => file.to_string_lossy().into_owned(),
+        h => format!("hash:{h}"),
+    };
+    let hash = match done.get(&key) {
+        Some(h) => h.clone(),
+        None => {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
+            let (h, _, _) = crate::import_one(lib, &file, &name, now)?;
+            done.insert(key, h.clone());
+            h
+        }
+    };
     let mut sc = lib.read_sidecar(&hash).map_err(|e| e.to_string())?;
     let title = text(it, "title");
     if !title.is_empty() {

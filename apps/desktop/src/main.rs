@@ -13,6 +13,7 @@
 //! - `WALL_SCREENSHOT_FRAME=n` takes the screenshot at frame n (default 3).
 //! - `WALL_EXPORT=board.png` also exports the whole board with the screenshot.
 //! - `WALL_DEMO=n` opens a generated demo board with n notes instead of a library.
+//! - `WALL_BOARD=<id>` opens that board of the library at start.
 //!
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
 //! `Wall/Library.wall` in the home folder. Boards save automatically.
@@ -667,6 +668,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     app.desktop = true;
+    // WALL_BOARD=<board id> opens that board of the library at start (tests).
+    if let Some(id) = std::env::var("WALL_BOARD").ok().and_then(|s| s.trim().parse::<uuid::Uuid>().ok()) {
+        app.open_board(id, true);
+    }
     // WALL_OPEN_LIBRARY=1 starts with the library drawer open (screenshots).
     if std::env::var_os("WALL_OPEN_LIBRARY").is_some() {
         app.toggle_library();
