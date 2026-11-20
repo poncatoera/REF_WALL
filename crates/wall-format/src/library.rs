@@ -260,7 +260,10 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).at(path)?;
-    serde_json::from_slice(&bytes).map_err(|source| Error::Json { path: path.to_path_buf(), source })
+    // Windows tools (PowerShell 5, Notepad) often save UTF-8 with a BOM;
+    // serde_json refuses it, so skip it rather than fail on another app's file.
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    serde_json::from_slice(json).map_err(|source| Error::Json { path: path.to_path_buf(), source })
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

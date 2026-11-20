@@ -54,6 +54,8 @@ pub enum Action {
 pub enum Thumb {
     Pending { rgba: Vec<u8>, width: u32, height: u32 },
     Ready(ImageId),
+    /// A video preview frame asked of the shell, not back yet.
+    Requested,
     /// Could not be read; shown as an empty tile.
     Failed,
 }
@@ -202,15 +204,16 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
         l.rect(area, TILE, LINE, 6.0);
         l.visible.push(sc.hash.clone());
         let inner = [area[0] + 4.0, area[1] + 4.0, area[2] - 8.0, area[3] - 8.0];
+        // Pictures, and videos' preview frames once the shell sends them.
+        l.images.push((sc.hash.clone(), fit_rect(inner, sc.width, sc.height)));
         if sc.kind == MediaKind::Video {
-            l.text("▶", [area[0] + area[2] / 2.0 - 6.0, area[1] + area[3] / 2.0 + 7.0], 20.0, DIM);
-            if let Some(ms) = sc.duration_ms {
-                let d = panel::format_duration(ms as f64 / 1000.0);
-                let dw = panel::text_width(font, &d, 11.0);
-                l.text(d, [area[0] + area[2] - dw - 8.0, area[1] + area[3] - 8.0], 11.0, INK);
-            }
-        } else {
-            l.images.push((sc.hash.clone(), fit_rect(inner, sc.width, sc.height)));
+            // A dark pill over the frame: play mark and length.
+            let d = sc.duration_ms.map(|ms| panel::format_duration(ms as f64 / 1000.0)).unwrap_or_default();
+            let dw = panel::text_width(font, &d, 11.0);
+            let pill = [area[0] + 8.0, area[1] + area[3] - 26.0, dw + 30.0, 18.0];
+            l.top_boxes.push(PanelBox { rect: pill, fill: [0.0, 0.0, 0.0, 0.6], stroke: [0.0; 4], radius: 9.0, stroke_w: 0.0 });
+            l.text("▶", [pill[0] + 7.0, pill[1] + 13.5], 10.0, INK);
+            l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, INK);
         }
         let title = sc.title.clone().unwrap_or_else(|| format!("{} × {}", sc.width, sc.height));
         let title = panel::fit(font, &title, 12.0, TILE_W - 4.0);
@@ -281,8 +284,9 @@ mod tests {
         assert_eq!(v.items[0].title.as_deref(), Some("Item 2"));
         let l = layout(&mut font(), &v, [1200.0, 800.0], 0.0);
         assert_eq!(l.visible.len(), 2);
-        // Only the picture has a thumbnail; the video shows a play mark.
-        assert_eq!(l.images.len(), 1);
+        // Both get an image slot (the video's preview frame comes from the
+        // shell); the video also shows its length.
+        assert_eq!(l.images.len(), 2);
         assert!(l.texts.iter().any(|t| t.text == "0:04"));
         // A click in the middle of the first tile places it; its × trashes it.
         let tile = l.hits.iter().find(|(_, a)| matches!(a, Action::Place(_))).unwrap().0;
@@ -362,6 +366,30 @@ mod tests {
         assert_eq!(a.library.as_ref().unwrap().sidecars().unwrap().len(), 1);
         a.key(crate::Key::Escape);
         assert!(!a.library_is_open());
+    }
+
+    #[test]
+    fn videos_off_the_board_ask_the_shell_for_a_preview_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = App::open_library(&dir.path().join("V.wall"), "test", 1).unwrap();
+        a.resize([1000.0, 800.0]);
+        let meta = crate::VideoMeta { width: 1920, height: 1080, duration_ms: 8000, fps: Some(25.0) };
+        let id = a.import_video(b"fake mp4", "mp4", meta, Some("clip.mp4"), 5).unwrap();
+        a.selection = [id].into();
+        a.key(crate::Key::Delete);
+        a.toggle_library();
+
+        let wanted = a.library_posters_wanted();
+        assert_eq!(wanted.len(), 1);
+        let (hash, path, w, h, at) = wanted[0].clone();
+        assert!(path.is_file(), "points at the library's copy");
+        assert_eq!((w, h), (256, 144), "fits 256 px, even sizes");
+        assert_eq!(at, 0.8, "a little way in: 10% of 8 s");
+        assert!(a.library_waiting());
+        assert!(a.library_posters_wanted().is_empty(), "asked once");
+
+        a.set_library_poster(hash, Some((vec![0; 256 * 144 * 4], 256, 144)));
+        assert!(!a.library_waiting());
     }
 
     #[test]
@@ -485,6 +513,48 @@ impl App {
             self.library = Some(lib);
         } else {
             self.sidecars.entry(sc.hash.clone()).or_insert(sc);
+        }
+    }
+
+    /// Videos on screen in the drawer that need a preview frame, as (hash,
+    /// file, width, height, time in seconds). Each is asked for once; the
+    /// shell decodes it (off the UI thread) and hands it to
+    /// [`App::set_library_poster`].
+    pub fn library_posters_wanted(&mut self) -> Vec<(ContentHash, std::path::PathBuf, u32, u32, f64)> {
+        let Some(l) = self.library_layout() else { return Vec::new() };
+        let (Some(v), Some(lib)) = (self.library_view.as_mut(), self.library.as_ref()) else { return Vec::new() };
+        let mut out = Vec::new();
+        for hash in &l.visible {
+            if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_))) {
+                continue;
+            }
+            let Some(sc) = v.items.iter().find(|s| &s.hash == hash && s.kind == MediaKind::Video) else { continue };
+            // At most THUMB_PX on a side, even sizes for ffmpeg's scaler.
+            let s = (THUMB_PX as f32 / sc.width.max(sc.height).max(1) as f32).min(1.0);
+            let even = |x: f32| ((x.round() as u32) & !1).max(2);
+            let (w, h) = (even(sc.width as f32 * s), even(sc.height as f32 * s));
+            // A frame a little way in: first frames are often black.
+            let at = sc.duration_ms.map_or(0.0, |ms| (ms as f64 / 1000.0 * 0.1).min(1.0));
+            out.push((hash.clone(), lib.media_path(hash, &sc.ext), w, h, at));
+            v.thumbs.insert(hash.clone(), Thumb::Requested);
+        }
+        out
+    }
+
+    /// True while preview frames asked of the shell are still out, so the
+    /// shell keeps drawing until they arrive.
+    pub fn library_waiting(&self) -> bool {
+        self.library_view.as_ref().is_some_and(|v| v.thumbs.values().any(|t| matches!(t, Thumb::Requested)))
+    }
+
+    /// A video preview frame from the shell (None if it couldn't decode).
+    pub fn set_library_poster(&mut self, hash: ContentHash, frame: Option<(Vec<u8>, u32, u32)>) {
+        if let Some(v) = &mut self.library_view {
+            v.thumbs.insert(hash, match frame {
+                Some((rgba, width, height)) => Thumb::Pending { rgba, width, height },
+                None => Thumb::Failed,
+            });
+            self.needs_redraw = true;
         }
     }
 

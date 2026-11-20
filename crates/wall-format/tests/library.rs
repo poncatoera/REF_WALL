@@ -91,6 +91,19 @@ fn sidecar_round_trip_keeps_unknown_fields() {
 }
 
 #[test]
+fn reads_json_saved_with_a_utf8_bom() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::create(dir.path(), "x", 1).unwrap();
+    let board = Board::new("From Notepad", 1);
+    lib.write_board(&board).unwrap();
+    let path = lib.root().join("boards").join(format!("{}.json", board.id));
+    let mut bytes = b"\xEF\xBB\xBF".to_vec();
+    bytes.extend(std::fs::read(&path).unwrap());
+    std::fs::write(&path, bytes).unwrap();
+    assert_eq!(lib.read_board(board.id).unwrap(), board);
+}
+
+#[test]
 fn media_trash_and_restore() {
     let dir = tempfile::tempdir().unwrap();
     let lib = Library::create(dir.path(), "x", 1).unwrap();

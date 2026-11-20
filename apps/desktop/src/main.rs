@@ -54,6 +54,40 @@ struct Shell {
     videos: video::Videos,
     /// Frame WALL_SCREENSHOT is taken at (WALL_SCREENSHOT_FRAME, default 3).
     screenshot_frame: u32,
+    /// Video preview frames for the library drawer, decoded off the UI thread.
+    posters: LibraryPosters,
+}
+
+/// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
+type PosterResult = (wall_app::ContentHash, Option<(Vec<u8>, u32, u32)>);
+
+/// Grabs one frame per video the library drawer asks for, on worker threads.
+struct LibraryPosters {
+    tx: std::sync::mpsc::Sender<PosterResult>,
+    rx: std::sync::mpsc::Receiver<PosterResult>,
+}
+
+impl Default for LibraryPosters {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx }
+    }
+}
+
+impl LibraryPosters {
+    /// Starts decodes for frames the drawer wants and hands back finished ones.
+    fn pump(&self, app: &mut App) {
+        for (hash, path, w, h, at) in app.library_posters_wanted() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let frame = video::poster(&path, w, h, at).map(|px| (px, w, h));
+                let _ = tx.send((hash, frame));
+            });
+        }
+        while let Ok((hash, frame)) = self.rx.try_recv() {
+            app.set_library_poster(hash, frame);
+        }
+    }
 }
 
 impl Shell {
@@ -288,8 +322,10 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
+                self.posters.pump(&mut self.app);
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
-                if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && self.videos.settled(1500)) {
+                let settled = self.videos.settled(1500) && !self.app.library_waiting();
+                if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
                         Ok(()) => println!("wall: saved {path}"),
                         Err(e) => eprintln!("wall: screenshot failed: {e}"),
@@ -312,7 +348,7 @@ impl ApplicationHandler for Shell {
             }
             _ => {}
         }
-        if self.app.needs_redraw || self.videos.busy() {
+        if self.app.needs_redraw || self.videos.busy() || self.app.library_waiting() {
             gfx.window.request_redraw();
         }
         if let Err(e) = self.app.save_if_dirty() {
@@ -442,6 +478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor: [0.0, 0.0],
         videos: video::Videos::default(),
         screenshot_frame: std::env::var("WALL_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+        posters: LibraryPosters::default(),
     };
     event_loop.run_app(&mut shell)?;
     Ok(())
