@@ -10,6 +10,8 @@ mod library_view;
 mod picture_loader;
 mod scene;
 mod snap;
+pub mod theme;
+mod grid;
 pub mod video;
 
 use std::collections::{BTreeSet, HashMap};
@@ -259,6 +261,8 @@ pub struct App {
     pub desktop: bool,
     /// The library drawer, while open (L).
     library_view: Option<library_view::LibraryView>,
+    /// Dots on the board (G or View > Show grid).
+    show_grid: bool,
     /// Loads pictures as they come on screen (previews, then full size).
     loader: picture_loader::Loader,
 }
@@ -286,7 +290,11 @@ pub enum AppError {
     Other(String),
 }
 
-const BACKGROUND: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
+/// The board colour of the current theme.
+#[allow(non_snake_case)]
+fn BACKGROUND() -> [f32; 4] {
+    theme::t().background
+}
 
 impl App {
     pub fn new(board: Board, device: &str) -> Self {
@@ -324,6 +332,7 @@ impl App {
             shell_commands: Vec::new(),
             desktop: false,
             library_view: None,
+            show_grid: true,
             loader: Default::default(),
         }
     }
@@ -1278,6 +1287,7 @@ impl App {
             Key::Char('-' | '_') => self.run_command(menu::Command::ZoomOut),
             Key::Char('z' | 'Z') => self.run_command(menu::Command::ActualSize),
             Key::Char('l' | 'L') => self.toggle_library(),
+            Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::Find => {}
@@ -1951,7 +1961,7 @@ impl App {
         let scene = &self.scene;
         let pixels = renderer
             .render_to_pixels(size, |r| {
-                r.begin_frame(size, BACKGROUND);
+                r.begin_frame(size, BACKGROUND());
                 // Always the full-size picture, whatever its size in the export.
                 scene.draw(r, &view, &|h, _| textures.get(h).map(|id| (*id, [0.0, 0.0, 1.0, 1.0])));
             })
@@ -2001,10 +2011,13 @@ impl App {
             }
         }
         if let Some(r) = caret {
-            overlays.push(wall_render::BoxInstance { rect: r, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
+            overlays.push(wall_render::BoxInstance { rect: r, fill: theme::t().accent, stroke: [0.0; 4], shape: [0.0, 0.0] });
         }
 
-        renderer.begin_frame(size_px, BACKGROUND);
+        renderer.begin_frame(size_px, BACKGROUND());
+        if self.show_grid {
+            self.draw_grid(renderer);
+        }
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
         self.scene.draw(renderer, &view, &|h, px| self.picture_texture(h, px));
         let dim: Vec<wall_render::BoxInstance> = self
@@ -2012,7 +2025,11 @@ impl App {
             .iter()
             .map(|i| wall_render::BoxInstance {
                 rect: [i.frame.x as f32 - 1.0, i.frame.y as f32 - 1.0, i.frame.w as f32 + 2.0, i.frame.h as f32 + 2.0],
-                fill: [BACKGROUND[0] * 0.85, BACKGROUND[1] * 0.85, BACKGROUND[2] * 0.85, 0.85],
+                // Fade toward the board colour (works in both themes).
+                fill: {
+                    let b = BACKGROUND();
+                    [b[0], b[1], b[2], 0.85]
+                },
                 stroke: [0.0; 4],
                 shape: [0.0, 0.0],
             })
@@ -2027,15 +2044,15 @@ impl App {
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
             let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, menu::BAR + 12.0], self.viewport);
-            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: [0.1, 0.105, 0.12, 0.97], stroke: [0.36, 0.62, 1.0, 1.0], shape: [8.0 * px, 1.5 * px] };
+            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: theme::t().search_bg, stroke: theme::t().accent, shape: [8.0 * px, 1.5 * px] };
             renderer.draw_boxes(&view, &[bx]);
             let shown = if query.is_empty() { "Search this board".to_owned() } else { query.clone() };
-            let colour = if query.is_empty() { [0.5, 0.52, 0.58, 1.0] } else { [0.92, 0.92, 0.94, 1.0] };
+            let colour = if query.is_empty() { theme::t().dim } else { theme::t().ink };
             let count = if query.is_empty() { String::new() } else { format!("{at} of {total}") };
             let mut glyphs = Vec::new();
             scene::add_text(&mut self.font, &mut glyphs, &shown, [tl[0] + 14.0 * px, tl[1] + 26.0 * px], 15.0 * px, colour);
             let cw = self.font.layout_line(&count).width * 13.0 * px;
-            scene::add_text(&mut self.font, &mut glyphs, &count, [tl[0] + (w - 14.0) * px - cw, tl[1] + 26.0 * px], 13.0 * px, [0.6, 0.62, 0.68, 1.0]);
+            scene::add_text(&mut self.font, &mut glyphs, &count, [tl[0] + (w - 14.0) * px - cw, tl[1] + 26.0 * px], 13.0 * px, theme::t().dim);
             if self.font.atlas.dirty {
                 renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
                 self.font.atlas.dirty = false;
@@ -2519,6 +2536,8 @@ impl App {
             }
             C::TogglePanel => self.panel_open = !self.panel_open,
             C::ToggleLibrary => self.toggle_library(),
+            C::ToggleTheme => self.set_light_mode(!theme::is_light()),
+            C::ToggleGrid => self.set_grid(!self.show_grid),
             C::GoUp => self.go_up(),
         }
     }

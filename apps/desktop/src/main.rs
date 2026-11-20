@@ -64,6 +64,8 @@ struct Shell {
     title: String,
     /// An old-Wall import running in the background.
     old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
+    /// Light mode and grid as last saved to settings.
+    saved_look: (bool, bool),
 }
 
 /// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
@@ -340,13 +342,26 @@ mod settings {
         p.join("wall.json").is_file().then_some(p)
     }
 
+    pub fn get_bool(key: &str) -> Option<bool> {
+        read().get(key).and_then(|v| v.as_bool())
+    }
+
+    pub fn set_bool(key: &str, val: bool) {
+        save(key, val.into());
+    }
+
     pub fn remember_library(path: &Path) {
-        let Some(f) = file() else { return };
-        let mut s = read();
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
         // canonicalize gives \\?\C:\… on Windows; keep the plain form.
         let abs = abs.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
-        s.insert("last_library".into(), abs.into());
+        save("last_library", abs.into());
+    }
+
+    /// Sets one key, keeping the others.
+    fn save(key: &str, val: serde_json::Value) {
+        let Some(f) = file() else { return };
+        let mut s = read();
+        s.insert(key.into(), val);
         let write = || -> std::io::Result<()> {
             if let Some(d) = f.parent() {
                 std::fs::create_dir_all(d)?;
@@ -592,6 +607,17 @@ impl ApplicationHandler for Shell {
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
                 self.posters.pump(&mut self.app);
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                // Remember a changed theme or grid (View menu, G key).
+                let look = (self.app.light_mode(), self.app.grid());
+                if look != self.saved_look {
+                    if look.0 != self.saved_look.0 {
+                        settings::set_bool("light_mode", look.0);
+                    }
+                    if look.1 != self.saved_look.1 {
+                        settings::set_bool("grid", look.1);
+                    }
+                    self.saved_look = look;
+                }
                 let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     // WALL_EXPORT=board.png also exports the board (tests).
@@ -746,6 +772,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     app.desktop = true;
+    // Theme and grid from settings; WALL_THEME=light|dark overrides (tests).
+    let light = match std::env::var("WALL_THEME").ok().as_deref() {
+        Some("light") => true,
+        Some("dark") => false,
+        _ => settings::get_bool("light_mode").unwrap_or(false),
+    };
+    app.set_light_mode(light);
+    let grid = settings::get_bool("grid").unwrap_or(true);
+    app.set_grid(grid);
     // WALL_BOARD=<board id> opens that board of the library at start (tests).
     if let Some(id) = std::env::var("WALL_BOARD").ok().and_then(|s| s.trim().parse::<uuid::Uuid>().ok()) {
         app.open_board(id, true);
@@ -774,6 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         posters: LibraryPosters::default(),
         title,
         old_import: None,
+        saved_look: (light, grid),
     };
     event_loop.run_app(&mut shell)?;
     Ok(())

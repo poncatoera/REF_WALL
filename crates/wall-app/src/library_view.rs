@@ -24,12 +24,6 @@ const HEADER_H: f32 = 40.0;
 /// Thumbnails are decoded at most this wide or tall.
 pub const THUMB_PX: u32 = 256;
 
-const BG: [f32; 4] = panel::BG;
-const LINE: [f32; 4] = [0.2, 0.21, 0.24, 1.0];
-const TILE: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
-const INK: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
-const DIM: [f32; 4] = [0.56, 0.58, 0.64, 1.0];
-const ACCENT: [f32; 4] = [0.36, 0.62, 1.0, 1.0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -148,7 +142,7 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     let w = (viewport[0] - 2.0 * MARGIN - right_inset).max(TILE_W + 2.0 * PAD);
     let (x0, y0) = (MARGIN, viewport[1] - MARGIN - h);
     l.rect = [x0, y0, w, h];
-    l.rect([x0, y0, w, h], BG, LINE, 10.0);
+    l.rect([x0, y0, w, h], BG(), LINE(), 10.0);
 
     // Header: tabs, hint, close.
     let mut x = x0 + PAD;
@@ -156,9 +150,9 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     let mut tab = |l: &mut Layout, label: String, t: Tab, x: &mut f32| {
         let on = view.tab == t;
         let tw = panel::text_width(font, &label, 12.5);
-        l.text(label, [*x, ty], 12.5, if on { INK } else { DIM });
+        l.text(label, [*x, ty], 12.5, if on { INK() } else { DIM() });
         if on {
-            l.rect([*x, ty + 6.0, tw, 2.0], ACCENT, [0.0; 4], 1.0);
+            l.rect([*x, ty + 6.0, tw, 2.0], ACCENT(), [0.0; 4], 1.0);
         }
         l.hits.push(([*x - 6.0, y0 + 6.0, tw + 12.0, 30.0], Action::Tab(t)));
         *x += tw + 24.0;
@@ -175,8 +169,8 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     let hint_max = (close[0] - 16.0 - x).max(0.0);
     let hint = panel::fit(font, hint, 11.5, hint_max);
     let hint_w = panel::text_width(font, &hint, 11.5);
-    l.text(hint, [close[0] - 16.0 - hint_w, ty], 11.5, DIM);
-    l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM);
+    l.text(hint, [close[0] - 16.0 - hint_w, ty], 11.5, DIM());
+    l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM());
     l.hits.push((close, Action::Close));
 
     // Grid.
@@ -194,14 +188,14 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
             Tab::All => "Nothing here yet. Drop pictures or videos on the window.",
             Tab::Trash => "The trash is empty.",
         };
-        l.text(msg, [gx, gy + 40.0], 13.0, DIM);
+        l.text(msg, [gx, gy + 40.0], 13.0, DIM());
     }
     for (i, sc) in shown.iter().enumerate().skip(first).take(cols * rows) {
         let k = i - first;
         let (c, r) = ((k % cols) as f32, (k / cols) as f32);
         let tile = [gx + c * (TILE_W + GAP), gy + r * (TILE_H + GAP), TILE_W, TILE_H];
         let area = [tile[0], tile[1], TILE_W, IMAGE_H];
-        l.rect(area, TILE, LINE, 6.0);
+        l.rect(area, TILE(), LINE(), 6.0);
         l.visible.push(sc.hash.clone());
         let inner = [area[0] + 4.0, area[1] + 4.0, area[2] - 8.0, area[3] - 8.0];
         // Pictures, and videos' preview frames once the shell sends them.
@@ -212,19 +206,19 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
             let dw = panel::text_width(font, &d, 11.0);
             let pill = [area[0] + 8.0, area[1] + area[3] - 26.0, dw + 30.0, 18.0];
             l.top_boxes.push(PanelBox { rect: pill, fill: [0.0, 0.0, 0.0, 0.6], stroke: [0.0; 4], radius: 9.0, stroke_w: 0.0 });
-            l.text("▶", [pill[0] + 7.0, pill[1] + 13.5], 10.0, INK);
-            l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, INK);
+            l.text("▶", [pill[0] + 7.0, pill[1] + 13.5], 10.0, INK());
+            l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, INK());
         }
         let title = sc.title.clone().unwrap_or_else(|| format!("{} × {}", sc.width, sc.height));
         let title = panel::fit(font, &title, 12.0, TILE_W - 4.0);
-        l.text(title, [tile[0] + 2.0, tile[1] + IMAGE_H + 17.0], 12.0, DIM);
+        l.text(title, [tile[0] + 2.0, tile[1] + IMAGE_H + 17.0], 12.0, DIM());
 
         match view.tab {
             Tab::All => {
                 l.hits.push((tile, Action::Place(sc.hash.clone())));
                 let x = [area[0] + area[2] - 26.0, area[1] + 6.0, 20.0, 20.0];
                 l.top_boxes.push(PanelBox { rect: x, fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], radius: 10.0, stroke_w: 0.0 });
-                l.text("×", [x[0] + 5.0, x[1] + 15.0], 15.0, INK);
+                l.text("×", [x[0] + 5.0, x[1] + 15.0], 15.0, INK());
                 l.hits.push((x, Action::Trash(sc.hash.clone())));
             }
             Tab::Trash => l.hits.push((tile, Action::Restore(sc.hash.clone()))),
@@ -234,7 +228,7 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
         let shown_rows = rows.min(total_rows);
         let msg = format!("Rows {}–{} of {} · scroll for more", view.scroll_row.min(l.max_scroll_row) + 1, view.scroll_row.min(l.max_scroll_row) + shown_rows, total_rows);
         let mw = panel::text_width(font, &msg, 11.0);
-        l.text(msg, [x0 + w - PAD - mw, y0 + h - 6.0], 11.0, DIM);
+        l.text(msg, [x0 + w - PAD - mw, y0 + h - 6.0], 11.0, DIM());
     }
     l
 }
@@ -401,6 +395,32 @@ mod tests {
 // ---- App side: open/close, clicks, drawing --------------------------------
 
 use crate::{App, Picture};
+
+// Colours come from the theme (dark / light mode).
+#[allow(non_snake_case)]
+fn BG() -> [f32; 4] {
+    crate::theme::t().panel_bg
+}
+#[allow(non_snake_case)]
+fn LINE() -> [f32; 4] {
+    crate::theme::t().line
+}
+#[allow(non_snake_case)]
+fn TILE() -> [f32; 4] {
+    crate::theme::t().tile
+}
+#[allow(non_snake_case)]
+fn INK() -> [f32; 4] {
+    crate::theme::t().ink
+}
+#[allow(non_snake_case)]
+fn DIM() -> [f32; 4] {
+    crate::theme::t().dim
+}
+#[allow(non_snake_case)]
+fn ACCENT() -> [f32; 4] {
+    crate::theme::t().accent
+}
 
 impl App {
     /// Opens or closes the library drawer (L).

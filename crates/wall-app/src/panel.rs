@@ -7,6 +7,36 @@
 
 use wall_text::Font;
 
+// Colours come from the theme (dark / light mode).
+#[allow(non_snake_case)]
+pub fn BG() -> [f32; 4] {
+    crate::theme::t().panel_bg
+}
+#[allow(non_snake_case)]
+fn LINE() -> [f32; 4] {
+    crate::theme::t().line
+}
+#[allow(non_snake_case)]
+fn FIELD() -> [f32; 4] {
+    crate::theme::t().field
+}
+#[allow(non_snake_case)]
+fn INK() -> [f32; 4] {
+    crate::theme::t().ink
+}
+#[allow(non_snake_case)]
+fn DIM() -> [f32; 4] {
+    crate::theme::t().dim
+}
+#[allow(non_snake_case)]
+fn ACCENT() -> [f32; 4] {
+    crate::theme::t().accent
+}
+#[allow(non_snake_case)]
+fn CHIP() -> [f32; 4] {
+    crate::theme::t().chip
+}
+
 /// Panel width in screen pixels.
 pub const WIDTH: f32 = 288.0;
 /// Gap between the panel and the window edge.
@@ -18,13 +48,6 @@ const PAD: f32 = 16.0;
 pub const PALETTE: [&str; 7] = ["#e5534b", "#e8a15d", "#e6c84f", "#57ab5a", "#7aa2f7", "#b083f0", "#8b8f98"];
 const SPEEDS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 
-pub const BG: [f32; 4] = [0.105, 0.11, 0.125, 1.0];
-const LINE: [f32; 4] = [0.2, 0.21, 0.24, 1.0];
-const FIELD: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
-const INK: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
-const DIM: [f32; 4] = [0.56, 0.58, 0.64, 1.0];
-const ACCENT: [f32; 4] = [0.36, 0.62, 1.0, 1.0];
-const CHIP: [f32; 4] = [0.17, 0.19, 0.24, 1.0];
 
 /// Which text field of the panel has the keyboard.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,9 +211,9 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     let mut y = TOP + PAD;
 
     // Header: kind and a close button.
-    l.text(info.kind.to_uppercase(), [left, y + 11.0], 11.5, DIM);
+    l.text(info.kind.to_uppercase(), [left, y + 11.0], 11.5, DIM());
     let close = [x0 + WIDTH - PAD - 18.0, y - 4.0, 22.0, 22.0];
-    l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM);
+    l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM());
     l.hits.push((close, Action::Close));
     y += 26.0;
 
@@ -198,11 +221,11 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     if let Some(title) = &info.title {
         let r = [left, y, inner, 34.0];
         let typing = edit.filter(|e| e.field == Field::Title);
-        l.rect(r, FIELD, if typing.is_some() { ACCENT } else { LINE }, 6.0);
+        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
         let (shown, colour) = match typing {
-            Some(e) => (e.text.clone(), INK),
-            None if title.is_empty() => (info.title_hint.clone(), DIM),
-            None => (title.clone(), INK),
+            Some(e) => (e.text.clone(), INK()),
+            None if title.is_empty() => (info.title_hint.clone(), DIM()),
+            None => (title.clone(), INK()),
         };
         let size = 15.0;
         let shown = if typing.is_some() { shown } else { fit(font, &shown, size, inner - 20.0) };
@@ -217,17 +240,17 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
 
     // Detail rows.
     for (label, value) in &info.rows {
-        l.text(label.clone(), [left, y + 12.0], 12.5, DIM);
+        l.text(label.clone(), [left, y + 12.0], 12.5, DIM());
         let vx = left + 84.0;
         let value = fit(font, value, 12.5, inner - 84.0);
-        l.text(value, [vx, y + 12.0], 12.5, INK);
+        l.text(value, [vx, y + 12.0], 12.5, INK());
         y += 20.0;
     }
     if !info.palette.is_empty() {
-        l.text("Colours", [left, y + 12.0], 12.5, DIM);
+        l.text("Colours", [left, y + 12.0], 12.5, DIM());
         let mut x = left + 84.0;
         for c in &info.palette {
-            l.rect([x, y + 1.0, 14.0, 14.0], parse_hex(c).unwrap_or(DIM), LINE, 7.0);
+            l.rect([x, y + 1.0, 14.0, 14.0], parse_hex(c).unwrap_or(DIM()), LINE(), 7.0);
             x += 20.0;
         }
         y += 20.0;
@@ -239,21 +262,21 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Video controls: play/pause and speed.
     if let Some(v) = &info.video {
         divider(&mut l, x0, &mut y);
-        l.text("PLAYBACK", [left, y + 11.0], 11.0, DIM);
+        l.text("PLAYBACK", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let play = [left, y, 64.0, 28.0];
-        l.rect(play, FIELD, LINE, 6.0);
-        l.text(if v.playing { "Pause" } else { "Play" }, [play[0] + 12.0, play[1] + 19.0], 13.0, INK);
+        l.rect(play, FIELD(), LINE(), 6.0);
+        l.text(if v.playing { "Pause" } else { "Play" }, [play[0] + 12.0, play[1] + 19.0], 13.0, INK());
         l.hits.push((play, Action::PlayPause));
         let mut x = left + 72.0;
         let bw = (inner - 72.0 - 4.0 * 4.0) / SPEEDS.len() as f32;
         for s in SPEEDS {
             let r = [x, y, bw, 28.0];
             let on = (s - v.speed).abs() < 1e-3;
-            l.rect(r, if on { ACCENT } else { FIELD }, if on { ACCENT } else { LINE }, 6.0);
+            l.rect(r, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
             let t = format!("{}×", trim_float(s));
             let tw = text_width(font, &t, 12.0);
-            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { [1.0; 4] } else { INK });
+            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { [1.0; 4] } else { INK() });
             l.hits.push((r, Action::Speed(s)));
             x += bw + 4.0;
         }
@@ -261,13 +284,13 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         match v.range {
             Some((a, b)) => {
                 let t = format!("In {}   Out {}", crate::video::format_time(a), crate::video::format_time(b));
-                l.text(t, [left, y + 17.0], 12.5, INK);
+                l.text(t, [left, y + 17.0], 12.5, INK());
                 let r = [left + inner - 60.0, y, 60.0, 24.0];
-                l.rect(r, FIELD, LINE, 6.0);
-                l.text("Clear", [r[0] + 14.0, r[1] + 16.5], 12.5, INK);
+                l.rect(r, FIELD(), LINE(), 6.0);
+                l.text("Clear", [r[0] + 14.0, r[1] + 16.5], 12.5, INK());
                 l.hits.push((r, Action::ClearRange));
             }
-            None => l.text("I and O set in and out points", [left, y + 17.0], 12.5, DIM),
+            None => l.text("I and O set in and out points", [left, y + 17.0], 12.5, DIM()),
         }
         y += 24.0 + 14.0;
     }
@@ -275,7 +298,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Colour swatches.
     if let Some(current) = &info.color {
         divider(&mut l, x0, &mut y);
-        l.text("COLOUR", [left, y + 11.0], 11.0, DIM);
+        l.text("COLOUR", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let n = PALETTE.len() + 1;
         let s = 26.0;
@@ -285,10 +308,10 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let colour = (k > 0).then(|| PALETTE[k - 1].to_owned());
             let on = *current == colour;
             match &colour {
-                Some(c) => l.rect(r, parse_hex(c).unwrap_or(INK), if on { INK } else { [0.0; 4] }, s / 2.0),
+                Some(c) => l.rect(r, parse_hex(c).unwrap_or(INK()), if on { INK() } else { [0.0; 4] }, s / 2.0),
                 None => {
-                    l.rect(r, FIELD, if on { INK } else { LINE }, s / 2.0);
-                    l.text("/", [r[0] + 10.0, r[1] + 18.0], 14.0, DIM);
+                    l.rect(r, FIELD(), if on { INK() } else { LINE() }, s / 2.0);
+                    l.text("/", [r[0] + 10.0, r[1] + 18.0], 14.0, DIM());
                 }
             }
             if on {
@@ -302,7 +325,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Tags: chips with a remove button, then an "add tag" box.
     if let Some(tags) = &info.tags {
         divider(&mut l, x0, &mut y);
-        l.text("TAGS", [left, y + 11.0], 11.0, DIM);
+        l.text("TAGS", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let (h, size) = (24.0, 12.5);
         let mut x = left;
@@ -315,11 +338,11 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             }
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
-            l.rect(r, if on { ACCENT } else { CHIP }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK });
+            l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
+            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
-            l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM);
+            l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM());
             l.hits.push((xr, Action::RemoveTag(tag.clone())));
             x += w + 6.0;
         }
@@ -327,7 +350,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             y += h + 8.0;
         }
         if !info.suggested.is_empty() {
-            l.text("Suggested", [left, y + 12.0], 11.5, DIM);
+            l.text("Suggested", [left, y + 12.0], 11.5, DIM());
             y += 18.0;
             let mut x = left;
             for tag in &info.suggested {
@@ -338,14 +361,14 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
                     y += h + 6.0;
                 }
                 let r = [x, y, w, h];
-                l.rect(r, FIELD, LINE, h / 2.0);
-                l.text(label, [x + 10.0, y + 16.5], size, DIM);
+                l.rect(r, FIELD(), LINE(), h / 2.0);
+                l.text(label, [x + 10.0, y + 16.5], size, DIM());
                 l.hits.push((r, Action::FilterTag(tag.clone())));
                 let add = [x + w - 44.0, y + 2.0, 20.0, 20.0];
-                l.text("+", [add[0] + 4.0, add[1] + 15.0], 15.0, ACCENT);
+                l.text("+", [add[0] + 4.0, add[1] + 15.0], 15.0, ACCENT());
                 l.hits.push((add, Action::AcceptTag(tag.clone())));
                 let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
-                l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM);
+                l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM());
                 l.hits.push((xr, Action::DismissTag(tag.clone())));
                 x += w + 6.0;
             }
@@ -353,14 +376,14 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         }
         let r = [left, y, inner, 30.0];
         let typing = edit.filter(|e| e.field == Field::Tag);
-        l.rect(r, FIELD, if typing.is_some() { ACCENT } else { LINE }, 6.0);
+        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
         match typing {
             Some(e) => {
-                l.text(e.text.clone(), [r[0] + 10.0, r[1] + 20.0], 13.0, INK);
+                l.text(e.text.clone(), [r[0] + 10.0, r[1] + 20.0], 13.0, INK());
                 let w = text_width(font, &e.text, 13.0);
                 l.caret = Some([r[0] + 10.0 + w + 1.0, r[1] + 7.0, 1.5, 16.0]);
             }
-            None => l.text("Add a tag", [r[0] + 10.0, r[1] + 20.0], 13.0, DIM),
+            None => l.text("Add a tag", [r[0] + 10.0, r[1] + 20.0], 13.0, DIM()),
         }
         l.hits.push((r, Action::Edit(Field::Tag)));
         y += 30.0 + 16.0;
@@ -369,10 +392,10 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Board panel: every tag with its count; a click filters the board.
     if let Some(tags) = &info.board_tags {
         divider(&mut l, x0, &mut y);
-        l.text("TAGS ON THIS BOARD", [left, y + 11.0], 11.0, DIM);
+        l.text("TAGS ON THIS BOARD", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         if tags.is_empty() {
-            l.text("No tags yet. Select a picture to add some.", [left, y + 13.0], 12.5, DIM);
+            l.text("No tags yet. Select a picture to add some.", [left, y + 13.0], 12.5, DIM());
             y += 22.0;
         }
         let (h, size) = (24.0, 12.5);
@@ -388,9 +411,9 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             }
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
-            l.rect(r, if on { ACCENT } else { CHIP }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK });
-            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { [1.0; 4] } else { DIM });
+            l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
+            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
+            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { [1.0; 4] } else { DIM() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             x += w + 6.0;
         }
@@ -402,22 +425,22 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     if info.can_open {
         divider(&mut l, x0, &mut y);
         let r = [left, y, inner, 32.0];
-        l.rect(r, FIELD, LINE, 6.0);
+        l.rect(r, FIELD(), LINE(), 6.0);
         let t = "Open board";
         let tw = text_width(font, t, 13.5);
-        l.text(t, [r[0] + (inner - tw) / 2.0, r[1] + 21.0], 13.5, INK);
+        l.text(t, [r[0] + (inner - tw) / 2.0, r[1] + 21.0], 13.5, INK());
         l.hits.push((r, Action::OpenBoard));
         y += 32.0 + 16.0;
     }
 
     let h = (y - TOP).max(60.0).min(viewport[1] - TOP - MARGIN);
     l.rect = [x0, TOP, WIDTH, h];
-    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG, stroke: LINE, radius: 10.0, stroke_w: 1.0 });
+    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG(), stroke: LINE(), radius: 10.0, stroke_w: 1.0 });
     l
 }
 
 fn divider(l: &mut Layout, x0: f32, y: &mut f32) {
-    l.rect([x0 + 1.0, *y, WIDTH - 2.0, 1.0], LINE, [0.0; 4], 0.0);
+    l.rect([x0 + 1.0, *y, WIDTH - 2.0, 1.0], LINE(), [0.0; 4], 0.0);
     *y += 14.0;
 }
 

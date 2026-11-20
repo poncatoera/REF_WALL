@@ -19,6 +19,23 @@ struct State {
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
+    /// Light mode and grid as last saved to localStorage.
+    saved_look: (bool, bool),
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// Remembers the theme and grid, and tells the page (its background).
+fn save_look(light: bool, grid: bool) {
+    if let Some(st) = storage() {
+        let _ = st.set_item("wall.light", if light { "1" } else { "0" });
+        let _ = st.set_item("wall.grid", if grid { "1" } else { "0" });
+    }
+    if let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+        let _ = root.set_attribute("data-theme", if light { "light" } else { "dark" });
+    }
 }
 
 impl State {
@@ -177,10 +194,16 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         .dyn_into()?;
     let gl = glow::Context::from_webgl2_context(webgl);
     let renderer = unsafe { Renderer::new(gl, GlslTarget::Es300) }.map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let app = App::demo(2000);
+    let mut app = App::demo(2000);
+    // Theme and grid as the person left them.
+    let stored = |k: &str| storage().and_then(|s| s.get_item(k).ok().flatten());
+    let light = stored("wall.light").as_deref() == Some("1");
+    let grid = stored("wall.grid").as_deref() != Some("0");
+    app.set_light_mode(light);
+    app.set_grid(grid);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone() }));
+    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone(), saved_look: (light, grid) }));
 
     fn pos(e: &PointerEvent) -> [f32; 2] {
         [e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]
@@ -427,6 +450,11 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             if s.app.needs_redraw {
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);
+            }
+            let look = (s.app.light_mode(), s.app.grid());
+            if look != s.saved_look {
+                s.saved_look = look;
+                save_look(look.0, look.1);
             }
         }
         request_frame(frame.borrow().as_ref().unwrap());

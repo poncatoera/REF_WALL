@@ -6,8 +6,13 @@
   <title>Wall</title>
   <style>
     html, body { margin: 0; height: 100%; background: #131416; overflow: hidden; }
+    html[data-theme="light"], html[data-theme="light"] body { background: #f3f3f5; }
     canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
   </style>
+  <script>
+    // The theme Wall last used (it keeps this in sync), before the first frame.
+    try { if (localStorage.getItem("wall.light") === "1") document.documentElement.dataset.theme = "light"; } catch (e) {}
+  </script>
 </head>
 <body>
   <canvas id="wall"></canvas>

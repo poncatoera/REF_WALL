@@ -11,10 +11,28 @@ use wall_text::Font;
 
 use crate::doc::Document;
 
-const ACCENT: [f32; 4] = [0.36, 0.62, 1.0, 1.0];
-const NOTE_FILL: [f32; 4] = [0.13, 0.135, 0.15, 1.0];
-const NOTE_STROKE: [f32; 4] = [0.24, 0.25, 0.28, 1.0];
-const TEXT: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
+// Colours come from the theme (dark / light mode).
+#[allow(non_snake_case)]
+fn ACCENT() -> [f32; 4] {
+    crate::theme::t().accent
+}
+#[allow(non_snake_case)]
+fn NOTE_FILL() -> [f32; 4] {
+    crate::theme::t().card_fill
+}
+#[allow(non_snake_case)]
+fn NOTE_STROKE() -> [f32; 4] {
+    crate::theme::t().card_stroke
+}
+#[allow(non_snake_case)]
+fn TEXT() -> [f32; 4] {
+    crate::theme::t().text
+}
+#[allow(non_snake_case)]
+pub fn ARROW_COLOR() -> [f32; 4] {
+    crate::theme::t().arrow
+}
+
 
 struct CachedText {
     key: (String, u32, u32, u32),
@@ -149,16 +167,16 @@ impl Scene {
                     let c = parse_hex(color.as_deref()).unwrap_or([0.6, 0.6, 0.65]);
                     run.boxes.push(BoxInstance {
                         rect,
-                        fill: [c[0] * 0.06, c[1] * 0.06, c[2] * 0.06, 0.6],
-                        stroke: [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 0.9],
+                        fill: crate::theme::tinted_group(c).0,
+                        stroke: crate::theme::tinted_group(c).1,
                         shape: [10.0, 1.5],
                     });
-                    label = Some((name.as_str(), [c[0], c[1], c[2], 1.0]));
+                    label = Some((name.as_str(), crate::theme::group_label(c)));
                 }
                 ItemKind::Media { hash, crop } => {
                     // Placeholder under the picture, seen until its pixels (or a
                     // video's first frame) arrive.
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [6.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [6.0, 1.0] });
                     run.images.push((hash.clone(), ImageInstance {
                         rect,
                         params: [1.0, 6.0, 0.0, 0.0],
@@ -167,28 +185,28 @@ impl Scene {
                 }
                 ItemKind::Note { text, color } => {
                     let tint = parse_hex(color.as_deref());
-                    let fill = tint.map(|c| [c[0] * 0.42, c[1] * 0.42, c[2] * 0.42, 1.0]).unwrap_or(NOTE_FILL);
-                    let stroke = tint.map(|c| [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, 1.0]).unwrap_or(NOTE_STROKE);
+                    let fill = tint.map(|c| crate::theme::tinted_note(c).0).unwrap_or(NOTE_FILL());
+                    let stroke = tint.map(|c| crate::theme::tinted_note(c).1).unwrap_or(NOTE_STROKE());
                     run.boxes.push(BoxInstance { rect, fill, stroke, shape: [8.0, 1.0] });
-                    label = Some((text.as_str(), TEXT));
+                    label = Some((text.as_str(), TEXT()));
                 }
                 ItemKind::Label { text } => {
-                    label = Some((text.as_str(), [1.0; 4]));
+                    label = Some((text.as_str(), TEXT()));
                 }
                 ItemKind::Todo { title, entries } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
                     // Title on top, then one row per entry with a tick box.
                     let shown = todo_rows_that_fit(rect[3], entries.len());
                     for (k, e) in entries.iter().take(shown).enumerate() {
                         let b = todo_box(rect, k);
-                        let (fill, stroke) = if e.done { (ACCENT, ACCENT) } else { (NOTE_FILL, [0.45, 0.47, 0.52, 1.0]) };
+                        let (fill, stroke) = if e.done { (ACCENT(), ACCENT()) } else { (NOTE_FILL(), crate::theme::t().todo_box) };
                         run.boxes.push(BoxInstance { rect: b, fill, stroke, shape: [3.0, 1.5] });
                         if e.done {
                             // A tick: two short strokes.
                             run.curves.push(CurveInstance { p01: [b[0] + 3.5, b[1] + 8.0, b[0] + 6.0, b[1] + 10.5], p2w: [b[0] + 6.5, b[1] + 11.5, 2.0, 0.0], color: [1.0; 4] });
                             run.curves.push(CurveInstance { p01: [b[0] + 6.5, b[1] + 11.5, b[0] + 9.5, b[1] + 7.5], p2w: [b[0] + 12.5, b[1] + 4.0, 2.0, 0.0], color: [1.0; 4] });
                         }
-                        let ink = if e.done { [0.5, 0.52, 0.57, 1.0] } else { TEXT };
+                        let ink = if e.done { crate::theme::t().text_done } else { TEXT() };
                         let max = rect[2] - TODO_TEXT_X - 12.0;
                         let text = clip_line(font, &e.text, TODO_SIZE, max);
                         add_text(font, &mut run.glyphs, &text, [rect[0] + TODO_TEXT_X, b[1] + 13.5], TODO_SIZE, ink);
@@ -199,33 +217,33 @@ impl Scene {
                     }
                     if shown < entries.len() {
                         let more = format!("+{} more", entries.len() - shown);
-                        add_text(font, &mut run.glyphs, &more, [rect[0] + TODO_TEXT_X, todo_box(rect, shown)[1] + 13.5], 13.0, [0.5, 0.52, 0.57, 1.0]);
+                        add_text(font, &mut run.glyphs, &more, [rect[0] + TODO_TEXT_X, todo_box(rect, shown)[1] + 13.5], 13.0, crate::theme::t().text_done);
                     }
                     if !title.is_empty() {
                         let t = clip_line(font, title, 17.0, rect[2] - 28.0);
-                        add_text(font, &mut run.glyphs, &t, [rect[0] + 14.0, rect[1] + 30.0], 17.0, TEXT);
+                        add_text(font, &mut run.glyphs, &t, [rect[0] + 14.0, rect[1] + 30.0], 17.0, TEXT());
                     }
                 }
                 ItemKind::Board { board_id } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: ACCENT(), shape: [8.0, 1.5] });
                     // A small stack mark in the corner says "this opens".
                     let px = 10.0;
                     for k in 0..2 {
                         let o = 6.0 * k as f32;
                         run.boxes.push(BoxInstance {
                             rect: [rect[0] + rect[2] - 34.0 + o, rect[1] + rect[3] - 30.0 - o, 22.0, 16.0],
-                            fill: NOTE_FILL,
-                            stroke: [ACCENT[0] * 0.8, ACCENT[1] * 0.8, ACCENT[2] * 0.8, 1.0],
+                            fill: NOTE_FILL(),
+                            stroke: [ACCENT()[0] * 0.8, ACCENT()[1] * 0.8, ACCENT()[2] * 0.8, 1.0],
                             shape: [3.0, 1.0],
                         });
                         let _ = px;
                     }
                     let name = board_names.get(board_id).map_or("Board", |n| n.as_str());
-                    label = Some((name, TEXT));
+                    label = Some((name, TEXT()));
                 }
                 ItemKind::Arrow { .. } => {
                     if let Some(pts) = arrow {
-                        run.curves.push(arrow_curve(pts, ARROW_COLOR, ARROW_WIDTH));
+                        run.curves.push(arrow_curve(pts, ARROW_COLOR(), ARROW_WIDTH));
                     }
                 }
             }
@@ -357,7 +375,6 @@ fn clip_line(font: &mut Font, text: &str, size: f32, max: f32) -> String {
     String::new()
 }
 
-pub const ARROW_COLOR: [f32; 4] = [0.62, 0.64, 0.7, 1.0];
 pub const ARROW_WIDTH: f32 = 2.5;
 pub const ARROW_HEAD: f32 = 14.0;
 /// Space between an attached arrow end and its item.
@@ -427,7 +444,7 @@ pub fn overlays(doc: &Document, selection: &BTreeSet<Uuid>, marquee: Option<[f32
             BoxInstance {
                 rect: [f.x as f32 - 3.0 * px, f.y as f32 - 3.0 * px, f.w as f32 + 6.0 * px, f.h as f32 + 6.0 * px],
                 fill: [0.0; 4],
-                stroke: ACCENT,
+                stroke: ACCENT(),
                 shape: [6.0 * px, 2.0 * px],
             }
         })
@@ -435,8 +452,8 @@ pub fn overlays(doc: &Document, selection: &BTreeSet<Uuid>, marquee: Option<[f32
     if let Some(m) = marquee {
         out.push(BoxInstance {
             rect: [m[0], m[1], m[2] - m[0], m[3] - m[1]],
-            fill: [ACCENT[0] * 0.12, ACCENT[1] * 0.12, ACCENT[2] * 0.12, 0.12],
-            stroke: [ACCENT[0] * 0.8, ACCENT[1] * 0.8, ACCENT[2] * 0.8, 0.8],
+            fill: [ACCENT()[0] * 0.12, ACCENT()[1] * 0.12, ACCENT()[2] * 0.12, 0.12],
+            stroke: [ACCENT()[0] * 0.8, ACCENT()[1] * 0.8, ACCENT()[2] * 0.8, 0.8],
             shape: [0.0, px],
         });
     }

@@ -6,17 +6,37 @@
 use crate::panel::{fit, text_width, PanelBox, TextRun};
 use wall_text::Font;
 
+// Colours come from the theme (dark / light mode).
+#[allow(non_snake_case)]
+fn BAR_BG() -> [f32; 4] {
+    crate::theme::t().menu_bar
+}
+#[allow(non_snake_case)]
+fn DROP_BG() -> [f32; 4] {
+    crate::theme::t().menu_drop
+}
+#[allow(non_snake_case)]
+fn LINE() -> [f32; 4] {
+    crate::theme::t().line
+}
+#[allow(non_snake_case)]
+fn HOVER() -> [f32; 4] {
+    crate::theme::t().accent
+}
+#[allow(non_snake_case)]
+fn INK() -> [f32; 4] {
+    crate::theme::t().ink
+}
+#[allow(non_snake_case)]
+fn DIM() -> [f32; 4] {
+    crate::theme::t().dim
+}
+
 /// Height of the menu bar in screen pixels.
 pub const BAR: f32 = 30.0;
 const ENTRY_H: f32 = 28.0;
 const DROP_W: f32 = 236.0;
 
-const BAR_BG: [f32; 4] = [0.09, 0.094, 0.105, 1.0];
-const DROP_BG: [f32; 4] = [0.125, 0.13, 0.148, 1.0];
-const LINE: [f32; 4] = [0.2, 0.21, 0.24, 1.0];
-const HOVER: [f32; 4] = [0.36, 0.62, 1.0, 1.0];
-const INK: [f32; 4] = [0.9, 0.9, 0.92, 1.0];
-const DIM: [f32; 4] = [0.55, 0.57, 0.63, 1.0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -45,6 +65,8 @@ pub enum Command {
     ActualSize,
     TogglePanel,
     ToggleLibrary,
+    ToggleTheme,
+    ToggleGrid,
     GoUp,
 }
 
@@ -135,6 +157,8 @@ pub const MENUS: &[Menu] = &[
             SEP,
             ("Show or hide side panel", "P", Some(Command::TogglePanel)),
             ("Library and trash", "L", Some(Command::ToggleLibrary)),
+            ("Show or hide dots", "G", Some(Command::ToggleGrid)),
+            ("Light or dark mode", "", Some(Command::ToggleTheme)),
             ("Up to the parent board", "Esc", Some(Command::GoUp)),
         ],
     },
@@ -207,8 +231,8 @@ fn entries(i: usize, desktop: bool) -> Vec<(&'static str, &'static str, Option<C
 pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str, viewport: [f32; 2], desktop: bool) -> Layout {
     let mut l = Layout::default();
     let bar = [0.0, 0.0, viewport[0], BAR];
-    l.rect(bar, BAR_BG, [0.0; 4], 0.0);
-    l.rect([0.0, BAR - 1.0, viewport[0], 1.0], LINE, [0.0; 4], 0.0);
+    l.rect(bar, BAR_BG(), [0.0; 4], 0.0);
+    l.rect([0.0, BAR - 1.0, viewport[0], 1.0], LINE(), [0.0; 4], 0.0);
     l.hits.push((bar, Hit::None));
     let mut x = 8.0;
     let mut title_x = Vec::new();
@@ -216,41 +240,41 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
         let w = text_width(font, m.title, 13.0) + 20.0;
         let r = [x, 3.0, w, BAR - 6.0];
         if open == Some(i) {
-            l.rect(r, DROP_BG, [0.0; 4], 5.0);
+            l.rect(r, DROP_BG(), [0.0; 4], 5.0);
         }
-        l.text(m.title, [x + 10.0, 19.5], 13.0, INK);
+        l.text(m.title, [x + 10.0, 19.5], 13.0, INK());
         l.hits.push((r, Hit::Title(i)));
         title_x.push(x);
         x += w;
     }
     let t = fit(font, title, 12.5, (viewport[0] - x - 24.0).max(0.0));
     let tw = text_width(font, &t, 12.5);
-    l.text(t, [viewport[0] - 12.0 - tw, 19.5], 12.5, DIM);
+    l.text(t, [viewport[0] - 12.0 - tw, 19.5], 12.5, DIM());
 
     if let Some(i) = open.filter(|i| *i < MENUS.len()) {
         let m = entries(i, desktop);
         let h: f32 = m.iter().map(|e| if e.0.is_empty() { 9.0 } else { ENTRY_H }).sum::<f32>() + 8.0;
         let x0 = title_x[i].min(viewport[0] - DROP_W - 4.0).max(0.0);
         let drop = [x0, BAR, DROP_W, h];
-        l.rect(drop, DROP_BG, LINE, 6.0);
+        l.rect(drop, DROP_BG(), LINE(), 6.0);
         l.hits.push((drop, Hit::None));
         let mut y = BAR + 4.0;
         for (label, keys, cmd) in &m {
             if label.is_empty() {
-                l.rect([x0 + 8.0, y + 4.0, DROP_W - 16.0, 1.0], LINE, [0.0; 4], 0.0);
+                l.rect([x0 + 8.0, y + 4.0, DROP_W - 16.0, 1.0], LINE(), [0.0; 4], 0.0);
                 y += 9.0;
                 continue;
             }
             let r = [x0 + 4.0, y, DROP_W - 8.0, ENTRY_H];
             let hot = cmd.is_some() && crate::panel::inside(r, hover);
             if hot {
-                l.rect(r, HOVER, [0.0; 4], 4.0);
+                l.rect(r, HOVER(), [0.0; 4], 4.0);
             }
-            let ink = if cmd.is_none() { DIM } else if hot { [1.0; 4] } else { INK };
+            let ink = if cmd.is_none() { DIM() } else if hot { [1.0; 4] } else { INK() };
             let kw = text_width(font, keys, 12.0);
             let label = fit(font, label, 13.0, DROP_W - 36.0 - kw);
             l.text(label, [r[0] + 10.0, y + 18.5], 13.0, ink);
-            l.text(*keys, [r[0] + r[2] - 10.0 - kw, y + 18.5], 12.0, if hot { [1.0; 4] } else { DIM });
+            l.text(*keys, [r[0] + r[2] - 10.0 - kw, y + 18.5], 12.0, if hot { [1.0; 4] } else { DIM() });
             if let Some(c) = cmd {
                 l.hits.push((r, Hit::Entry(*c)));
             }
@@ -279,7 +303,7 @@ mod tests {
         assert_eq!(open.hit_at(c(undo)), Some(Hit::Entry(Command::Undo)));
         // Hovering highlights the entry.
         let hovered = layout(&mut f, Some(1), c(undo), "Board 1", [1200.0, 800.0], false);
-        assert!(hovered.boxes.iter().any(|b| b.fill == HOVER));
+        assert!(hovered.boxes.iter().any(|b| b.fill == HOVER()));
     }
 
     #[test]
