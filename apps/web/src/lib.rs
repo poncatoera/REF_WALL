@@ -124,7 +124,39 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         }
         // Libraries are folders on disk; the web menus don't offer them.
         wall_app::ShellCommand::OpenLibrary { .. } => {}
+        wall_app::ShellCommand::ExportImage => {
+            if let Err(e) = export_png(&s) {
+                web_sys::console::error_1(&e);
+            }
+        }
     }
+}
+
+/// File > Export board as picture: draws the board off-screen (longest
+/// side up to 4096 px, to stay inside browser memory) and downloads a PNG.
+fn export_png(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
+    let (png, name) = {
+        let mut st = s.borrow_mut();
+        let State { app, renderer, .. } = &mut *st;
+        let (rgba, [w, h]) = app.export_board(renderer, 4096).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let img = image::RgbaImage::from_raw(w, h, rgba).ok_or("bad picture size")?;
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        (png, format!("{}.png", app.board_name()))
+    };
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&png[..]));
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type("image/png");
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
+    let a: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
+    a.set_href(&url);
+    a.set_download(&name);
+    a.click();
+    // The URL is not revoked right away: some browsers start the download
+    // after this returns. One picture per export is a small, bounded cost.
+    Ok(())
 }
 
 #[wasm_bindgen]

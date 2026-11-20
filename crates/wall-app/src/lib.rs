@@ -279,6 +279,8 @@ pub enum AppError {
     Decode(#[from] image::ImageError),
     #[error("video is {0} bytes; convert it under the 20 MB limit first")]
     VideoTooLarge(u64),
+    #[error("{0}")]
+    Other(String),
 }
 
 const BACKGROUND: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
@@ -1363,6 +1365,13 @@ impl App {
     }
 
     /// Names from the outermost board down to the open one.
+    /// The open board's name, safe as a file name.
+    pub fn board_name(&self) -> String {
+        let n: String = self.doc.board.name.chars().map(|c| if c.is_alphanumeric() || " -_".contains(c) { c } else { '_' }).collect();
+        let n = n.trim();
+        if n.is_empty() { "Board".into() } else { n.to_owned() }
+    }
+
     pub fn breadcrumb(&self) -> Vec<String> {
         self.nav
             .iter()
@@ -1796,6 +1805,66 @@ impl App {
     }
 
     // ---- drawing -----------------------------------------------------------
+
+    /// The board's area for an export: every live item plus a margin, or
+    /// None for an empty board.
+    pub fn board_bounds(&self) -> Option<[f32; 4]> {
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for i in self.doc.board.live_items() {
+            b = [b[0].min(i.frame.x), b[1].min(i.frame.y), b[2].max(i.frame.x + i.frame.w), b[3].max(i.frame.y + i.frame.h)];
+        }
+        (b[0] <= b[2]).then(|| {
+            let m = 48.0;
+            [(b[0] - m) as f32, (b[1] - m) as f32, (b[2] - b[0] + 2.0 * m) as f32, (b[3] - b[1] + 2.0 * m) as f32]
+        })
+    }
+
+    /// Pixel size and zoom for exporting the whole board: up to 2× board
+    /// units, with the longer side at most `max_side` pixels.
+    pub fn export_size(&self, max_side: u32) -> Option<([u32; 2], f32)> {
+        let b = self.board_bounds()?;
+        let zoom = (max_side as f32 / b[2].max(b[3])).min(2.0);
+        let size = [((b[2] * zoom).ceil() as u32).max(1), ((b[3] * zoom).ceil() as u32).max(1)];
+        Some((size, zoom))
+    }
+
+    /// Draws the whole board, without selection, panels or menus, into an
+    /// off-screen picture. Returns straight RGBA8 pixels and their size.
+    pub fn export_board(&mut self, renderer: &mut Renderer, max_side: u32) -> Result<(Vec<u8>, [u32; 2]), AppError> {
+        let max_side = max_side.min(renderer.max_picture_size());
+        let (size, zoom) = self.export_size(max_side).ok_or_else(|| AppError::Other("the board is empty".into()))?;
+        let b = self.board_bounds().unwrap_or_default();
+        for pic in self.pictures.values_mut() {
+            if let Picture::Pending { rgba, width, height } = pic {
+                if let Ok(id) = renderer.create_image(rgba, *width, *height) {
+                    *pic = Picture::Ready(id);
+                }
+            }
+        }
+        let textures: HashMap<&ContentHash, ImageId> = self
+            .pictures
+            .iter()
+            .filter_map(|(h, p)| match p {
+                Picture::Ready(id) => Some((h, *id)),
+                Picture::Pending { .. } => None,
+            })
+            .collect();
+        self.scene.update(&self.doc, &mut self.font, &self.board_names);
+        if self.font.atlas.dirty {
+            renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+            self.font.atlas.dirty = false;
+        }
+        let view = ViewUniform::new([b[0] + b[2] / 2.0, b[1] + b[3] / 2.0], zoom, [size[0] as f32, size[1] as f32]);
+        let scene = &self.scene;
+        let pixels = renderer
+            .render_to_pixels(size, |r| {
+                r.begin_frame(size, BACKGROUND);
+                scene.draw(r, &view, &textures);
+            })
+            .map_err(|e| AppError::Other(e.to_string()))?;
+        self.needs_redraw = true;
+        Ok((pixels, size))
+    }
 
     pub fn render(&mut self, renderer: &mut Renderer, size_px: [u32; 2]) {
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
@@ -2327,6 +2396,7 @@ impl App {
             C::Import => self.shell_commands.push(S::Import),
             C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
+            C::ExportImage => self.shell_commands.push(S::ExportImage),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),
             C::Paste => self.shell_commands.push(S::Paste),
@@ -2499,6 +2569,20 @@ fn demo_picture(seed: u32, w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_size_fits_the_board() {
+        let mut a = app();
+        assert_eq!(a.export_size(4096), None, "empty board");
+        a.new_note([0.0, 0.0], "a".into());
+        let (size, zoom) = a.export_size(4096).unwrap();
+        assert_eq!(zoom, 2.0, "small boards export at 2x");
+        assert!(size[0] < 4096 && size[1] < 4096);
+        a.new_note([20000.0, 3000.0], "far".into());
+        let (size, zoom) = a.export_size(4096).unwrap();
+        assert!(zoom < 1.0 && size[0] <= 4096 && size[1] < size[0], "{size:?} {zoom}");
+        assert_eq!(a.board_name(), "t");
+    }
 
     fn app() -> App {
         let mut a = App::new(Board::new("t", 0), "test");

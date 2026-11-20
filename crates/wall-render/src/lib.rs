@@ -7,6 +7,7 @@
 //! Shaders are written in Slang (`shaders/*.slang`) and compiled ahead of time
 //! into `shaders/generated/*.glsl`, which are embedded here.
 
+mod offscreen;
 use bytemuck::{Pod, Zeroable};
 use glow::HasContext;
 

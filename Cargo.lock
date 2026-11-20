@@ -2610,6 +2610,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "glow",
+ "image",
  "js-sys",
  "uuid",
  "wall-app",

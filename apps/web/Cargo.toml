@@ -17,4 +17,5 @@ wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "PointerEvent", "MouseEvent", "WheelEvent", "KeyboardEvent", "DragEvent", "DataTransfer", "FileList", "File", "Blob", "AddEventListenerOptions", "ClipboardEvent", "HtmlVideoElement", "HtmlMediaElement", "Url", "console", "HtmlInputElement", "Navigator", "Clipboard", "Response"] }
+image = { workspace = true, features = ["png"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "PointerEvent", "MouseEvent", "WheelEvent", "KeyboardEvent", "DragEvent", "DataTransfer", "FileList", "File", "Blob", "AddEventListenerOptions", "ClipboardEvent", "HtmlVideoElement", "HtmlMediaElement", "Url", "console", "HtmlInputElement", "Navigator", "Clipboard", "Response", "BlobPropertyBag", "HtmlAnchorElement"] }

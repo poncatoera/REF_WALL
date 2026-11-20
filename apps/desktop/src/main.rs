@@ -11,6 +11,7 @@
 //! - `WALL_BENCH=1` redraws continuously and prints fps (vsync off).
 //! - `WALL_IMPORT="a.png;b.mp4"` imports files at start, as if dropped.
 //! - `WALL_SCREENSHOT_FRAME=n` takes the screenshot at frame n (default 3).
+//! - `WALL_EXPORT=board.png` also exports the whole board with the screenshot.
 //! - `WALL_DEMO=n` opens a generated demo board with n notes instead of a library.
 //!
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
@@ -202,6 +203,33 @@ fn pick_library(new: bool) -> Option<std::path::PathBuf> {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn pick_library(_new: bool) -> Option<std::path::PathBuf> {
     std::env::var_os("WALL_PICK_LIBRARY").map(Into::into)
+}
+
+/// File > Export board as picture: where to save the PNG.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_export(name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title("Export board as picture").set_file_name(name).add_filter("PNG picture", &["png"]).save_file()
+}
+
+/// No save dialog on Linux yet: WALL_EXPORT names the file (tests).
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_export(_name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_EXPORT").map(Into::into)
+}
+
+/// Longest side of an exported board picture, in pixels.
+const EXPORT_MAX: u32 = 8192;
+
+fn export_png(app: &mut App, renderer: &mut Renderer, path: &std::path::Path) {
+    let result = app.export_board(renderer, EXPORT_MAX).map_err(|e| e.to_string()).and_then(|(rgba, [w, h])| {
+        let img = image::RgbaImage::from_raw(w, h, rgba).ok_or("bad picture size")?;
+        img.save(path).map_err(|e| e.to_string())?;
+        Ok((w, h))
+    });
+    match result {
+        Ok((w, h)) => println!("wall: exported {} ({w}×{h})", path.display()),
+        Err(e) => show_error(&format!("Could not export the board: {e}")),
+    }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -444,6 +472,12 @@ impl ApplicationHandler for Shell {
                                 }
                             }
                         }
+                        wall_app::ShellCommand::ExportImage => {
+                            let name = format!("{}.png", self.app.board_name());
+                            if let Some(path) = pick_export(&name) {
+                                export_png(&mut self.app, &mut gfx.renderer, &path);
+                            }
+                        }
                     }
                 }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
@@ -451,6 +485,11 @@ impl ApplicationHandler for Shell {
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
                 let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
+                    // WALL_EXPORT=board.png also exports the board (tests).
+                    if let Some(export) = std::env::var_os("WALL_EXPORT") {
+                        export_png(&mut self.app, &mut gfx.renderer, std::path::Path::new(&export));
+                        self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                    }
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
                         Ok(()) => println!("wall: saved {path}"),
                         Err(e) => eprintln!("wall: screenshot failed: {e}"),

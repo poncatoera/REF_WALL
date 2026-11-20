@@ -23,6 +23,7 @@ pub enum Command {
     Import,
     OpenLibrary,
     NewLibrary,
+    ExportImage,
     NewNote,
     NewBoard,
     NewTodo,
@@ -57,6 +58,8 @@ pub enum ShellCommand {
     Paste,
     /// Pick a library folder and open it, or (`new`) create one.
     OpenLibrary { new: bool },
+    /// Save the whole board as a PNG picture.
+    ExportImage,
 }
 
 impl Command {
@@ -82,6 +85,8 @@ pub const MENUS: &[Menu] = &[
             SEP,
             ("Open library…", "", Some(Command::OpenLibrary)),
             ("New library…", "", Some(Command::NewLibrary)),
+            SEP,
+            ("Export board as picture…", "", Some(Command::ExportImage)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),
