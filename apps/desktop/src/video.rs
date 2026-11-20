@@ -124,15 +124,19 @@ impl Player {
             C::Range(r) => {
                 self.range = r;
                 if let Some((a, b)) = r {
-                    if self.clock < a || self.clock >= b {
+                    let t = self.position();
+                    if t < a || t >= b {
                         self.seek(a);
                     }
                 }
             }
             C::Step(n) => {
                 self.playing = false;
-                let t = self.clock + n as f64 / self.fps;
-                if n < 0 { self.seek(t) } else { self.clock = t.min(self.duration) }
+                if n < 0 {
+                    self.seek(self.position() + n as f64 / self.fps);
+                } else {
+                    self.clock += n as f64 / self.fps;
+                }
             }
         }
     }
@@ -145,8 +149,15 @@ impl Player {
         let _ = self.seek_tx.send((self.gen, t));
     }
 
+    /// Where playback is within the clip. `clock` itself keeps counting
+    /// through loops, like the decoder's frame times, so a loop needs no
+    /// restart of ffmpeg.
+    fn position(&self) -> f64 {
+        if self.duration > 0.0 { self.clock % self.duration } else { self.clock }
+    }
+
     pub fn status(&self) -> wall_app::VideoStatus {
-        wall_app::VideoStatus { time: self.clock, duration: self.duration, playing: self.playing, speed: self.speed }
+        wall_app::VideoStatus { time: self.position(), duration: self.duration, playing: self.playing, speed: self.speed }
     }
 
     /// Advances the clock and returns the frame to show now, if it changed.
@@ -157,11 +168,9 @@ impl Player {
         if self.playing {
             self.clock += dt * self.speed as f64;
             if let Some((a, b)) = self.range {
-                if self.clock >= b {
+                if self.position() >= b || self.clock >= self.duration.max(b) {
                     self.seek(a);
                 }
-            } else if self.duration > 0.0 && self.clock >= self.duration {
-                self.clock %= self.duration;
             }
         }
         let half = 0.5 / self.fps;
@@ -170,9 +179,7 @@ impl Player {
             if frame.0 != self.gen {
                 continue; // from before a seek
             }
-            if frame.1 > self.clock + 0.5 {
-                continue; // from before the loop wrapped
-            }
+
             if frame.1 > self.clock + half {
                 self.pending = Some(frame);
                 break;
@@ -190,7 +197,7 @@ fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Fr
             // Two decode threads each: with many videos on screen, ffmpeg's
             // default (one per core, plus frame buffers each) oversubscribes
             // the CPU and costs ~150 MB per video.
-            .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-ss", &format!("{start:.3}"), "-i"])
+            .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-stream_loop", "-1", "-ss", &format!("{start:.3}"), "-i"])
             .arg(path)
             .args(["-an", "-vf", &format!("scale={w}:{h}"), "-threads", "2", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
@@ -214,8 +221,9 @@ fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Fr
             }
             let mut frame = vec![0u8; size];
             if out.read_exact(&mut frame).is_err() {
-                break; // end of clip: loop from the start
+                break; // ffmpeg stopped (it loops by itself): start it again
             }
+            // Keeps counting through loops (-stream_loop), like Player::clock.
             let t = start + n as f64 / fps;
             n += 1;
             // Blocks while the player is paused or ahead; wake up for seeks.
@@ -327,6 +335,11 @@ mod tests {
         // 3.0 + ~1.2 s at 2x wraps past 4.0 back near 0.2.
         let t = player.status().time;
         assert!(t < 1.0, "wrapped clock {t}");
+        // Playback carries on through the loop (ffmpeg loops by itself).
+        let shown = wait(&mut player, 1500);
+        assert!(shown > 20, "frames shown after the loop: {shown}");
+        let t2 = player.status().time;
+        assert!(t2 < 4.0 && t2 > t, "{t} then {t2}");
     }
 
     #[test]
