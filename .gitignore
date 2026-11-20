@@ -2,3 +2,4 @@
 *.wall/cache/
 /apps/web/www/pkg
 /dist
+/dist-next

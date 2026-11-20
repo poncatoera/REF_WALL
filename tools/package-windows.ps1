@@ -5,7 +5,8 @@
 # Usage (PowerShell 5+):
 #   pwsh tools/package-windows.ps1 -AngleDir <dir> [-FfmpegDir <dir>] [-NoZip]
 #
-#   -AngleDir   folder with libEGL.dll and libGLESv2.dll (d3dcompiler_47.dll
+#   -AngleDir   folder with libEGL.dll and libGLESv2.dll, e.g. from
+#               tools/build-angle.ps1 (d3dcompiler_47.dll, libz.dll
 #               too if present). Without them Wall falls back to desktop
 #               OpenGL 3.3.
 #   -FfmpegDir  folder with ffmpeg.exe and ffprobe.exe, for video import and
@@ -34,6 +35,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 } finally { Pop-Location }
 
+# A Wall running from the package locks its files: deleting would stop
+# halfway and leave a broken package. Refuse instead.
+$running = Get-Process wall -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($pkg, [StringComparison]::OrdinalIgnoreCase) }
+if ($running) { throw "Wall is running from $pkg (pid $($running.Id -join ', ')); close it first." }
 if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
 New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 Copy-Item (Join-Path $root "target/release/wall.exe") $pkg
@@ -44,8 +49,15 @@ foreach ($f in "libEGL.dll", "libGLESv2.dll") {
     if (-not (Test-Path $p)) { throw "missing $f in $AngleDir" }
     Copy-Item $p $pkg
 }
-$d3d = Join-Path $AngleDir "d3dcompiler_47.dll"
-if (Test-Path $d3d) { Copy-Item $d3d $pkg }
+# Optional: the D3D shader compiler (Windows 10+ has its own) and zlib,
+# which the vcpkg build of ANGLE (tools/build-angle.ps1) links to.
+foreach ($f in "d3dcompiler_47.dll", "libz.dll", "zlib1.dll") {
+    $p = Join-Path $AngleDir $f
+    if (Test-Path $p) { Copy-Item $p $pkg }
+}
+$angleVersion = (Get-Item (Join-Path $AngleDir "libGLESv2.dll")).VersionInfo.ProductVersion
+# The vcpkg build has no version resource; say where it came from instead.
+if (-not $angleVersion) { $angleVersion = "(built from source by tools/build-angle.ps1)" }
 
 # ffmpeg: wall.exe looks next to itself first.
 $videoNote = "Videos: not included. Install ffmpeg on PATH or set WALL_FFMPEG to play videos."
@@ -76,7 +88,7 @@ Wall for Windows (build $commit)
 Run wall.exe. It opens (or creates) Wall\Library.wall in your user folder;
 boards save automatically. To open another library: wall.exe D:\Refs\Moodboard.wall
 
-Graphics: ANGLE (OpenGL ES 3.0 on Direct3D 11), the same shaders as the web
+Graphics: ANGLE $angleVersion (OpenGL ES 3.0 on Direct3D 11), the same shaders as the web
 version. Set WALL_GL=gl to use desktop OpenGL instead.
 $videoNote
 GPU video decoding (less CPU, more memory with many videos playing): add
