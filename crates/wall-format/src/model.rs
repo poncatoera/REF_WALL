@@ -78,8 +78,18 @@ pub struct ItemSidecar {
     pub colors: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<OriginalInfo>,
+    /// Video in and out points: playback loops between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<ClipRange>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// A part of a video, in milliseconds from the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipRange {
+    pub in_ms: u64,
+    pub out_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]

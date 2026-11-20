@@ -11,6 +11,8 @@ use wall_text::Font;
 pub const WIDTH: f32 = 288.0;
 /// Gap between the panel and the window edge.
 const MARGIN: f32 = 12.0;
+/// Top of the panel: below the menu bar.
+const TOP: f32 = crate::menu::BAR + MARGIN;
 const PAD: f32 = 16.0;
 
 pub const PALETTE: [&str; 7] = ["#e5534b", "#e8a15d", "#e6c84f", "#57ab5a", "#7aa2f7", "#b083f0", "#8b8f98"];
@@ -50,6 +52,7 @@ pub enum Action {
     Color(Option<String>),
     PlayPause,
     Speed(f32),
+    ClearRange,
     OpenBoard,
     /// Show only items with this tag; clicking the active tag clears it.
     FilterTag(String),
@@ -67,6 +70,8 @@ pub struct VideoInfo {
     pub fps: Option<f32>,
     pub playing: bool,
     pub speed: f32,
+    /// In and out points in seconds.
+    pub range: Option<(f64, f64)>,
 }
 
 /// What the panel shows, gathered from the selection.
@@ -180,7 +185,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     let x0 = (viewport[0] - WIDTH - MARGIN).max(0.0);
     let inner = WIDTH - 2.0 * PAD;
     let left = x0 + PAD;
-    let mut y = MARGIN + PAD;
+    let mut y = TOP + PAD;
 
     // Header: kind and a close button.
     l.text(info.kind.to_uppercase(), [left, y + 11.0], 11.5, DIM);
@@ -252,7 +257,19 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             l.hits.push((r, Action::Speed(s)));
             x += bw + 4.0;
         }
-        y += 28.0 + 16.0;
+        y += 28.0 + 12.0;
+        match v.range {
+            Some((a, b)) => {
+                let t = format!("In {}   Out {}", crate::video::format_time(a), crate::video::format_time(b));
+                l.text(t, [left, y + 17.0], 12.5, INK);
+                let r = [left + inner - 60.0, y, 60.0, 24.0];
+                l.rect(r, FIELD, LINE, 6.0);
+                l.text("Clear", [r[0] + 14.0, r[1] + 16.5], 12.5, INK);
+                l.hits.push((r, Action::ClearRange));
+            }
+            None => l.text("I and O set in and out points", [left, y + 17.0], 12.5, DIM),
+        }
+        y += 24.0 + 14.0;
     }
 
     // Colour swatches.
@@ -393,8 +410,8 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         y += 32.0 + 16.0;
     }
 
-    let h = (y - MARGIN).max(60.0).min(viewport[1] - 2.0 * MARGIN);
-    l.rect = [x0, MARGIN, WIDTH, h];
+    let h = (y - TOP).max(60.0).min(viewport[1] - TOP - MARGIN);
+    l.rect = [x0, TOP, WIDTH, h];
     l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG, stroke: LINE, radius: 10.0, stroke_w: 1.0 });
     l
 }

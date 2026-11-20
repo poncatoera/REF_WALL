@@ -24,3 +24,6 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+rfd = "0.15"

@@ -14,6 +14,32 @@ pub enum VideoCommand {
     Step(i32),
     /// Playback rate, 1.0 = normal.
     Speed(f32),
+    /// Loop between in and out points (seconds); None plays the whole clip.
+    Range(Option<(f64, f64)>),
+}
+
+/// "0:01.2": minutes, seconds and tenths, for in and out points.
+pub fn format_time(s: f64) -> String {
+    let t = (s.max(0.0) * 10.0).round() as u64;
+    format!("{}:{:02}.{}", t / 600, (t / 10) % 60, t % 10)
+}
+
+/// New in/out points after pressing I (`set_in`) or O at `t` seconds.
+/// Returns None when the range covers the whole clip.
+pub fn mark(range: Option<(f64, f64)>, t: f64, duration: f64, set_in: bool) -> Option<(f64, f64)> {
+    let (mut a, mut b) = range.unwrap_or((0.0, duration));
+    if set_in {
+        a = t;
+        if b <= a {
+            b = duration;
+        }
+    } else {
+        b = t;
+        if b <= a {
+            a = 0.0;
+        }
+    }
+    (a > 0.01 || b < duration - 0.01).then_some((a, b))
 }
 
 /// What a player reports each frame.
@@ -53,6 +79,18 @@ mod tests {
         assert_eq!(next_speed(4.0, true), 4.0);
         assert_eq!(next_speed(0.1, false), 0.1);
         assert_eq!(next_speed(0.7, false), 0.5); // unknown speed starts from 1x
+    }
+
+    #[test]
+    fn in_and_out_points() {
+        assert_eq!(mark(None, 2.0, 10.0, true), Some((2.0, 10.0)));
+        assert_eq!(mark(Some((2.0, 10.0)), 6.0, 10.0, false), Some((2.0, 6.0)));
+        // An in point after the out point drops the out point.
+        assert_eq!(mark(Some((2.0, 6.0)), 8.0, 10.0, true), Some((8.0, 10.0)));
+        // An out point before the in point drops the in point.
+        assert_eq!(mark(Some((8.0, 10.0)), 3.0, 10.0, false), Some((0.0, 3.0)));
+        assert_eq!(mark(Some((0.0, 3.0)), 10.0, 10.0, false), None, "whole clip");
+        assert_eq!(format_time(61.25), "1:01.3");
     }
 
     #[test]

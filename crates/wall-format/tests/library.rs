@@ -72,6 +72,7 @@ fn sidecar_round_trip_keeps_unknown_fields() {
         auto_tags: vec![AutoTag { tag: "pink".into(), source: "local:color".into(), confidence: None }],
         colors: vec!["#ff00aa".into()],
         original: Some(OriginalInfo { width: 4096, height: 2048, bytes: 9_000_000, kept_as: None }),
+        range: None,
         extra: Default::default(),
     };
     lib.write_sidecar(&sidecar).unwrap();

@@ -102,6 +102,48 @@ fn paste(app: &mut App) {
     }
 }
 
+/// Copies the selection to the clipboard; `cut` then deletes it.
+fn copy(app: &mut App, cut: bool) {
+    let Some(text) = app.copy_selection() else { return };
+    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+        Ok(()) if cut => app.key(Key::Delete),
+        Ok(()) => {}
+        Err(e) => eprintln!("wall: could not copy: {e}"),
+    }
+}
+
+/// Imports a picture or video file, as if it was dropped on the window.
+fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathBuf) {
+    if video::is_video(&path) {
+        videos.import(path);
+        return;
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    let result = std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| app.import_image_bytes(&bytes, name.as_deref(), now_ms()).map_err(|e| e.to_string()));
+    if let Err(e) = result {
+        eprintln!("wall: could not import {}: {e}", path.display());
+    }
+}
+
+/// File > Import: the system's file picker.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_files() -> Vec<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Import into Wall")
+        .add_filter("Pictures and videos", &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "mp4", "mov", "webm", "m4v", "mkv", "avi"])
+        .pick_files()
+        .unwrap_or_default()
+}
+
+/// No file picker on Linux yet: WALL_IMPORT or drag and drop.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_files() -> Vec<std::path::PathBuf> {
+    eprintln!("wall: no file picker on this system; drop files on the window instead");
+    Vec::new()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -210,13 +252,7 @@ impl ApplicationHandler for Shell {
                     WKey::Character("]") if m.command => Some(Key::BringToFront),
                     WKey::Character("[") if m.command => Some(Key::SendToBack),
                     WKey::Character(c) if m.command && !editing && (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x")) => {
-                        if let Some(text) = self.app.copy_selection() {
-                            match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
-                                Ok(()) if c.eq_ignore_ascii_case("x") => self.app.key(Key::Delete),
-                                Ok(()) => {}
-                                Err(e) => eprintln!("wall: could not copy: {e}"),
-                            }
-                        }
+                        copy(&mut self.app, c.eq_ignore_ascii_case("x"));
                         None
                     }
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("v") => {
@@ -238,17 +274,19 @@ impl ApplicationHandler for Shell {
                     }
                 }
             }
-            WindowEvent::DroppedFile(path) if video::is_video(&path) => self.videos.import(path),
-            WindowEvent::DroppedFile(path) => {
-                let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
-                let result = std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| self.app.import_image_bytes(&bytes, name.as_deref(), now_ms()).map_err(|e| e.to_string()));
-                if let Err(e) = result {
-                    eprintln!("wall: could not import {}: {e}", path.display());
-                }
-            }
+            WindowEvent::DroppedFile(path) => import_file(&mut self.app, &mut self.videos, path),
             WindowEvent::RedrawRequested => {
+                for cmd in self.app.take_shell_commands() {
+                    match cmd {
+                        wall_app::ShellCommand::Copy { cut } => copy(&mut self.app, cut),
+                        wall_app::ShellCommand::Paste => paste(&mut self.app),
+                        wall_app::ShellCommand::Import => {
+                            for path in pick_files() {
+                                import_file(&mut self.app, &mut self.videos, path);
+                            }
+                        }
+                    }
+                }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && self.videos.settled(1500)) {

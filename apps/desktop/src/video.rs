@@ -174,6 +174,8 @@ pub struct Player {
     speed: f32,
     pending: Option<Frame>,
     last_tick: std::time::Instant,
+    /// In and out points: playback loops between them.
+    range: Option<(f64, f64)>,
 }
 
 impl Player {
@@ -196,6 +198,7 @@ impl Player {
             speed: 1.0,
             pending: None,
             last_tick: std::time::Instant::now(),
+            range: None,
         })
     }
 
@@ -206,6 +209,14 @@ impl Player {
             C::Pause => self.playing = false,
             C::Speed(s) => self.speed = s,
             C::Seek(t) => self.seek(t),
+            C::Range(r) => {
+                self.range = r;
+                if let Some((a, b)) = r {
+                    if self.clock < a || self.clock >= b {
+                        self.seek(a);
+                    }
+                }
+            }
             C::Step(n) => {
                 self.playing = false;
                 let t = self.clock + n as f64 / self.fps;
@@ -233,7 +244,11 @@ impl Player {
         self.last_tick = now;
         if self.playing {
             self.clock += dt * self.speed as f64;
-            if self.duration > 0.0 && self.clock >= self.duration {
+            if let Some((a, b)) = self.range {
+                if self.clock >= b {
+                    self.seek(a);
+                }
+            } else if self.duration > 0.0 && self.clock >= self.duration {
                 self.clock %= self.duration;
             }
         }
@@ -507,6 +522,7 @@ impl Videos {
                             p.command(wall_app::VideoCommand::Seek(slot.saved.time));
                         }
                         p.command(wall_app::VideoCommand::Speed(slot.saved.speed));
+                        p.command(wall_app::VideoCommand::Range(app.video_range(&slot.hash)));
                         if !slot.saved.playing {
                             p.command(wall_app::VideoCommand::Pause);
                         }
@@ -530,7 +546,7 @@ impl Videos {
                     wall_app::VideoCommand::Pause => slot.saved.playing = false,
                     wall_app::VideoCommand::Speed(s) => slot.saved.speed = s,
                     wall_app::VideoCommand::Seek(t) => slot.saved.time = t,
-                    wall_app::VideoCommand::Step(_) => {}
+                    wall_app::VideoCommand::Step(_) | wall_app::VideoCommand::Range(_) => {}
                 },
             }
         }

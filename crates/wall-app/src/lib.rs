@@ -4,6 +4,7 @@
 //! input here and call [`App::render`].
 
 pub mod doc;
+pub mod menu;
 pub mod panel;
 mod scene;
 mod snap;
@@ -17,6 +18,7 @@ use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
 pub use doc::Document;
+pub use menu::ShellCommand;
 pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
 use scene::Scene;
@@ -234,6 +236,10 @@ pub struct App {
     panel_edit: Option<panel::FieldEdit>,
     /// Show only items with this tag (others are dimmed).
     tag_filter: Option<String>,
+    /// The menu dropped down from the menu bar, if any.
+    menu_open: Option<usize>,
+    /// Menu commands waiting for the shell (file picker, clipboard).
+    shell_commands: Vec<menu::ShellCommand>,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -291,6 +297,8 @@ impl App {
             panel_open: true,
             panel_edit: None,
             tag_filter: None,
+            menu_open: None,
+            shell_commands: Vec::new(),
         }
     }
 
@@ -404,6 +412,7 @@ impl App {
             auto_tags: Vec::new(),
             colors: Vec::new(),
             original: prepared.original.clone(),
+            range: None,
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, Some(rgba.as_raw()));
@@ -446,6 +455,7 @@ impl App {
             auto_tags: Vec::new(),
             colors: Vec::new(),
             original: None,
+            range: None,
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, None);
@@ -533,6 +543,12 @@ impl App {
                     self.toggle_play(hash);
                     continue;
                 }
+                c @ ('i' | 'o') => {
+                    let Some(st) = self.video_status.get(&hash).copied() else { continue };
+                    let range = video::mark(self.video_range(&hash), st.time, st.duration, c == 'i');
+                    self.set_video_range(&hash, range);
+                    continue;
+                }
                 ',' => VideoCommand::Step(-1),
                 '.' => VideoCommand::Step(1),
                 '[' => VideoCommand::Speed(video::next_speed(speed, false)),
@@ -582,6 +598,19 @@ impl App {
         });
     }
 
+    /// A video's in and out points in seconds, if it has them.
+    pub fn video_range(&self, hash: &ContentHash) -> Option<(f64, f64)> {
+        self.sidecars.get(hash)?.range.map(|r| (r.in_ms as f64 / 1000.0, r.out_ms as f64 / 1000.0))
+    }
+
+    /// Sets (or clears) a video's in and out points, saves them and tells
+    /// the player.
+    pub fn set_video_range(&mut self, hash: &ContentHash, range: Option<(f64, f64)>) {
+        let r = range.map(|(a, b)| wall_format::ClipRange { in_ms: (a * 1000.0).round() as u64, out_ms: (b * 1000.0).round() as u64 });
+        self.update_sidecar(hash, |sc| sc.range = r);
+        self.video_commands.push((hash.clone(), VideoCommand::Range(range)));
+    }
+
     /// Commands for the shell's players, oldest first.
     pub fn take_video_commands(&mut self) -> Vec<(ContentHash, VideoCommand)> {
         std::mem::take(&mut self.video_commands)
@@ -608,6 +637,15 @@ impl App {
             let t = if st.duration > 0.0 { (st.time / st.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
             let h = 4.0 * px;
             out.push(wall_render::BoxInstance { rect: [x, y, w, h], fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
+            if let Some((a, b)) = self.video_range(&hash).filter(|_| st.duration > 0.0) {
+                // The in-out range: a band above the track with end ticks.
+                let (xa, xb) = (x + w * (a / st.duration).clamp(0.0, 1.0) as f32, x + w * (b / st.duration).clamp(0.0, 1.0) as f32);
+                let band = [0.98, 0.78, 0.3, 1.0];
+                out.push(wall_render::BoxInstance { rect: [xa, y - 5.0 * px, xb - xa, 3.0 * px], fill: band, stroke: [0.0; 4], shape: [px, 0.0] });
+                for xe in [xa, xb] {
+                    out.push(wall_render::BoxInstance { rect: [xe - px, y - 7.0 * px, 2.0 * px, 13.0 * px], fill: band, stroke: [0.0; 4], shape: [0.0, 0.0] });
+                }
+            }
             out.push(wall_render::BoxInstance { rect: [x, y, w * t, h], fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
             out.push(wall_render::BoxInstance { rect: [x + w * t - 5.0 * px, y - 3.0 * px, 10.0 * px, 10.0 * px], fill: [1.0; 4], stroke: [0.0; 4], shape: [5.0 * px, 0.0] });
             if !st.playing {
@@ -674,6 +712,7 @@ impl App {
                     auto_tags: Vec::new(),
                     colors: Vec::new(),
                     original: None,
+                    range: None,
                     extra: Default::default(),
                 },
             );
@@ -699,6 +738,25 @@ impl App {
         app.doc.add(items);
         app.camera = Camera { center: [980.0, 420.0], zoom: 0.62 };
         app
+    }
+
+    /// Adds a named group frame (x, y, w, h in board units) behind everything.
+    pub fn add_group(&mut self, name: &str, r: [f64; 4]) -> Uuid {
+        let z = self.doc.board.live_items().map(|i| i.frame.z).fold(0.0, f64::min) - 1.0;
+        let frame = Frame { x: r[0], y: r[1], w: r[2], h: r[3], z, ..Default::default() };
+        self.doc.add(vec![(frame, ItemKind::Group { name: name.into(), color: None })])[0]
+    }
+
+    /// Moves and sizes an item (x, y, w, h in board units).
+    pub fn set_item_frame(&mut self, id: Uuid, r: [f64; 4]) {
+        let Some(mut item) = self.doc.item(&id).cloned() else { return };
+        item.frame.x = r[0];
+        item.frame.y = r[1];
+        item.frame.w = r[2];
+        item.frame.h = r[3];
+        self.doc.replace(vec![item]);
+        self.selection.clear();
+        self.needs_redraw = true;
     }
 
     /// Registers decoded pixels for a picture and returns its content hash.
@@ -789,6 +847,9 @@ impl App {
             return;
         }
         if button != Button::Primary {
+            return;
+        }
+        if self.menu_click(pos) {
             return;
         }
         if let Some(action) = self.panel_layout().and_then(|l| l.action_at(pos)) {
@@ -929,6 +990,9 @@ impl App {
     pub fn pointer_move(&mut self, pos: [f32; 2]) {
         let last = self.cursor;
         self.cursor = pos;
+        if self.menu_open.is_some() {
+            self.needs_redraw = true;
+        }
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
             Gesture::Idle => return,
@@ -1040,6 +1104,9 @@ impl App {
 
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
+        if self.menu_open.take().is_some() && key == Key::Escape {
+            return;
+        }
         if let Some(e) = &mut self.panel_edit {
             match key {
                 Key::Escape => self.panel_edit = None,
@@ -1150,7 +1217,7 @@ impl App {
             Key::Char('b' | 'B') => {
                 self.new_board();
             }
-            Key::Char('i' | 'I') => self.panel_open = !self.panel_open,
+            Key::Char('p' | 'P') => self.panel_open = !self.panel_open,
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::Find => {}
@@ -1716,7 +1783,7 @@ impl App {
             // Search box: top centre, constant size on screen.
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
-            let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, 16.0], self.viewport);
+            let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, menu::BAR + 12.0], self.viewport);
             let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: [0.1, 0.105, 0.12, 0.97], stroke: [0.36, 0.62, 1.0, 1.0], shape: [8.0 * px, 1.5 * px] };
             renderer.draw_boxes(&view, &[bx]);
             let shown = if query.is_empty() { "Search this board".to_owned() } else { query.clone() };
@@ -1736,7 +1803,7 @@ impl App {
             // Breadcrumb at the top-left, constant size on screen.
             let text = format!("{}   (Esc to go up)", self.breadcrumb().join("  ›  "));
             let size = 14.0 / self.camera.zoom;
-            let at = self.camera.screen_to_board([16.0, 28.0], self.viewport);
+            let at = self.camera.screen_to_board([16.0, menu::BAR + 24.0], self.viewport);
             let mut crumb = Vec::new();
             scene::add_text(&mut self.font, &mut crumb, &text, at, size, [0.7, 0.72, 0.78, 1.0]);
             if self.font.atlas.dirty {
@@ -1760,6 +1827,7 @@ impl App {
             renderer.draw_glyphs(&view, &hint);
         }
         self.draw_panel(renderer);
+        self.draw_menu(renderer);
         self.needs_redraw = false;
     }
 }
@@ -1831,6 +1899,7 @@ impl App {
                 if video {
                     let st = self.video_status.get(hash);
                     info.video = Some(VideoInfo {
+                        range: self.video_range(hash),
                         duration_s: st.map_or(0.0, |s| s.duration),
                         fps: sc.and_then(|s| s.fps),
                         playing: st.is_none_or(|s| s.playing),
@@ -1993,6 +2062,11 @@ impl App {
                     self.toggle_play(hash);
                 }
             }
+            Action::ClearRange => {
+                if let Some(hash) = id.and_then(|id| self.video_of(&id)) {
+                    self.set_video_range(&hash, None);
+                }
+            }
             Action::Speed(s) => {
                 if let Some(hash) = id.and_then(|id| self.video_of(&id)) {
                     self.video_commands.push((hash, VideoCommand::Speed(s)));
@@ -2106,6 +2180,99 @@ impl App {
         if let Some(c) = l.caret {
             boxes.push(wall_render::BoxInstance { rect: c, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
         }
+        renderer.draw_boxes(&view, &boxes);
+        let mut glyphs = Vec::new();
+        for t in &l.texts {
+            scene::add_text(&mut self.font, &mut glyphs, &t.text, t.at, t.size, t.color);
+        }
+        if self.font.atlas.dirty {
+            renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+            self.font.atlas.dirty = false;
+        }
+        renderer.draw_glyphs(&view, &glyphs);
+    }
+}
+
+impl App {
+    // ---- menu bar ----------------------------------------------------------
+
+    fn menu_layout(&mut self) -> menu::Layout {
+        let title = self.breadcrumb().join("  ›  ");
+        menu::layout(&mut self.font, self.menu_open, self.cursor, &title, self.viewport)
+    }
+
+    /// Handles a click on the menu bar or an open menu. Returns true when
+    /// the click was used up (including a click that only closes a menu).
+    fn menu_click(&mut self, pos: [f32; 2]) -> bool {
+        let hit = self.menu_layout().hit_at(pos);
+        let was_open = self.menu_open.take();
+        match hit {
+            Some(menu::Hit::Title(i)) => {
+                self.menu_open = (was_open != Some(i)).then_some(i);
+                true
+            }
+            Some(menu::Hit::Entry(c)) => {
+                self.run_command(c);
+                true
+            }
+            Some(menu::Hit::None) => true,
+            None => was_open.is_some(),
+        }
+    }
+
+    /// Commands for the shell, oldest first.
+    pub fn take_shell_commands(&mut self) -> Vec<menu::ShellCommand> {
+        std::mem::take(&mut self.shell_commands)
+    }
+
+    /// Runs a menu command.
+    pub fn run_command(&mut self, c: menu::Command) {
+        use menu::{Command as C, ShellCommand as S};
+        self.needs_redraw = true;
+        self.menu_open = None;
+        let centre = [self.viewport[0] / 2.0, self.viewport[1] / 2.0];
+        match c {
+            C::Import => self.shell_commands.push(S::Import),
+            C::Cut => self.shell_commands.push(S::Copy { cut: true }),
+            C::Copy => self.shell_commands.push(S::Copy { cut: false }),
+            C::Paste => self.shell_commands.push(S::Paste),
+            C::NewNote => {
+                let at = self.camera.center;
+                self.new_note(at, String::new());
+            }
+            C::NewBoard => {
+                let cursor = std::mem::replace(&mut self.cursor, centre);
+                self.new_board();
+                self.cursor = cursor;
+            }
+            C::Undo => self.key(Key::Undo),
+            C::Redo => self.key(Key::Redo),
+            C::Duplicate => self.key(Key::Duplicate),
+            C::Delete => self.key(Key::Delete),
+            C::SelectAll => self.key(Key::SelectAll),
+            C::Find => self.key(Key::Find),
+            C::BringToFront => self.key(Key::BringToFront),
+            C::SendToBack => self.key(Key::SendToBack),
+            C::FitBoard => self.fit_view(),
+            C::ZoomIn => self.camera.zoom_at(1.25, centre, self.viewport),
+            C::ZoomOut => self.camera.zoom_at(0.8, centre, self.viewport),
+            C::ActualSize => {
+                let z = self.camera.zoom;
+                self.camera.zoom_at(1.0 / z, centre, self.viewport);
+            }
+            C::TogglePanel => self.panel_open = !self.panel_open,
+            C::GoUp => self.go_up(),
+        }
+    }
+
+    fn draw_menu(&mut self, renderer: &mut Renderer) {
+        let l = self.menu_layout();
+        let view = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
+        let boxes: Vec<wall_render::BoxInstance> = l
+            .boxes
+            .iter()
+            .map(|b| wall_render::BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] })
+            .collect();
         renderer.draw_boxes(&view, &boxes);
         let mut glyphs = Vec::new();
         for t in &l.texts {
@@ -2568,10 +2735,10 @@ mod tests {
         assert_eq!(a.search_status().unwrap().2, 1);
         a.key(Key::Escape);
 
-        // I hides the panel and brings it back; × closes it.
-        a.key(Key::Char('i'));
+        // P hides the panel and brings it back; × closes it.
+        a.key(Key::Char('p'));
         assert!(a.panel_info().is_none());
-        a.key(Key::Char('i'));
+        a.key(Key::Char('p'));
         panel_click(&mut a, panel::Action::Close);
         assert!(a.panel_info().is_none());
     }
@@ -2654,6 +2821,72 @@ mod tests {
         assert!(a.board_tags().contains(&("portrait".to_owned(), 1)));
         a.filter_by_tag(Some("portrait".into()));
         assert!(a.filtered_out().is_empty());
+    }
+
+    #[test]
+    fn menu_bar_opens_and_runs_commands() {
+        let mut a = app();
+        let n = add_note(&mut a, 300.0, 300.0);
+        let title = |a: &mut App, i: usize| {
+            let l = a.menu_layout();
+            let r = l.hits.iter().find(|(_, h)| *h == menu::Hit::Title(i)).unwrap().0;
+            [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0]
+        };
+        let entry = |a: &mut App, c: menu::Command| {
+            let l = a.menu_layout();
+            let r = l.hits.iter().find(|(_, h)| *h == menu::Hit::Entry(c)).unwrap().0;
+            [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0]
+        };
+        // Edit > Select all, then Edit > Delete, then Edit > Undo.
+        let p = title(&mut a, 1);
+        click(&mut a, 1_000, p);
+        assert_eq!(a.menu_open, Some(1));
+        let p = entry(&mut a, menu::Command::SelectAll);
+        click(&mut a, 2_000, p);
+        assert_eq!(a.menu_open, None);
+        assert_eq!(a.selection, [n].into());
+        let p = title(&mut a, 1);
+        click(&mut a, 3_000, p);
+        let p = entry(&mut a, menu::Command::Delete);
+        click(&mut a, 4_000, p);
+        assert!(a.doc.item(&n).is_none());
+        a.run_command(menu::Command::Undo);
+        assert!(a.doc.item(&n).is_some());
+        // A click outside an open menu only closes it.
+        let p = title(&mut a, 3);
+        click(&mut a, 5_000, p);
+        click(&mut a, 6_000, [500.0, 600.0]);
+        assert_eq!(a.menu_open, None);
+        assert!(a.doc.board.live_items().count() == 1, "no note made by that click");
+        // Copy goes to the shell; zoom works in place.
+        a.run_command(menu::Command::Copy);
+        assert_eq!(a.take_shell_commands(), vec![menu::ShellCommand::Copy { cut: false }]);
+        a.run_command(menu::Command::ZoomIn);
+        assert!((a.camera.zoom - 1.25).abs() < 1e-4);
+        a.run_command(menu::Command::ActualSize);
+        assert!((a.camera.zoom - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn in_and_out_points_loop_a_video() {
+        let mut a = app();
+        let id = a.import_video(&[1, 2, 3], "mp4", VideoMeta { width: 320, height: 180, duration_ms: 10_000, fps: Some(25.0) }, Some("clip.mp4"), 0).unwrap();
+        let hash = a.media_hash(&id).unwrap();
+        a.selection = [id].into();
+        let at = |a: &mut App, t: f64| a.set_video_status(hash.clone(), VideoStatus { time: t, duration: 10.0, playing: true, speed: 1.0 });
+        at(&mut a, 2.0);
+        a.key(Key::Char('i'));
+        at(&mut a, 6.5);
+        a.key(Key::Char('o'));
+        assert_eq!(a.video_range(&hash), Some((2.0, 6.5)));
+        assert!(a.take_video_commands().contains(&(hash.clone(), VideoCommand::Range(Some((2.0, 6.5))))));
+        assert_eq!(a.panel_info(), None, "panel closed in tests");
+        a.panel_open = true;
+        assert_eq!(a.panel_info().unwrap().video.unwrap().range, Some((2.0, 6.5)));
+        // The range shows on the scrub bar (track, band, two ticks, ...).
+        assert!(a.scrub_bars().len() >= 6);
+        panel_click(&mut a, panel::Action::ClearRange);
+        assert_eq!(a.video_range(&hash), None);
     }
 
     #[test]
