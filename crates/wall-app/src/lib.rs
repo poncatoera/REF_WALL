@@ -864,7 +864,6 @@ impl App {
         item.frame.w = r[2];
         item.frame.h = r[3];
         self.doc.replace(vec![item]);
-        self.selection.clear();
         self.needs_redraw = true;
     }
 
@@ -2381,7 +2380,6 @@ impl App {
                 info.title = Some(name.clone());
                 info.title_hint = "Name this palette".into();
                 info.palette = colors.clone();
-                info.rows.push(("Colours".into(), colors.iter().map(|c| c.to_uppercase()).collect::<Vec<_>>().join("  ")));
                 info.rows.push(("Copy".into(), "Click a colour on the card".into()));
             }
             ItemKind::Stroke { points, color, .. } => {
