@@ -21,6 +21,113 @@ struct State {
     canvas: HtmlCanvasElement,
     /// Light mode and grid as last saved to localStorage.
     saved_look: (bool, bool),
+    /// Boards are saved in the browser (off with `?demo`).
+    store: bool,
+    /// Saved boards have been looked for; saving may start.
+    loaded: bool,
+    /// `App::edit_stamp` of what was last saved, and when it was checked.
+    saved_stamp: u64,
+    checked_ms: f64,
+    saving: bool,
+}
+
+#[wasm_bindgen(module = "/js/store.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = storeGet, catch)]
+    fn store_get(key: &str) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = storePut, catch)]
+    fn store_put(key: &str, value: &JsValue) -> Result<js_sys::Promise, JsValue>;
+}
+
+async fn get(key: &str) -> Result<JsValue, JsValue> {
+    wasm_bindgen_futures::JsFuture::from(store_get(key)?).await
+}
+
+async fn put(key: &str, value: &JsValue) -> Result<(), JsValue> {
+    wasm_bindgen_futures::JsFuture::from(store_put(key, value)?).await.map(|_| ())
+}
+
+fn err_text(e: &JsValue) -> String {
+    e.as_string().unwrap_or_else(|| format!("{e:?}"))
+}
+
+/// Opens the boards saved in this browser, if any. True if there were some.
+async fn load_saved(s: Rc<RefCell<State>>) -> Result<bool, JsValue> {
+    let Some(json) = get("boards").await?.as_string() else { return Ok(false) };
+    let mut media = std::collections::HashMap::new();
+    for (hash, _, _) in App::snapshot_media(&json) {
+        let v = get(&format!("media/{hash}")).await?;
+        if v.is_object() {
+            media.insert(hash, js_sys::Uint8Array::new(&v).to_vec());
+        }
+    }
+    let videos = s.borrow_mut().app.restore(&json, &media).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    for (hash, ext, w, h) in videos {
+        let Some(bytes) = media.get(&hash) else { continue };
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&bytes[..]));
+        let bag = web_sys::BlobPropertyBag::new();
+        bag.set_type(video_mime(&ext));
+        let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
+        if let Err(e) = attach_player(s.clone(), &blob, hash, w, h).await {
+            web_sys::console::warn_1(&format!("wall: saved video: {}", err_text(&e)).into());
+        }
+    }
+    let missing = s.borrow().app.missing_media().len();
+    if missing > 0 {
+        web_sys::console::warn_1(&format!("wall: {missing} saved pictures or videos are missing").into());
+    }
+    Ok(true)
+}
+
+/// Saves the boards and any new media in the browser.
+async fn save(s: Rc<RefCell<State>>) {
+    let (json, media) = {
+        let mut st = s.borrow_mut();
+        st.saving = true;
+        (st.app.snapshot(), st.app.take_new_media())
+    };
+    let result = async {
+        for m in &media {
+            put(&format!("media/{}", m.hash), &js_sys::Uint8Array::from(&m.bytes[..])).await?;
+        }
+        put("boards", &JsValue::from_str(&json)).await
+    }
+    .await;
+    if let Err(e) = result {
+        web_sys::console::warn_1(&format!("wall: could not save in the browser: {}", err_text(&e)).into());
+    }
+    s.borrow_mut().saving = false;
+}
+
+/// Saved boards first; the demo's clips only when there were none.
+async fn startup(s: Rc<RefCell<State>>, demo_videos: Vec<String>) {
+    let store = s.borrow().store;
+    let saved = if store {
+        load_saved(s.clone()).await.unwrap_or_else(|e| {
+            web_sys::console::warn_1(&format!("wall: could not open saved boards: {}", err_text(&e)).into());
+            false
+        })
+    } else {
+        false
+    };
+    if !saved && !demo_videos.is_empty() {
+        load_demo_videos(s.clone(), demo_videos).await;
+    }
+    let mut st = s.borrow_mut();
+    // The untouched demo isn't saved; the first change saves everything.
+    st.saved_stamp = st.app.edit_stamp();
+    st.loaded = true;
+    if saved {
+        web_sys::console::log_1(&"wall: opened the boards saved in this browser".into());
+    }
+}
+
+fn video_mime(ext: &str) -> &'static str {
+    match ext {
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => "video/mp4",
+    }
 }
 
 fn storage() -> Option<web_sys::Storage> {
@@ -63,9 +170,7 @@ fn dpr() -> f32 {
 #[wasm_bindgen]
 pub fn start_with_videos(canvas_id: &str, demo_videos: Vec<String>) -> Result<(), JsValue> {
     let state = start_state(canvas_id)?;
-    if !demo_videos.is_empty() {
-        wasm_bindgen_futures::spawn_local(load_demo_videos(state, demo_videos));
-    }
+    wasm_bindgen_futures::spawn_local(startup(state, demo_videos));
     Ok(())
 }
 
@@ -183,7 +288,7 @@ fn export_png(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn start(canvas_id: &str) -> Result<(), JsValue> {
-    start_state(canvas_id).map(|_| ())
+    start_with_videos(canvas_id, Vec::new())
 }
 
 fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
@@ -208,7 +313,15 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone(), saved_look: (light, grid) }));
+    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone(),
+        saved_look: (light, grid),
+        // `?demo` shows the demo as it ships, without saving.
+        store: !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
+        loaded: false,
+        saved_stamp: 0,
+        checked_ms: 0.0,
+        saving: false,
+    }));
 
     fn pos(e: &PointerEvent) -> [f32; 2] {
         [e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]
@@ -392,6 +505,23 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         for c in cmds {
             shell_command(state.clone(), c);
         }
+        // Autosave: at most once a second, after a change, not mid-drag.
+        let due = {
+            let mut s = state.borrow_mut();
+            let now = js_sys::Date::now();
+            if s.store && s.loaded && !s.saving && now - s.checked_ms > 1000.0 && !s.app.busy_editing() {
+                s.checked_ms = now;
+                let stamp = s.app.edit_stamp();
+                let changed = stamp != s.saved_stamp;
+                s.saved_stamp = stamp;
+                changed
+            } else {
+                false
+            }
+        };
+        if due {
+            wasm_bindgen_futures::spawn_local(save(state.clone()));
+        }
         {
             let mut s = state.borrow_mut();
             let size = s.sync_size();
@@ -492,18 +622,7 @@ async fn import_video_blob(s: Rc<RefCell<State>>, file: &web_sys::Blob, name: &s
         // Converting in the browser (WebCodecs) comes with the cloud library.
         return Err(format!("{:.1} MB is over the 20 MB limit; convert it first", file.size() / 1e6).into());
     }
-    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
-    let video: web_sys::HtmlVideoElement = document.create_element("video")?.dyn_into()?;
-    video.set_muted(true);
-    video.set_loop(true);
-    video.set_autoplay(true);
-    video.set_attribute("playsinline", "")?;
-    let loaded = js_sys::Promise::new(&mut |resolve, reject| {
-        let _ = video.add_event_listener_with_callback("loadeddata", &resolve);
-        let _ = video.add_event_listener_with_callback("error", &reject);
-    });
-    video.set_src(&web_sys::Url::create_object_url_with_blob(file)?);
-    wasm_bindgen_futures::JsFuture::from(loaded).await.map_err(|_| JsValue::from_str("the browser cannot play this video"))?;
+    let video = video_element(file).await?;
     let buf = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await?;
     let bytes = js_sys::Uint8Array::new(&buf).to_vec();
     let ext = match mime {
@@ -526,6 +645,35 @@ async fn import_video_blob(s: Rc<RefCell<State>>, file: &web_sys::Blob, name: &s
     let _ = video.play();
     st.videos.push((video, hash, tex));
     Ok(id)
+}
+
+/// A muted, looping `<video>` for a blob, once it can show frames.
+async fn video_element(blob: &web_sys::Blob) -> Result<web_sys::HtmlVideoElement, JsValue> {
+    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
+    let video: web_sys::HtmlVideoElement = document.create_element("video")?.dyn_into()?;
+    video.set_muted(true);
+    video.set_loop(true);
+    video.set_autoplay(true);
+    video.set_attribute("playsinline", "")?;
+    let loaded = js_sys::Promise::new(&mut |resolve, reject| {
+        let _ = video.add_event_listener_with_callback("loadeddata", &resolve);
+        let _ = video.add_event_listener_with_callback("error", &reject);
+    });
+    video.set_src(&web_sys::Url::create_object_url_with_blob(blob)?);
+    wasm_bindgen_futures::JsFuture::from(loaded).await.map_err(|_| JsValue::from_str("the browser cannot play this video"))?;
+    Ok(video)
+}
+
+/// Gives a saved video on the board its player again.
+async fn attach_player(s: Rc<RefCell<State>>, blob: &web_sys::Blob, hash: wall_app::ContentHash, w: u32, h: u32) -> Result<(), JsValue> {
+    let video = video_element(blob).await?;
+    let mut st = s.borrow_mut();
+    let st = &mut *st;
+    let tex = st.renderer.create_video_texture(w, h).map_err(|e| e.to_string())?;
+    st.app.attach_texture(hash.clone(), tex);
+    let _ = video.play();
+    st.videos.push((video, hash, tex));
+    Ok(())
 }
 
 /// Reads a dropped or pasted file and imports it as a picture.

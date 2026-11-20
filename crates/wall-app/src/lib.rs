@@ -23,6 +23,8 @@ use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
 pub use doc::Document;
+mod snapshot;
+pub use snapshot::NewMedia;
 pub use menu::ShellCommand;
 pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
@@ -275,6 +277,8 @@ pub struct App {
     tool: toolbar::Tool,
     /// Loads pictures as they come on screen (previews, then full size).
     loader: picture_loader::Loader,
+    /// Media imported with no library open, for the shell to store.
+    new_media: Vec<snapshot::NewMedia>,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -345,6 +349,7 @@ impl App {
             show_grid: true,
             tool: toolbar::Tool::Select,
             loader: Default::default(),
+            new_media: Vec::new(),
         }
     }
 
@@ -458,6 +463,9 @@ impl App {
                 None => lib.write_sidecar(&sidecar)?,
             }
         }
+        if self.library.is_none() {
+            self.new_media.push(snapshot::NewMedia { hash: hash.clone(), ext: prepared.ext.into(), bytes: prepared.bytes.clone() });
+        }
         self.sidecars.entry(hash.clone()).or_insert(sidecar);
         let (w, h) = rgba.dimensions();
         self.pictures.entry(hash.clone()).or_insert(Picture::Pending { rgba: rgba.into_raw(), width: w, height: h });
@@ -500,6 +508,9 @@ impl App {
                 Some(existing) => sidecar = existing,
                 None => lib.write_sidecar(&sidecar)?,
             }
+        }
+        if self.library.is_none() {
+            self.new_media.push(snapshot::NewMedia { hash: hash.clone(), ext: ext.into(), bytes: bytes.to_vec() });
         }
         self.videos.insert(hash.clone(), (ext.to_owned(), meta.width, meta.height));
         self.sidecars.entry(hash.clone()).or_insert(sidecar);
