@@ -172,6 +172,9 @@ const HANDLE_PX: f32 = 8.0;
 const CLIPBOARD_TAG: &str = "wall-items:";
 /// Videos narrower than this on screen show a still frame instead of playing.
 pub const MIN_PLAY_PX: f32 = 120.0;
+/// Videos decoding at once, at most (the old Wall used 16 too). Each is an
+/// ffmpeg process on desktop and a `<video>` element on the web.
+pub const MAX_PLAYING: usize = 16;
 /// Height of a group's name strip, in board units.
 const GROUP_HEADER: f64 = 44.0;
 
@@ -570,12 +573,15 @@ impl App {
         }
     }
 
-    /// Videos worth decoding now: on screen and at least `MIN_PLAY_PX` wide.
-    /// Shells pause or stop the others and keep their last frame.
+    /// Videos worth decoding now: on screen and at least `MIN_PLAY_PX` wide,
+    /// at most [`MAX_PLAYING`] of them (selected ones first, then the
+    /// largest on screen). Shells pause or stop the others and keep their
+    /// last frame.
     pub fn playable_videos(&self) -> BTreeSet<ContentHash> {
         let tl = self.camera.screen_to_board([0.0, 0.0], self.viewport);
         let br = self.camera.screen_to_board(self.viewport, self.viewport);
-        self.doc
+        let mut on_screen: Vec<(bool, f64, &ContentHash)> = self
+            .doc
             .board
             .live_items()
             .filter(|i| {
@@ -587,10 +593,30 @@ impl App {
                     && ((f.y + f.h) as f32) > tl[1]
             })
             .filter_map(|i| match &i.kind {
-                ItemKind::Media { hash, .. } if self.videos.contains_key(hash) => Some(hash.clone()),
+                ItemKind::Media { hash, .. } if self.videos.contains_key(hash) => Some((self.selection.contains(&i.id), i.frame.w * i.frame.h, hash)),
                 _ => None,
             })
-            .collect()
+            .collect();
+        on_screen.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+        let mut out = BTreeSet::new();
+        for (_, _, hash) in on_screen {
+            if out.len() == MAX_PLAYING {
+                break;
+            }
+            out.insert(hash.clone());
+        }
+        out
+    }
+
+    /// How many screen pixels wide a video is shown (its largest copy on the
+    /// board), so shells can decode it at a matching size.
+    pub fn video_shown_px(&self, hash: &ContentHash) -> f32 {
+        self.doc
+            .board
+            .live_items()
+            .filter(|i| matches!(&i.kind, ItemKind::Media { hash: h, .. } if h == hash))
+            .map(|i| i.frame.w as f32 * self.camera.zoom)
+            .fold(0.0, f32::max)
     }
 
     /// A frame of a video (its poster or first played frame): picks the
@@ -2826,6 +2852,29 @@ mod tests {
         assert!(a.doc.item(&low).unwrap().frame.z > a.doc.item(&high).unwrap().frame.z);
         a.key(Key::Undo);
         assert!(a.doc.item(&low).unwrap().frame.z < a.doc.item(&high).unwrap().frame.z);
+    }
+
+    #[test]
+    fn at_most_sixteen_videos_play_selected_and_largest_first() {
+        let mut a = app();
+        a.camera = Camera { center: [1000.0, 800.0], zoom: 0.5 };
+        let meta = VideoMeta { width: 320, height: 180, duration_ms: 1000, fps: Some(25.0) };
+        let mut ids = Vec::new();
+        for n in 0..20u32 {
+            let id = a.import_video(&n.to_le_bytes(), "mp4", meta, None, 1).unwrap();
+            // Grid of 5 x 4, the last one smallest (still playable size).
+            let w = if n == 19 { 260.0 } else { 300.0 + n as f64 };
+            let mut item = a.doc.item(&id).unwrap().clone();
+            item.frame = Frame { x: (n % 5) as f64 * 400.0, y: (n / 5) as f64 * 400.0, w, h: w * 0.5625, ..Default::default() };
+            a.doc.preview(item.clone());
+            a.doc.commit_edit(None, item);
+            ids.push(id);
+        }
+        a.selection = [ids[19]].into();
+        let playing = a.playable_videos();
+        assert_eq!(playing.len(), MAX_PLAYING);
+        assert!(playing.contains(&a.media_hash(&ids[19]).unwrap()), "the selected video plays even though it is smallest");
+        assert!(!playing.contains(&a.media_hash(&ids[0]).unwrap()), "the smallest unselected ones wait");
     }
 
     #[test]

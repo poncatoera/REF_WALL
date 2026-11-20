@@ -31,9 +31,24 @@ pub fn prepare(path: &Path) -> Result<Prepared, String> {
 
 /// Size frames are decoded at: at most 1280 wide, even.
 pub fn playback_size(w: u32, h: u32) -> (u32, u32) {
-    let scale = (1280.0 / w.max(1) as f32).min(1.0);
+    playback_size_max(w, h, 1280)
+}
+
+/// Like [`playback_size`] but at most `max_w` wide.
+pub fn playback_size_max(w: u32, h: u32, max_w: u32) -> (u32, u32) {
+    let scale = (max_w as f32 / w.max(1) as f32).min(1.0);
     let even = |v: f32| ((v.round() as u32) & !1).max(2);
     (even(w as f32 * scale), even(h as f32 * scale))
+}
+
+/// Decode width for a video shown `shown_px` wide: 320, 640 or 1280, so a
+/// wall of small videos doesn't decode and upload full HD frames.
+pub fn decode_width(shown_px: f32) -> u32 {
+    match shown_px {
+        p if p <= 320.0 => 320,
+        p if p <= 640.0 => 640,
+        _ => 1280,
+    }
 }
 
 /// One still frame at `at` seconds, scaled to `w`×`h`, as RGBA. Used as a
@@ -75,9 +90,10 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn start(path: PathBuf, width: u32, height: u32, duration: f64, fps: f64) -> Option<Self> {
+    /// Plays at most `max_w` pixels wide (see [`decode_width`]).
+    pub fn start(path: PathBuf, width: u32, height: u32, duration: f64, fps: f64, max_w: u32) -> Option<Self> {
         let ffmpeg = ffmpeg()?.to_owned();
-        let (w, h) = playback_size(width, height);
+        let (w, h) = playback_size_max(width, height, max_w);
         let (tx, rx) = mpsc::sync_channel(3);
         let (seek_tx, seek_rx) = mpsc::channel();
         std::thread::spawn(move || decode(&ffmpeg, &path, w, h, fps, tx, seek_rx));
@@ -171,9 +187,12 @@ fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Fr
     let (mut gen, mut start) = (0u64, 0.0f64);
     'outer: loop {
         let child = command(ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"])
+            // Two decode threads each: with many videos on screen, ffmpeg's
+            // default (one per core, plus frame buffers each) oversubscribes
+            // the CPU and costs ~150 MB per video.
+            .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-ss", &format!("{start:.3}"), "-i"])
             .arg(path)
-            .args(["-an", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .args(["-an", "-vf", &format!("scale={w}:{h}"), "-threads", "2", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
@@ -276,7 +295,7 @@ mod tests {
         assert!(ok.success());
         let p = probe(&clip).unwrap();
         assert_eq!((p.probe.width, p.probe.height, p.probe.duration_ms), (160, 90, 4000));
-        let mut player = Player::start(clip, 160, 90, 4.0, 25.0).unwrap();
+        let mut player = Player::start(clip, 160, 90, 4.0, 25.0, 1280).unwrap();
         let wait = |player: &mut Player, ms: u64| {
             let mut frames = 0;
             let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -328,6 +347,8 @@ struct Slot {
     duration: f64,
     fps: f64,
     tex: Option<wall_render::ImageId>,
+    /// Size of `tex`, to replace it when the player's size changes.
+    tex_size: (u32, u32),
     player: Option<Player>,
     /// Where to resume when it comes back on screen.
     saved: wall_app::VideoStatus,
@@ -405,15 +426,24 @@ impl Videos {
             std::thread::spawn(move || {
                 let _ = tx.send(poster(&p2, pw, ph, at));
             });
-            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, player: None, saved, poster: Some(rx) });
+            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, tex_size: (0, 0), player: None, saved, poster: Some(rx) });
         }
 
         let playable = app.playable_videos();
         for slot in &mut self.slots {
             let want = playable.contains(&slot.hash);
+            let max_w = decode_width(app.video_shown_px(&slot.hash));
+            // Zoomed in past what the player decodes: restart it larger, at
+            // the same time. (Zooming out keeps the sharper frames.)
+            if let Some(p) = &slot.player {
+                if want && p.width < playback_size_max(slot.width, slot.height, max_w).0 {
+                    slot.saved = p.status();
+                    slot.player = None;
+                }
+            }
             match (&slot.player, want) {
                 (None, true) => {
-                    if let Some(mut p) = Player::start(slot.path.clone(), slot.width, slot.height, slot.duration, slot.fps) {
+                    if let Some(mut p) = Player::start(slot.path.clone(), slot.width, slot.height, slot.duration, slot.fps, max_w) {
                         if slot.saved.time > 0.0 {
                             p.command(wall_app::VideoCommand::Seek(slot.saved.time));
                         }
@@ -461,6 +491,7 @@ impl Videos {
                                         renderer.update_image(tex, &frame, pw, ph);
                                         app.attach_texture(slot.hash.clone(), tex);
                                         slot.tex = Some(tex);
+                                        slot.tex_size = (pw, ph);
                                     }
                                     Err(e) => eprintln!("wall: video texture failed: {e}"),
                                 }
@@ -476,11 +507,19 @@ impl Videos {
                 continue;
             };
             if let Some(frame) = player.tick() {
+                // A new texture when the player's size differs (first frame,
+                // or the player restarted at another size).
+                if slot.tex.is_some_and(|_| slot.tex_size != (player.width, player.height)) {
+                    if let Some(old) = slot.tex.take() {
+                        renderer.delete_image(old);
+                    }
+                }
                 if slot.tex.is_none() {
                     match renderer.create_video_texture(player.width, player.height) {
                         Ok(tex) => {
                             app.attach_texture(slot.hash.clone(), tex);
                             slot.tex = Some(tex);
+                            slot.tex_size = (player.width, player.height);
                         }
                         Err(e) => eprintln!("wall: video texture failed: {e}"),
                     }
