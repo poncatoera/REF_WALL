@@ -743,7 +743,7 @@ impl App {
             items.push((f(c as f64 * 260.0, top + 60.0 + r as f64 * 180.0, 230.0, 150.0), ItemKind::Note { text, color: None }));
         }
         app.doc.add(items);
-        app.camera = Camera { center: [980.0, 420.0], zoom: 0.62 };
+        app.camera = Camera { center: [980.0, 380.0], zoom: 0.62 };
         app
     }
 
