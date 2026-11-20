@@ -430,7 +430,7 @@ mod tests {
         assert!(text.starts_with("imported 2 boards, 6 items"), "{text}");
         assert!(text.contains("skipped video \"Broken\": it failed to download"), "{text}");
         assert!(text.contains("skipped image \"0000000007\": its file"), "a path out of the library is refused: {text}");
-        assert_eq!(r.converted_to_notes, 1);
+        assert_eq!(r.converted_to_notes, 0, "palettes and links have their own cards now");
         assert_eq!(std::fs::read(old.join("library.json")).unwrap(), before, "the old library is untouched");
 
         let lib = Library::open(&new).unwrap();
@@ -463,7 +463,7 @@ mod tests {
             assert_eq!((title.as_str(), entries.len(), entries[0].done), ("Shots", 2, true));
         }
         assert!(walk.live_items().any(|i| i.kind == ItemKind::Group { name: "Refs".into(), color: Some("#b083f0".into()) }));
-        assert!(sub.live_items().any(|i| matches!(&i.kind, ItemKind::Note { text, .. } if text == "Dusk\n#112233\n#445566 sea")));
+        assert!(sub.live_items().any(|i| i.kind == ItemKind::Palette { colors: vec!["#112233".into(), "#445566".into()], name: "Dusk".into() }));
 
         // Into a library that is open in Wall: a new board, home untouched.
         let home_before = std::fs::read(new.join("boards").join(format!("{}.json", home.id))).unwrap();

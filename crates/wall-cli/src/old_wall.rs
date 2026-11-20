@@ -195,6 +195,10 @@ pub fn import_into(old: &Path, new: &Path, container: Option<&str>, now: u64) ->
                     continue;
                 }
             },
+            "palette" if it["swatches"].as_array().is_some_and(|w| w.iter().any(|c| c["hex"].is_string())) => {
+                let colors = it["swatches"].as_array().unwrap().iter().filter_map(|c| c["hex"].as_str()).filter(|h| h.len() == 7 && h.starts_with('#')).map(str::to_lowercase).collect();
+                ItemKind::Palette { colors, name: text(it, "title").to_owned() }
+            }
             "link" if !text(it, "url").is_empty() => ItemKind::Link { url: text(it, "url").to_owned(), title: text(it, "title").to_owned() },
             "palette" | "link" | "type" | "sketch" => {
                 report.converted_to_notes += 1;
