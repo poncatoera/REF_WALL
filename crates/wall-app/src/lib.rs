@@ -11,6 +11,7 @@ mod picture_loader;
 mod scene;
 mod snap;
 pub mod theme;
+pub mod toolbar;
 mod grid;
 pub mod video;
 
@@ -132,6 +133,9 @@ enum Gesture {
     Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64> },
     /// Dragging along a video's scrub strip.
     Scrub { hash: ContentHash, x: f32, w: f32, duration: f64 },
+    /// Dragging a tool out of the rail; released on the board, it makes
+    /// that thing there (released on the rail, in the middle of the view).
+    RailDrag { tool: toolbar::Tool },
 }
 
 /// Text being typed into an item. The item shows the live text through
@@ -263,6 +267,8 @@ pub struct App {
     library_view: Option<library_view::LibraryView>,
     /// Dots on the board (G or View > Show grid).
     show_grid: bool,
+    /// The rail's current tool (Select, or Arrow while drawing arrows).
+    tool: toolbar::Tool,
     /// Loads pictures as they come on screen (previews, then full size).
     loader: picture_loader::Loader,
 }
@@ -333,6 +339,7 @@ impl App {
             desktop: false,
             library_view: None,
             show_grid: true,
+            tool: toolbar::Tool::Select,
             loader: Default::default(),
         }
     }
@@ -898,6 +905,13 @@ impl App {
         if self.menu_click(pos) {
             return;
         }
+        let rail = self.rail_layout();
+        if rail.contains(pos) {
+            if let Some(tool) = rail.tool_at(pos) {
+                self.rail_click(tool);
+            }
+            return;
+        }
         if let Some(action) = self.library_layout().and_then(|l| l.action_at(pos)) {
             self.library_action(action);
             return;
@@ -921,8 +935,8 @@ impl App {
             }
             self.end_edit();
         }
-        if mods.alt {
-            // Alt-drag draws an arrow, from an item or from empty space.
+        if mods.alt || self.tool == toolbar::Tool::Arrow {
+            // Alt-drag (or any drag with the arrow tool) draws an arrow, from an item or from empty space.
             let from = match self.hit_item(board) {
                 Some(id) => ArrowEnd::Item { id },
                 None => ArrowEnd::Point { x: board[0] as f64, y: board[1] as f64 },
@@ -1052,7 +1066,14 @@ impl App {
         }
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
-            Gesture::Idle => return,
+            Gesture::Idle => {
+                // Tooltips on the rail follow the pointer.
+                if self.rail_layout().contains(pos) || self.rail_layout().contains(last) {
+                    self.needs_redraw = true;
+                }
+                return;
+            }
+            Gesture::RailDrag { .. } => {}
             Gesture::Connect { now, .. } => *now = board,
             Gesture::Crop { original, start, left, top } => {
                 let item = crop_item(original, [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64], *left, *top);
@@ -1108,7 +1129,13 @@ impl App {
             Gesture::Move { originals, delta, .. } => {
                 self.doc.commit_drag(&originals, delta[0], delta[1]);
             }
+            Gesture::RailDrag { tool } => {
+                let at = if self.rail_layout().contains(pos) { self.camera.center } else { self.camera.screen_to_board(pos, self.viewport) };
+                self.make_with_tool(tool, at);
+            }
             Gesture::Connect { from, start, now } => {
+                // One arrow per pick of the arrow tool, as in Milanote.
+                self.tool = toolbar::Tool::Select;
                 let board = self.camera.screen_to_board(pos, self.viewport);
                 let _ = now;
                 let to = match self.hit_item(board) {
@@ -1268,6 +1295,7 @@ impl App {
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
+            Key::Escape if self.tool != toolbar::Tool::Select => self.tool = toolbar::Tool::Select,
             Key::Escape if self.library_view.is_some() => self.library_view = None,
             Key::Escape if self.selection.is_empty() && self.tag_filter.is_some() => self.filter_by_tag(None),
             Key::Escape if self.selection.is_empty() => self.go_up(),
@@ -2122,6 +2150,7 @@ impl App {
             // Sets needs_redraw again while thumbnails are still loading.
             self.draw_library(renderer);
         }
+        self.draw_rail(renderer);
         // The menu bar and its drop-downs go over everything.
         self.draw_menu(renderer);
     }
@@ -2492,6 +2521,99 @@ impl App {
 }
 
 impl App {
+    // ---- tool rail ---------------------------------------------------------
+
+    fn rail_layout(&mut self) -> toolbar::Layout {
+        let dragging = match &self.gesture {
+            Gesture::RailDrag { tool } => Some(*tool),
+            _ => None,
+        };
+        let font = &mut self.font;
+        toolbar::layout(self.tool, self.cursor, dragging, &mut |s| panel::text_width(font, s, 12.0))
+    }
+
+    /// The tool under the pointer was pressed: modes switch, things to make
+    /// start a drag (a click without moving makes it mid-view).
+    fn rail_click(&mut self, tool: toolbar::Tool) {
+        use toolbar::Tool;
+        self.end_edit();
+        match tool {
+            Tool::Select => self.tool = Tool::Select,
+            Tool::Arrow => self.tool = if self.tool == Tool::Arrow { Tool::Select } else { Tool::Arrow },
+            Tool::Import => self.run_command(menu::Command::Import),
+            t => self.gesture = Gesture::RailDrag { tool: t },
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Makes what `tool` makes, centred near board point `at`, and selects it
+    /// (notes, text and to-dos start in typing mode).
+    pub fn make_with_tool(&mut self, tool: toolbar::Tool, at: [f32; 2]) {
+        use toolbar::Tool;
+        self.tool = Tool::Select;
+        match tool {
+            Tool::Note => {
+                self.new_note(at, String::new());
+            }
+            Tool::Todo => {
+                self.new_todo(at);
+            }
+            Tool::Text => {
+                self.new_text(at);
+            }
+            Tool::Group => {
+                let s = self.card_scale();
+                let (w, h) = (480.0 * s, 320.0 * s);
+                let id = self.add_group("Group", [at[0] as f64 - 20.0 * s, at[1] as f64 - 20.0 * s, w, h]);
+                self.selection = [id].into();
+            }
+            Tool::Board => {
+                // new_board places the card under the cursor.
+                let z = self.camera.zoom;
+                let screen = [(at[0] - self.camera.center[0]) * z + self.viewport[0] / 2.0, (at[1] - self.camera.center[1]) * z + self.viewport[1] / 2.0];
+                let cursor = std::mem::replace(&mut self.cursor, screen);
+                self.new_board();
+                self.cursor = cursor;
+            }
+            Tool::Select | Tool::Arrow | Tool::Import => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    /// A line of text straight on the board (no card), ready for typing.
+    pub fn new_text(&mut self, at: [f32; 2]) -> Uuid {
+        self.end_edit();
+        let s = self.card_scale();
+        let frame = Frame { x: at[0] as f64 - 10.0 * s, y: at[1] as f64 - 24.0 * s, w: 160.0 * s, h: 48.0 * s, z: self.doc.top_z() + 1.0, text_scale: s, ..Default::default() };
+        let id = Uuid::new_v4();
+        let item = BoardItem { id, frame, kind: ItemKind::Label { text: String::new() }, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false };
+        self.doc.preview(item);
+        self.editing = Some(Editing { id, caret: 0, original: None, todo: false });
+        self.selection = [id].into();
+        self.needs_redraw = true;
+        id
+    }
+
+    fn draw_rail(&mut self, renderer: &mut Renderer) {
+        let l = self.rail_layout();
+        let view = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
+        let boxes: Vec<wall_render::BoxInstance> = l
+            .boxes
+            .iter()
+            .map(|b| wall_render::BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] })
+            .collect();
+        renderer.draw_boxes(&view, &boxes);
+        let mut glyphs = Vec::new();
+        for t in &l.texts {
+            scene::add_text(&mut self.font, &mut glyphs, &t.text, t.at, t.size, t.color);
+        }
+        if self.font.atlas.dirty {
+            renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+            self.font.atlas.dirty = false;
+        }
+        renderer.draw_glyphs(&view, &glyphs);
+    }
+
     // ---- menu bar ----------------------------------------------------------
 
     fn menu_layout(&mut self) -> menu::Layout {
@@ -3540,12 +3662,50 @@ mod tests {
     }
 
     #[test]
+    fn tool_rail_makes_things_by_click_or_drag_and_arms_the_arrow() {
+        use toolbar::Tool;
+        let mut a = app();
+        let button = |a: &mut App, t: Tool| {
+            let r = a.rail_layout().hits.iter().find(|(_, x)| *x == t).unwrap().0;
+            [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0]
+        };
+        // A click on Note makes one in the middle of the view, ready for typing.
+        let p = button(&mut a, Tool::Note);
+        a.pointer_down(Button::Primary, p, Mods::default());
+        a.pointer_up(Button::Primary, p);
+        let id = a.editing.as_ref().unwrap().id;
+        assert!(matches!(a.doc.item(&id).unwrap().kind, ItemKind::Note { .. }));
+        a.text_input("hi");
+        a.end_edit();
+        // Dragging Group onto the board puts it where it was dropped.
+        let p = button(&mut a, Tool::Group);
+        a.pointer_down(Button::Primary, p, Mods::default());
+        a.pointer_move([600.0, 400.0]);
+        a.pointer_up(Button::Primary, [600.0, 400.0]);
+        let g = a.doc.item(a.selection.iter().next().unwrap()).unwrap();
+        assert!(matches!(g.kind, ItemKind::Group { .. }));
+        let at = a.camera.screen_to_board([600.0, 400.0], a.viewport);
+        assert_eq!((g.frame.x, g.frame.y), (at[0] as f64 - 20.0, at[1] as f64 - 20.0));
+        // The arrow tool makes a plain drag draw one arrow, then goes back to Select.
+        let p = button(&mut a, Tool::Arrow);
+        a.pointer_down(Button::Primary, p, Mods::default());
+        a.pointer_up(Button::Primary, p);
+        assert_eq!(a.tool, Tool::Arrow);
+        let before = a.item_count();
+        a.pointer_down(Button::Primary, [200.0, 900.0], Mods::default());
+        a.pointer_move([400.0, 950.0]);
+        a.pointer_up(Button::Primary, [400.0, 950.0]);
+        assert_eq!(a.item_count(), before + 1);
+        assert_eq!(a.tool, Tool::Select);
+    }
+
+    #[test]
     fn marquee_selects_contained_items_and_shift_adds() {
         let mut a = app();
         let n1 = add_note(&mut a, 100.0, 100.0);
         let n2 = add_note(&mut a, 300.0, 100.0);
         let n3 = add_note(&mut a, 600.0, 100.0);
-        a.pointer_down(Button::Primary, [50.0, 50.0], Mods::default());
+        a.pointer_down(Button::Primary, [70.0, 50.0], Mods::default()); // just right of the tool rail
         a.pointer_move([450.0, 250.0]);
         a.pointer_up(Button::Primary, [450.0, 250.0]);
         assert_eq!(a.selection, [n1, n2].into());
