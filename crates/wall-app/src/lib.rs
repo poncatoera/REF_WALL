@@ -1860,7 +1860,8 @@ impl App {
                             hash: hash.clone(),
                             media: lib.media_path(&hash, &sc.ext),
                             cache_dir: lib.root().join("cache").join("previews"),
-                            full: true,
+                            tier: picture_loader::Tier::Full,
+                            want_tiny: false,
                         };
                         picture_loader::run_job(&job).full
                     });
@@ -1892,7 +1893,8 @@ impl App {
         let pixels = renderer
             .render_to_pixels(size, |r| {
                 r.begin_frame(size, BACKGROUND);
-                scene.draw(r, &view, &textures);
+                // Always the full-size picture, whatever its size in the export.
+                scene.draw(r, &view, &|h, _| textures.get(h).map(|id| (*id, [0.0, 0.0, 1.0, 1.0])));
             })
             .map_err(|e| AppError::Other(e.to_string()));
         for id in temporary {
@@ -1906,15 +1908,6 @@ impl App {
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
         self.pump_pictures(renderer);
         let caret = self.caret_rect();
-        let textures: HashMap<&ContentHash, ImageId> = self
-            .pictures
-            .iter()
-            .filter_map(|(h, p)| match p {
-                Picture::Ready(id) | Picture::Preview(id) => Some((h, *id)),
-                Picture::Pending { .. } | Picture::Unloaded => None,
-            })
-            .collect();
-
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
         if self.font.atlas.dirty {
             renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
@@ -1954,7 +1947,7 @@ impl App {
 
         renderer.begin_frame(size_px, BACKGROUND);
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
-        self.scene.draw(renderer, &view, &textures);
+        self.scene.draw(renderer, &view, &|h, px| self.picture_texture(h, px));
         let dim: Vec<wall_render::BoxInstance> = self
             .filtered_out()
             .iter()

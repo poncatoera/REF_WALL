@@ -277,18 +277,50 @@ impl Renderer {
         unsafe { self.gl.delete_texture(id.0) };
     }
 
-    /// Draws pictures, one draw call each (batching into arrays comes later).
+    /// Draws pictures in order. Neighbours that share a texture (pictures
+    /// packed into one atlas page) go in one instanced draw call.
     pub fn draw_images(&mut self, view: &ViewUniform, images: &[(ImageId, ImageInstance)]) {
         if images.is_empty() {
             return;
         }
         self.set_view(view);
+        let mut batch: Vec<ImageInstance> = Vec::with_capacity(images.len());
         unsafe {
             self.gl.active_texture(glow::TEXTURE0);
-            for (id, inst) in images {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(id.0));
-                self.images.draw(&self.gl, bytemuck::bytes_of(inst), 1);
+            for run in image_runs(images) {
+                batch.clear();
+                batch.extend(run.iter().map(|(_, inst)| *inst));
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(run[0].0 .0));
+                self.images.draw(&self.gl, bytemuck::cast_slice(&batch), batch.len());
             }
+        }
+    }
+
+    /// Creates an empty mipmapped RGBA8 texture, for atlas pages filled
+    /// with [`Self::update_image_region`].
+    pub fn create_atlas(&mut self, width: u32, height: u32) -> Result<ImageId, RenderError> {
+        let id = self.create_image(&vec![0u8; (width * height * 4) as usize], width, height)?;
+        Ok(id)
+    }
+
+    /// Writes RGBA8 pixels into part of a texture. Call
+    /// [`Self::rebuild_mipmaps`] once after a batch of writes.
+    pub fn update_image_region(&mut self, id: ImageId, x: u32, y: u32, rgba: &[u8], width: u32, height: u32) {
+        let gl = &self.gl;
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(id.0));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x as i32, y as i32, width as i32, height as i32, glow::RGBA,
+                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rgba)));
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    pub fn rebuild_mipmaps(&mut self, id: ImageId) {
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(id.0));
+            self.gl.generate_mipmap(glow::TEXTURE_2D);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
     }
 
@@ -463,8 +495,30 @@ unsafe fn link(gl: &glow::Context, vs: &str, fs: &str) -> Result<glow::Program, 
     if ok { Ok(program) } else { Err(RenderError::Link(gl.get_program_info_log(program))) }
 }
 
+/// Splits `items` into runs of neighbours with the same key (texture), in
+/// order: draw order must be kept, so only neighbours can share a call.
+fn image_runs<K: PartialEq, V>(items: &[(K, V)]) -> Vec<&[(K, V)]> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for i in 1..=items.len() {
+        if i == items.len() || items[i].0 != items[start].0 {
+            runs.push(&items[start..i]);
+            start = i;
+        }
+    }
+    runs
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_runs_group_only_neighbours() {
+        let items = [(1, 'a'), (1, 'b'), (2, 'c'), (1, 'd')];
+        let runs: Vec<Vec<char>> = super::image_runs(&items).iter().map(|r| r.iter().map(|x| x.1).collect()).collect();
+        assert_eq!(runs, vec![vec!['a', 'b'], vec!['c'], vec!['d']]);
+        assert!(super::image_runs::<u8, u8>(&[]).is_empty());
+    }
+
     use super::*;
 
     #[test]

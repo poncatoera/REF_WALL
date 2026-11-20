@@ -230,11 +230,30 @@ impl Scene {
     }
 
 
-    pub fn draw(&self, renderer: &mut Renderer, view: &ViewUniform, textures: &HashMap<&ContentHash, ImageId>) {
+    /// `texture(hash, shown_px)` gives the texture and texture rectangle to
+    /// draw a picture with when it is shown `shown_px` wide (a tiny atlas
+    /// image when small, else its own texture); None skips it.
+    pub fn draw(&self, renderer: &mut Renderer, view: &ViewUniform, texture: &dyn Fn(&ContentHash, f32) -> Option<(ImageId, [f32; 4])>) {
+        // The board area on screen, to skip pictures outside it.
+        let xs = [(-1.0 - view.offset[0]) / view.scale[0], (1.0 - view.offset[0]) / view.scale[0]];
+        let ys = [(-1.0 - view.offset[1]) / view.scale[1], (1.0 - view.offset[1]) / view.scale[1]];
+        let (x0, x1, y0, y1) = (xs[0].min(xs[1]), xs[0].max(xs[1]), ys[0].min(ys[1]), ys[0].max(ys[1]));
+        let zoom = 1.0 / view.pixel.max(1e-9);
         for run in std::iter::once(&self.back).chain(&self.runs) {
             renderer.draw_boxes(view, &run.boxes);
-            let images: Vec<(ImageId, ImageInstance)> =
-                run.images.iter().filter_map(|(h, inst)| textures.get(h).map(|id| (*id, *inst))).collect();
+            let images: Vec<(ImageId, ImageInstance)> = run
+                .images
+                .iter()
+                .filter(|(_, i)| i.rect[0] < x1 && i.rect[0] + i.rect[2] > x0 && i.rect[1] < y1 && i.rect[1] + i.rect[3] > y0)
+                .filter_map(|(h, inst)| {
+                    let shown = inst.rect[2] * zoom / inst.uv_rect[2].max(1e-6);
+                    let (id, t) = texture(h, shown)?;
+                    let mut inst = *inst;
+                    let c = inst.uv_rect;
+                    inst.uv_rect = [t[0] + c[0] * t[2], t[1] + c[1] * t[3], c[2] * t[2], c[3] * t[3]];
+                    Some((id, inst))
+                })
+                .collect();
             renderer.draw_images(view, &images);
             renderer.draw_curves(view, &run.curves);
             renderer.draw_glyphs(view, &run.glyphs);
