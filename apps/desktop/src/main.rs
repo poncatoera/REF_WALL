@@ -367,8 +367,6 @@ fn want_angle() -> bool {
         _ => {
             let (egl, gles) = if cfg!(windows) {
                 ("libEGL.dll", "libGLESv2.dll")
-            } else if cfg!(target_os = "macos") {
-                ("libEGL.dylib", "libGLESv2.dylib")
             } else {
                 return false;
             };
@@ -396,8 +394,7 @@ fn create_gfx(event_loop: &ActiveEventLoop) -> Result<Gfx, Box<dyn std::error::E
     let raw = window.window_handle()?.as_raw();
     let display = config.display();
     // ANGLE is only in use if EGL actually loaded; otherwise glutin fell back.
-    #[allow(irrefutable_let_patterns)]
-    let gles = angle && matches!(display, glutin::display::Display::Egl(_));
+    let gles = angle && is_egl(&display);
     if angle && !gles {
         eprintln!("wall: ANGLE requested but EGL did not load; using desktop OpenGL");
     }
@@ -425,6 +422,20 @@ fn create_gfx(event_loop: &ActiveEventLoop) -> Result<Gfx, Box<dyn std::error::E
     Ok(Gfx { window, surface, context, renderer })
 }
 
+/// glutin has no EGL on macOS, so there ANGLE can't load through it yet and
+/// Wall uses Apple's OpenGL 3.3 (which runs on Metal underneath).
+#[cfg(not(target_os = "macos"))]
+fn is_egl(display: &glutin::display::Display) -> bool {
+    #[allow(irrefutable_let_patterns)]
+    let egl = matches!(display, glutin::display::Display::Egl(_));
+    egl
+}
+
+#[cfg(target_os = "macos")]
+fn is_egl(_display: &glutin::display::Display) -> bool {
+    false
+}
+
 fn pick_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
     configs
         .reduce(|best, c| if c.num_samples() > best.num_samples() && c.num_samples() <= 4 { c } else { best })
@@ -449,7 +460,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = match std::env::var("WALL_DEMO").ok() {
         Some(n) => App::demo(n.parse().unwrap_or(2000)),
         None => {
-            let path = std::env::args_os().nth(1).map(std::path::PathBuf::from).unwrap_or_else(default_library);
+            // Older macOS passes `-psn_…` when Finder opens the app; that isn't a path.
+            let path = std::env::args_os()
+                .skip(1)
+                .find(|a| !a.to_string_lossy().starts_with("-psn"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(default_library);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
