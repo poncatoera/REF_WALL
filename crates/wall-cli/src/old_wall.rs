@@ -199,7 +199,7 @@ pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
         let (x, y) = placed.unwrap_or((0.0, 0.0));
         let item = BoardItem {
             id,
-            frame: Frame { x, y, w: num(it, "w").unwrap_or(w), h: num(it, "h").unwrap_or(h), rotation: 0.0, z: num(it, "z").unwrap_or(0.0) },
+            frame: Frame { x, y, w: num(it, "w").unwrap_or(w), h: num(it, "h").unwrap_or(h), rotation: 0.0, z: num(it, "z").unwrap_or(0.0), text_scale: text_scale(kind, it) },
             kind: item_kind,
             rev: 1,
             updated_ms: now,
@@ -242,7 +242,7 @@ pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
         }
         let card = |x: f64, y: f64, z: f64| BoardItem {
             id: Uuid::new_v4(),
-            frame: Frame { x, y, w: 240.0, h: 180.0, rotation: 0.0, z },
+            frame: Frame { x, y, w: 240.0, h: 180.0, rotation: 0.0, z, text_scale: 1.0 },
             kind: ItemKind::Board { board_id: board.id },
             rev: 1,
             updated_ms: now,
@@ -290,6 +290,18 @@ fn kind_name_of(k: &ItemKind) -> &'static str {
         ItemKind::Arrow { .. } => "arrows",
         ItemKind::Board { .. } => "boards",
     }
+}
+
+/// How large the old Wall drew a card's text: cards carry `scale` (set
+/// when made while zoomed out), labels a font `size` already times scale
+/// (40 px at scale 1, against 96 board units per em for new labels).
+fn text_scale(kind: &str, it: &Value) -> f64 {
+    let s = match kind {
+        "image" | "video" | "arrow" => 1.0,
+        "label" => num(it, "size").map_or_else(|| num(it, "scale").unwrap_or(1.0), |px| px / 96.0),
+        _ => num(it, "scale").unwrap_or(1.0),
+    };
+    if s.is_finite() && s > 0.0 { s.clamp(0.05, 64.0) } else { 1.0 }
 }
 
 /// Size of a card the old Wall stored without one: base size × scale.

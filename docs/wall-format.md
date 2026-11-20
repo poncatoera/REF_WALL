@@ -148,7 +148,9 @@ What Wall knows about one media file.
 | `items` | Every item on the board, keyed by item id. |
 
 Board units are roughly pixels at 100% zoom. `x` and `y` grow right and
-down. `z` orders items: higher draws on top.
+down. `z` orders items: higher draws on top. `frame.text_scale` (optional,
+default 1) draws a card's text and controls that many times larger: Wall
+sets it on cards made while zoomed far out, so they stay readable there.
 
 ### Items
 

@@ -101,7 +101,7 @@ pub struct Rect {
 }
 
 /// Where an item sits on the board, in board units.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Frame {
     pub x: f64,
     pub y: f64,
@@ -112,6 +112,24 @@ pub struct Frame {
     /// Stacking order; higher draws on top.
     #[serde(default)]
     pub z: f64,
+    /// Size of a card's text and controls: 2 draws them twice as large.
+    /// Cards made while zoomed far out use it so they stay readable.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub text_scale: f64,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Frame { x: 0.0, y: 0.0, w: 0.0, h: 0.0, rotation: 0.0, z: 0.0, text_scale: 1.0 }
+    }
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(v: &f64) -> bool {
+    *v == 1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

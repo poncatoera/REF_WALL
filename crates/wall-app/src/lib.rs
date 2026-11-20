@@ -1425,7 +1425,8 @@ impl App {
             }
         }
         let at = self.camera.screen_to_board(self.cursor, self.viewport);
-        let frame = Frame { x: at[0] as f64 - 110.0, y: at[1] as f64 - 70.0, w: 220.0, h: 140.0, ..Default::default() };
+        let s = self.card_scale();
+        let frame = Frame { x: at[0] as f64 - 110.0 * s, y: at[1] as f64 - 70.0 * s, w: 220.0 * s, h: 140.0 * s, text_scale: s, ..Default::default() };
         let item = self.doc.add(vec![(frame, ItemKind::Board { board_id: id })])[0];
         self.selection = [item].into();
         self.needs_redraw = true;
@@ -1626,6 +1627,13 @@ impl App {
     }
 
     /// Creates a to-do list at a board point and starts typing into it.
+    /// Text scale for a card made now: cards made while zoomed far out are
+    /// drawn larger so they can be read at that zoom (as in the old Wall).
+    fn card_scale(&self) -> f64 {
+        let z = self.camera.zoom as f64;
+        if z < 0.5 { (1.0 / z).min(8.0) } else { 1.0 }
+    }
+
     pub fn new_todo(&mut self, at: [f32; 2]) -> Uuid {
         let id = self.new_note(at, "To-do\n".into());
         if let Some(e) = &mut self.editing {
@@ -1649,7 +1657,10 @@ impl App {
         let item = self.doc.item(&id)?;
         let ItemKind::Todo { entries, .. } = &item.kind else { return None };
         let f = item.frame;
-        let rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+        // Boxes are laid out at the card's unscaled size (see scene).
+        let s = if f.text_scale > 0.0 { f.text_scale as f32 } else { 1.0 };
+        let rect = [f.x as f32, f.y as f32, f.w as f32 / s, f.h as f32 / s];
+        let p = [rect[0] + (p[0] - rect[0]) / s, rect[1] + (p[1] - rect[1]) / s];
         (0..entries.len()).find(|k| {
             let b = scene::todo_box(rect, *k);
             let pad = 4.0;
@@ -1676,7 +1687,7 @@ impl App {
                 self.selection.remove(&e.id);
                 return;
             }
-            item.frame.h = scene::todo_height(entries.len()) as f64;
+            item.frame.h = scene::todo_height(entries.len()) as f64 * item.frame.text_scale.max(0.05);
             item.kind = ItemKind::Todo { title, entries };
             self.doc.commit_edit(e.original.as_ref(), item);
             return;
@@ -1693,7 +1704,8 @@ impl App {
     /// Creates a note at a board point and starts typing into it.
     pub fn new_note(&mut self, at: [f32; 2], text: String) -> Uuid {
         self.end_edit();
-        let frame = Frame { x: at[0] as f64 - 20.0, y: at[1] as f64 - 20.0, w: 240.0, h: 72.0, z: self.doc.top_z() + 1.0, ..Default::default() };
+        let s = self.card_scale();
+        let frame = Frame { x: at[0] as f64 - 20.0 * s, y: at[1] as f64 - 20.0 * s, w: 240.0 * s, h: 72.0 * s, z: self.doc.top_z() + 1.0, text_scale: s, ..Default::default() };
         let id = Uuid::new_v4();
         let caret = text.len();
         let item = BoardItem { id, frame, kind: ItemKind::Note { text, color: None }, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false };
@@ -1769,7 +1781,7 @@ impl App {
         self.editing
             .as_ref()
             .and_then(|e| self.doc.item(&e.id))
-            .and_then(|i| scene::TextStyle::of(&i.kind, i.frame.w as f32))
+            .and_then(scene::TextStyle::for_item)
             .is_some_and(|s| s.multiline)
     }
 
@@ -1782,7 +1794,7 @@ impl App {
         e.caret = e.caret.min(text.len());
         f(text, &mut e.caret);
         let text = text.clone();
-        if let Some(style) = scene::TextStyle::of(&item.kind, item.frame.w as f32) {
+        if let Some(style) = scene::TextStyle::for_item(&item) {
             match item.kind {
                 ItemKind::Note { .. } | ItemKind::Todo { .. } => {
                     let need = (style.height_for(&mut self.font, &text) + 16.0) as f64;
@@ -1810,7 +1822,7 @@ impl App {
     fn place_caret(&mut self, board: [f32; 2]) {
         let Some(e) = self.editing.as_mut() else { return };
         let Some(item) = self.doc.item(&e.id) else { return };
-        let (Some(text), Some(style)) = (item_text(&item.kind), scene::TextStyle::of(&item.kind, item.frame.w as f32)) else { return };
+        let (Some(text), Some(style)) = (item_text(&item.kind), scene::TextStyle::for_item(item)) else { return };
         let local = [board[0] - item.frame.x as f32, board[1] - item.frame.y as f32];
         e.caret = style.hit(&mut self.font, text, style.max_lines(item.frame.h as f32), local);
     }
@@ -1820,7 +1832,7 @@ impl App {
         let e = self.editing.as_ref()?;
         let item = self.doc.item(&e.id)?;
         let text = item_text(&item.kind)?;
-        let style = scene::TextStyle::of(&item.kind, item.frame.w as f32)?;
+        let style = scene::TextStyle::for_item(item)?;
         let r = style.caret(&mut self.font, text, style.max_lines(item.frame.h as f32), e.caret.min(text.len()));
         Some([item.frame.x as f32 + r[0], item.frame.y as f32 + r[1], 1.5 / self.camera.zoom, r[3]])
     }
@@ -2628,6 +2640,23 @@ fn demo_picture(seed: u32, w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cards_made_zoomed_out_are_scaled_up() {
+        let mut a = app();
+        let id = a.new_note([0.0, 0.0], "near".into());
+        assert_eq!(a.doc.item(&id).unwrap().frame.text_scale, 1.0);
+        a.end_edit();
+        a.camera.zoom = 0.25;
+        let id = a.new_note([0.0, 0.0], "far".into());
+        a.end_edit();
+        let f = a.doc.item(&id).unwrap().frame;
+        assert_eq!(f.text_scale, 4.0);
+        assert_eq!(f.w, 960.0);
+        let style = scene::TextStyle::for_item(a.doc.item(&id).unwrap()).unwrap();
+        assert_eq!(style.size, 64.0);
+        assert!(f.h >= style.at[1] as f64, "the card grew to fit its scaled text: {}", f.h);
+    }
 
     #[test]
     fn export_size_fits_the_board() {

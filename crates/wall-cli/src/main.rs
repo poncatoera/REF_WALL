@@ -232,7 +232,7 @@ fn import(lib: &Library, files: &[String], board: Option<&str>, now: u64) -> Res
             id,
             BoardItem {
                 id,
-                frame: Frame { x, y, w: width, h: height, rotation: 0.0, z: top_z + 1.0 + k as f64 },
+                frame: Frame { x, y, w: width, h: height, rotation: 0.0, z: top_z + 1.0 + k as f64, text_scale: 1.0 },
                 kind: ItemKind::Media { hash, crop: None },
                 rev: top_rev + 1,
                 updated_ms: now,

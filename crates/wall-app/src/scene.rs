@@ -134,8 +134,16 @@ impl Scene {
                 }
                 self.runs.last_mut().unwrap().claim(rect);
             }
+            // Cards with a text scale are laid out at their unscaled size,
+            // then everything drawn for them is scaled up around the corner.
+            let scale = item.frame.text_scale as f32;
+            let scaled = scale > 0.0 && scale != 1.0 && !matches!(item.kind, ItemKind::Media { .. } | ItemKind::Arrow { .. });
+            if scaled {
+                rect = [rect[0], rect[1], rect[2] / scale, rect[3] / scale];
+            }
             let mut label = None;
             let run = if is_group { &mut self.back } else { self.runs.last_mut().unwrap() };
+            let marks = (run.boxes.len(), run.glyphs.len(), run.curves.len());
             match &item.kind {
                 ItemKind::Group { name, color } => {
                     let c = parse_hex(color.as_deref()).unwrap_or([0.6, 0.6, 0.65]);
@@ -223,6 +231,26 @@ impl Scene {
             }
             if let Some((t, color)) = label {
                 item_text(&mut self.text_cache, gen, font, &mut run.glyphs, item.id, t, &item.kind, color, rect);
+            }
+            if scaled {
+                let o = [rect[0], rect[1]];
+                let at = |x: f32, y: f32| [o[0] + (x - o[0]) * scale, o[1] + (y - o[1]) * scale];
+                let grow = |r: [f32; 4]| {
+                    let p = at(r[0], r[1]);
+                    [p[0], p[1], r[2] * scale, r[3] * scale]
+                };
+                for b in &mut run.boxes[marks.0..] {
+                    b.rect = grow(b.rect);
+                    b.shape = [b.shape[0] * scale, b.shape[1] * scale];
+                }
+                for g in &mut run.glyphs[marks.1..] {
+                    g.rect = grow(g.rect);
+                }
+                for c in &mut run.curves[marks.2..] {
+                    let (a, b, e) = (at(c.p01[0], c.p01[1]), at(c.p01[2], c.p01[3]), at(c.p2w[0], c.p2w[1]));
+                    c.p01 = [a[0], a[1], b[0], b[1]];
+                    c.p2w = [e[0], e[1], c.p2w[2] * scale, c.p2w[3] * scale];
+                }
             }
         }
         self.text_cache.retain(|_, e| e.gen == gen);
@@ -436,6 +464,14 @@ impl TextStyle {
             ItemKind::Label { .. } => TextStyle { at: [0.0, 96.0], size: 96.0, wrap: None, multiline: false },
             _ => return None,
         })
+    }
+
+    /// The style of an item's text as drawn, with its frame's text scale.
+    pub fn for_item(item: &wall_format::BoardItem) -> Option<Self> {
+        let s = item.frame.text_scale as f32;
+        let s = if s > 0.0 { s } else { 1.0 };
+        let st = Self::of(&item.kind, item.frame.w as f32 / s)?;
+        Some(TextStyle { at: [st.at[0] * s, st.at[1] * s], size: st.size * s, wrap: st.wrap.map(|w| w * s), ..st })
     }
 
     pub fn line_height(&self) -> f32 {
