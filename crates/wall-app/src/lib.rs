@@ -2,7 +2,8 @@
 //! Shells (apps/desktop, apps/web) only create the window or canvas, forward
 //! input here and call [`App::render`].
 
-use wall_render::{BoxInstance, Renderer, ViewUniform};
+use wall_render::{BoxInstance, GlyphInstance, Renderer, ViewUniform};
+use wall_text::Font;
 
 /// Pan and zoom over the infinite board.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +44,8 @@ impl Camera {
 pub struct App {
     pub camera: Camera,
     boxes: Vec<BoxInstance>,
+    font: Font,
+    glyphs: Vec<GlyphInstance>,
     dragging: bool,
     last_cursor: Option<[f32; 2]>,
 }
@@ -74,8 +77,32 @@ impl App {
                 });
             }
         }
-        let center = [cols as f32 * 160.0, rows as f32 * 140.0];
-        Self { camera: Camera { center: [center[0].min(1600.0), center[1].min(1200.0)], zoom: 1.0 }, boxes, dragging: false, last_cursor: None }
+        let mut font = Font::new(wall_text::INTER_REGULAR).expect("bundled font parses");
+        let mut glyphs = Vec::new();
+        let titles = ["Title sequence", "Logo reveal", "Kinetic type", "Moodboard", "Style frame", "Walk cycle", "Neon", "Grain"];
+        for (i, b) in boxes.iter().enumerate() {
+            let [x, y, _, _] = b.rect;
+            let title = titles[i % titles.len()];
+            let color = [0.93, 0.93, 0.95, 1.0];
+            add_text(&mut font, &mut glyphs, title, [x + 16.0, y + 34.0], 18.0, color);
+            let sub = format!("REF {:04}", i + 1);
+            add_text(&mut font, &mut glyphs, &sub, [x + 16.0, y + 56.0], 12.0, [b.stroke[0], b.stroke[1], b.stroke[2], 1.0]);
+        }
+        add_text(&mut font, &mut glyphs, "Wall", [0.0, -120.0], 96.0, [1.0, 1.0, 1.0, 1.0]);
+        add_text(&mut font, &mut glyphs, "Rust + Slang, Slug-style text, SDF cards", [4.0, -70.0], 22.0, [0.6, 0.62, 0.66, 1.0]);
+
+        Self {
+            camera: Camera { center: [620.0, 200.0], zoom: 1.0 },
+            boxes,
+            font,
+            glyphs,
+            dragging: false,
+            last_cursor: None,
+        }
+    }
+
+    pub fn glyph_count(&self) -> usize {
+        self.glyphs.len()
     }
 
     pub fn box_count(&self) -> usize {
@@ -107,11 +134,36 @@ impl App {
         self.camera.zoom_at(1.15f32.powf(steps), cursor, size);
     }
 
-    pub fn render(&self, renderer: &mut Renderer, size_px: [u32; 2]) {
+    pub fn render(&mut self, renderer: &mut Renderer, size_px: [u32; 2]) {
+        if self.font.atlas.dirty {
+            renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+            self.font.atlas.dirty = false;
+        }
         let size = [size_px[0] as f32, size_px[1] as f32];
         renderer.begin_frame(size_px, BACKGROUND);
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, size);
         renderer.draw_boxes(&view, &self.boxes);
+        renderer.draw_glyphs(&view, &self.glyphs);
+    }
+}
+
+/// Lays out `text` with its baseline starting at `baseline` (board units,
+/// y down) at `size` board units per em, and appends one quad per glyph.
+pub fn add_text(font: &mut Font, out: &mut Vec<GlyphInstance>, text: &str, baseline: [f32; 2], size: f32, rgba: [f32; 4]) {
+    let line = font.layout_line(text);
+    for g in &line.glyphs {
+        let [x0, y0, x1, y1] = g.entry.bounds;
+        out.push(GlyphInstance {
+            rect: [
+                baseline[0] + (g.origin[0] + x0) * size,
+                baseline[1] - (g.origin[1] + y1) * size,
+                (x1 - x0) * size,
+                (y1 - y0) * size,
+            ],
+            em: g.entry.bounds,
+            color: rgba,
+            data: [g.entry.curve_base as f32, g.entry.band_base as f32, g.entry.bands_h as f32, g.entry.bands_v as f32],
+        });
     }
 }
 
@@ -143,6 +195,19 @@ mod tests {
         let after = cam.screen_to_board(cursor, size);
         assert!((before[0] - after[0]).abs() < 1e-3 && (before[1] - after[1]).abs() < 1e-3);
         assert!((cam.zoom - 3.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn text_quads_sit_on_the_baseline() {
+        let mut font = Font::new(wall_text::INTER_REGULAR).unwrap();
+        let mut out = Vec::new();
+        add_text(&mut font, &mut out, "Hx", [100.0, 200.0], 50.0, [1.0; 4]);
+        assert_eq!(out.len(), 2);
+        // 'H' sits on the baseline: its bottom edge is at y = 200.
+        let h = out[0].rect;
+        assert!((h[1] + h[3] - 200.0).abs() < 0.5, "{h:?}");
+        assert!(h[0] >= 100.0 && h[0] < 110.0);
+        assert!(out[1].rect[0] > h[0] + h[2]);
     }
 
     #[test]

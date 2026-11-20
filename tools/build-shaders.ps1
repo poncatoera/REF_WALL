@@ -12,7 +12,9 @@ New-Item -ItemType Directory -Force -Path $out, $tmp | Out-Null
 # name, entry point, slang stage, naga stage, output suffix
 $entries = @(
     @("sdf_box", "vs_main", "vertex",   "vert", "vert"),
-    @("sdf_box", "fs_main", "fragment", "frag", "frag")
+    @("sdf_box", "fs_main", "fragment", "frag", "frag"),
+    @("glyph",   "vs_main", "vertex",   "vert", "vert"),
+    @("glyph",   "fs_main", "fragment", "frag", "frag")
 )
 
 foreach ($e in $entries) {

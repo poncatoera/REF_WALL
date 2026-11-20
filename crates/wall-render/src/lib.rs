@@ -12,6 +12,11 @@ use glow::HasContext;
 
 const BOX_VS: &str = include_str!("../../../shaders/generated/sdf_box.vert.glsl");
 const BOX_FS: &str = include_str!("../../../shaders/generated/sdf_box.frag.glsl");
+const GLYPH_VS: &str = include_str!("../../../shaders/generated/glyph.vert.glsl");
+const GLYPH_FS: &str = include_str!("../../../shaders/generated/glyph.frag.glsl");
+
+/// Width of the glyph data textures (must match `wall_text::TEXTURE_WIDTH`).
+pub const GLYPH_TEXTURE_WIDTH: u32 = 4096;
 
 /// Which GLSL dialect the current context accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +45,20 @@ pub struct BoxInstance {
     pub stroke: [f32; 4],
     /// Corner radius, stroke width (board units).
     pub shape: [f32; 2],
+}
+
+/// One glyph quad (see `shaders/glyph.slang`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct GlyphInstance {
+    /// Glyph box on the board: x, y, w, h (y down).
+    pub rect: [f32; 4],
+    /// Glyph bounds in em units: x0, y0, x1, y1 (y up).
+    pub em: [f32; 4],
+    /// Premultiplied RGBA.
+    pub color: [f32; 4],
+    /// curve_base, band_base, bands_h, bands_v.
+    pub data: [f32; 4],
 }
 
 /// Board-to-clip transform, laid out as the shader's std140 `View` block.
@@ -81,12 +100,19 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+struct InstancedPass {
+    program: glow::Program,
+    vao: glow::VertexArray,
+    instances: glow::Buffer,
+    capacity: usize,
+}
+
 pub struct Renderer {
     gl: glow::Context,
-    box_program: glow::Program,
-    box_vao: glow::VertexArray,
-    box_instances: glow::Buffer,
-    box_capacity: usize,
+    boxes: InstancedPass,
+    glyphs: InstancedPass,
+    curve_tex: glow::Texture,
+    band_tex: glow::Texture,
     view_ubo: glow::Buffer,
 }
 
@@ -94,30 +120,52 @@ impl Renderer {
     /// # Safety
     /// `gl` must be current on this thread for the renderer's whole life.
     pub unsafe fn new(gl: glow::Context, target: GlslTarget) -> Result<Self, RenderError> {
-        let box_program = link(&gl, &adapt_glsl(BOX_VS, target), &adapt_glsl(BOX_FS, target))?;
-
-        // Bind the program's first uniform block to slot 0, whatever the
-        // shader compiler named it.
-        gl.uniform_block_binding(box_program, 0, 0);
-
         let view_ubo = gl.create_buffer().map_err(RenderError::Gl)?;
         gl.bind_buffer(glow::UNIFORM_BUFFER, Some(view_ubo));
         gl.buffer_data_size(glow::UNIFORM_BUFFER, std::mem::size_of::<ViewUniform>() as i32, glow::DYNAMIC_DRAW);
 
-        let box_vao = gl.create_vertex_array().map_err(RenderError::Gl)?;
-        let box_instances = gl.create_buffer().map_err(RenderError::Gl)?;
-        gl.bind_vertex_array(Some(box_vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(box_instances));
-        let stride = std::mem::size_of::<BoxInstance>() as i32;
-        let attrs: [(u32, i32, i32); 4] = [(0, 4, 0), (1, 4, 16), (2, 4, 32), (3, 2, 48)];
-        for (loc, size, offset) in attrs {
-            gl.enable_vertex_attrib_array(loc);
-            gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, offset);
-            gl.vertex_attrib_divisor(loc, 1);
-        }
-        gl.bind_vertex_array(None);
+        let boxes = InstancedPass::new(&gl, BOX_VS, BOX_FS, target, std::mem::size_of::<BoxInstance>(), &[4, 4, 4, 2])?;
+        let glyphs = InstancedPass::new(&gl, GLYPH_VS, GLYPH_FS, target, std::mem::size_of::<GlyphInstance>(), &[4, 4, 4, 4])?;
 
-        Ok(Self { gl, box_program, box_vao, box_instances, box_capacity: 0, view_ubo })
+        // Glyph samplers: texture unit 0 = curves, 1 = bands, matched by name
+        // so this keeps working whatever the shader compiler calls them.
+        gl.use_program(Some(glyphs.program));
+        let n = gl.get_active_uniforms(glyphs.program);
+        for i in 0..n {
+            if let Some(u) = gl.get_active_uniform(glyphs.program, i) {
+                if u.utype == glow::SAMPLER_2D {
+                    let unit = if u.name.contains("band") { 1 } else { 0 };
+                    let loc = gl.get_uniform_location(glyphs.program, &u.name);
+                    gl.uniform_1_i32(loc.as_ref(), unit);
+                }
+            }
+        }
+        gl.use_program(None);
+
+        let curve_tex = data_texture(&gl, glow::RGBA32F, glow::RGBA)?;
+        let band_tex = data_texture(&gl, glow::R32F, glow::RED)?;
+        Ok(Self { gl, boxes, glyphs, curve_tex, band_tex, view_ubo })
+    }
+
+    /// Uploads the glyph curve and band arrays (from `wall_text::Atlas`),
+    /// already padded to whole rows of `GLYPH_TEXTURE_WIDTH` texels.
+    pub fn upload_glyph_data(&mut self, curves_rgba: &[f32], bands_r: &[f32]) {
+        let w = GLYPH_TEXTURE_WIDTH as usize;
+        let gl = &self.gl;
+        unsafe {
+            for (tex, data, comps, ifmt, fmt) in [
+                (self.curve_tex, curves_rgba, 4, glow::RGBA32F, glow::RGBA),
+                (self.band_tex, bands_r, 1, glow::R32F, glow::RED),
+            ] {
+                let rows = (data.len() / (w * comps)).max(1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D, 0, ifmt as i32, w as i32, rows as i32, 0, fmt, glow::FLOAT,
+                    glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(data))),
+                );
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
     }
 
     pub fn gl(&self) -> &glow::Context {
@@ -133,32 +181,36 @@ impl Renderer {
         }
     }
 
+    fn set_view(&self, view: &ViewUniform) {
+        unsafe {
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.view_ubo));
+            self.gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, bytemuck::bytes_of(view));
+            self.gl.bind_buffer_base(glow::UNIFORM_BUFFER, 0, Some(self.view_ubo));
+        }
+    }
+
     pub fn draw_boxes(&mut self, view: &ViewUniform, boxes: &[BoxInstance]) {
         if boxes.is_empty() {
             return;
         }
-        let gl = &self.gl;
+        self.set_view(view);
+        unsafe { self.boxes.draw(&self.gl, bytemuck::cast_slice(boxes), boxes.len()) };
+    }
+
+    pub fn draw_glyphs(&mut self, view: &ViewUniform, glyphs: &[GlyphInstance]) {
+        if glyphs.is_empty() {
+            return;
+        }
+        self.set_view(view);
         unsafe {
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-
-            gl.bind_buffer(glow::UNIFORM_BUFFER, Some(self.view_ubo));
-            gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, bytemuck::bytes_of(view));
-            gl.bind_buffer_base(glow::UNIFORM_BUFFER, 0, Some(self.view_ubo));
-
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.box_instances));
-            let bytes: &[u8] = bytemuck::cast_slice(boxes);
-            if boxes.len() > self.box_capacity {
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
-                self.box_capacity = boxes.len();
-            } else {
-                gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
-            }
-
-            gl.use_program(Some(self.box_program));
-            gl.bind_vertex_array(Some(self.box_vao));
-            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, boxes.len() as i32);
-            gl.bind_vertex_array(None);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(self.curve_tex));
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(self.band_tex));
+            self.gl.active_texture(glow::TEXTURE0);
+            self.glyphs.draw(&self.gl, bytemuck::cast_slice(glyphs), glyphs.len());
         }
     }
 }
@@ -166,12 +218,76 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            self.gl.delete_program(self.box_program);
-            self.gl.delete_vertex_array(self.box_vao);
-            self.gl.delete_buffer(self.box_instances);
+            self.boxes.delete(&self.gl);
+            self.glyphs.delete(&self.gl);
+            self.gl.delete_texture(self.curve_tex);
+            self.gl.delete_texture(self.band_tex);
             self.gl.delete_buffer(self.view_ubo);
         }
     }
+}
+
+impl InstancedPass {
+    /// A program drawing one 6-vertex quad per instance. `sizes` are the float
+    /// counts of the instance attributes at locations 0, 1, 2…
+    unsafe fn new(gl: &glow::Context, vs: &str, fs: &str, target: GlslTarget, stride: usize, sizes: &[i32]) -> Result<Self, RenderError> {
+        let program = link(gl, &adapt_glsl(vs, target), &adapt_glsl(fs, target))?;
+        // Bind the first uniform block to slot 0, whatever the compiler named it.
+        gl.uniform_block_binding(program, 0, 0);
+        let vao = gl.create_vertex_array().map_err(RenderError::Gl)?;
+        let instances = gl.create_buffer().map_err(RenderError::Gl)?;
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(instances));
+        let mut offset = 0;
+        for (loc, &size) in sizes.iter().enumerate() {
+            gl.enable_vertex_attrib_array(loc as u32);
+            gl.vertex_attrib_pointer_f32(loc as u32, size, glow::FLOAT, false, stride as i32, offset);
+            gl.vertex_attrib_divisor(loc as u32, 1);
+            offset += size * 4;
+        }
+        gl.bind_vertex_array(None);
+        Ok(Self { program, vao, instances, capacity: 0 })
+    }
+
+    unsafe fn draw(&mut self, gl: &glow::Context, bytes: &[u8], count: usize) {
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.instances));
+        if bytes.len() > self.capacity {
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            self.capacity = bytes.len();
+        } else {
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        }
+        gl.use_program(Some(self.program));
+        gl.bind_vertex_array(Some(self.vao));
+        gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, count as i32);
+        gl.bind_vertex_array(None);
+    }
+
+    unsafe fn delete(&self, gl: &glow::Context) {
+        gl.delete_program(self.program);
+        gl.delete_vertex_array(self.vao);
+        gl.delete_buffer(self.instances);
+    }
+}
+
+/// A float data texture read with texelFetch: nearest sampling, no mips.
+unsafe fn data_texture(gl: &glow::Context, ifmt: u32, fmt: u32) -> Result<glow::Texture, RenderError> {
+    let tex = gl.create_texture().map_err(RenderError::Gl)?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    for (k, v) in [
+        (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+        (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+        (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+        (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+    ] {
+        gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
+    }
+    let zeros = [0f32; 4];
+    let comps = if fmt == glow::RGBA { 4 } else { 1 };
+    gl.tex_image_2d(glow::TEXTURE_2D, 0, ifmt as i32, 1, 1, 0, fmt, glow::FLOAT,
+        glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&zeros[..comps]))));
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    Ok(tex)
 }
 
 unsafe fn link(gl: &glow::Context, vs: &str, fs: &str) -> Result<glow::Program, RenderError> {
@@ -204,6 +320,7 @@ mod tests {
     fn instance_layout_matches_attribute_offsets() {
         assert_eq!(std::mem::size_of::<BoxInstance>(), 56);
         assert_eq!(std::mem::size_of::<ViewUniform>(), 32);
+        assert_eq!(std::mem::size_of::<GlyphInstance>(), 64);
     }
 
     #[test]

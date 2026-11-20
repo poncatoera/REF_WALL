@@ -47,7 +47,7 @@ impl ApplicationHandler for Shell {
                 use glow::HasContext;
                 let version = unsafe { gl.get_parameter_string(glow::VERSION) };
                 let gpu = unsafe { gl.get_parameter_string(glow::RENDERER) };
-                println!("wall: OpenGL {version} on {gpu}; {} boxes", self.app.box_count());
+                println!("wall: OpenGL {version} on {gpu}; {} boxes, {} glyphs", self.app.box_count(), self.app.glyph_count());
                 gfx.window.request_redraw();
                 self.gfx = Some(gfx);
             }
@@ -167,8 +167,15 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
+    let mut app = App::demo(60, 40);
+    // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
+    if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
+        if let [x, y, z] = v[..] {
+            app.camera = wall_app::Camera { center: [x, y], zoom: z };
+        }
+    }
     let mut shell = Shell {
-        app: App::demo(60, 40),
+        app,
         gfx: None,
         frames: 0,
         fps_clock: Instant::now(),

@@ -53,7 +53,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
     let gl = glow::Context::from_webgl2_context(webgl);
     let renderer = unsafe { Renderer::new(gl, GlslTarget::Es300) }.map_err(|e| JsValue::from_str(&e.to_string()))?;
     let app = App::demo(60, 40);
-    web_sys::console::log_1(&format!("wall: WebGL2 ready, {} boxes", app.box_count()).into());
+    web_sys::console::log_1(&format!("wall: WebGL2 ready, {} boxes, {} glyphs", app.box_count(), app.glyph_count()).into());
 
     let state = Rc::new(RefCell::new(State { app, renderer, canvas: canvas.clone(), dirty: true }));
 

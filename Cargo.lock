@@ -1734,6 +1734,7 @@ name = "wall-app"
 version = "0.1.0"
 dependencies = [
  "wall-render",
+ "wall-text",
 ]
 
 [[package]]
@@ -1777,6 +1778,14 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glow",
+]
+
+[[package]]
+name = "wall-text"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "ttf-parser",
 ]
 
 [[package]]

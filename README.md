@@ -11,19 +11,31 @@ Architecture proposal: https://claude.ai/artifact/SCu78YrUEzKsEE8CEoSZ49
 | --- | --- | --- |
 | `crates/wall-format` | The open `.wall` library format: manifest, media by BLAKE3 hash, sidecars, boards, per-item merge for sync | Working, 7 tests |
 | `crates/wall-media` | Import rules: images max 2048 px wide, videos max 20 MB / 1080p, H.264 MP4 with a keyframe every second | Working, 13 tests |
-| `shaders/` | Slang sources, compiled to SPIR-V and then GLSL ES 3.00 | First shader written, not compiled yet |
-| `crates/wall-render`, `wall-text`, `wall-app` | Renderer, Slug-method text, canvas | Not started |
-| `apps/desktop`, `apps/web`, `worker` | Shells and the Cloudflare Worker | Not started |
+| `crates/wall-text` | Slug-method text: outlines to quadratic curves, band packing, layout, CPU twin of the shader | Working, 5 tests |
+| `crates/wall-render` | GLES3 / WebGL2 renderer: SDF boxes and glyphs | Working on Linux (Mesa) and headless Chrome |
+| `crates/wall-app` | Camera, pan and zoom, demo board | Working, 4 tests |
+| `apps/desktop` | winit + glutin, desktop GL 3.3 for now (ANGLE next) | Runs on Linux; Windows/Mac not yet confirmed |
+| `apps/web` | wasm-bindgen + WebGL2 | Runs in Chromium |
+| `shaders/` | Slang sources; `generated/` holds GLSL ES 3.00 | Generated files are hand-ported until `tools/build-shaders.ps1` runs |
+| `worker` | Cloudflare Worker | Not started |
 
 Both crates also build for `wasm32-unknown-unknown`, so the web app uses the
 same rules and format code.
+
+Fonts: `assets/fonts/Inter-Regular.otf` (SIL Open Font License, see `Inter-OFL.txt`).
 
 ## Commands
 
 ```sh
 cargo test                                   # all tests
-cargo build --target wasm32-unknown-unknown -p wall-format -p wall-media
+cargo run -p wall-desktop                    # desktop app
+# web: build, bind, then serve apps/web/www
+cargo build -p wall-web --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir apps/web/www/pkg target/wasm32-unknown-unknown/release/wall_web.wasm
 ```
+
+Desktop test hooks: `WALL_SCREENSHOT=out.png` saves a frame and exits;
+`WALL_CAMERA="x,y,zoom"` sets the start view.
 
 ## Shader pipeline (planned)
 

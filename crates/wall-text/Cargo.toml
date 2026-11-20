@@ -1,0 +1,10 @@
+[package]
+name = "wall-text"
+description = "Slug-method text for Wall: glyph outlines packed into curve and band data for the GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ttf-parser = "0.25"
+thiserror.workspace = true
