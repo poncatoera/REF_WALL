@@ -8,7 +8,6 @@ struct View
     float2 scale;
     float2 offset;
     float pixel;
-    float3 _pad;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<View> view;
@@ -43,7 +42,7 @@ float2 quad_corner(uint vid)
 }
 
 [shader("vertex")]
-VsOut vs_main(uint vid : SV_VertexID, GlyphInstance g)
+VsOut vs_main(uint vid : SV_VulkanVertexID, GlyphInstance g)
 {
     float2 c = quad_corner(vid);
     // Grow by one screen pixel so edge pixels get shaded.

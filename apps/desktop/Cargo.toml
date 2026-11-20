@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 wall-app.workspace = true
 wall-render.workspace = true
+wall-media.workspace = true
 glow.workspace = true
 image = { workspace = true, features = ["png"] }
 winit = "0.30"

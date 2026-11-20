@@ -2,8 +2,11 @@
 //! hands input to `wall-app`, and draws with `wall-render`.
 //!
 //! Spike: uses desktop OpenGL 3.3 core. ANGLE (GLES on Metal / Direct3D) comes next.
-//! `WALL_SCREENSHOT=path.png` renders a few frames, saves the window and exits;
-//! used for automated checks.
+//! Test hooks:
+//! - `WALL_SCREENSHOT=path.png` renders a few frames, saves the window and exits.
+//! - `WALL_CAMERA="x,y,zoom"` sets the start view.
+//! - `WALL_BENCH=1` redraws continuously and prints fps (vsync off).
+//! - `WALL_NOTES=n` sets how many notes the demo board has (default 2000).
 
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -14,10 +17,11 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
 use raw_window_handle::HasWindowHandle;
-use wall_app::{App, Wheel};
+use wall_app::{App, Button, Key, Mods, Wheel};
 use wall_render::{GlslTarget, Renderer};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -34,6 +38,33 @@ struct Shell {
     frames: u32,
     fps_clock: Instant,
     screenshot: Option<String>,
+    bench: bool,
+    mods: ModifiersState,
+    cursor: [f32; 2],
+}
+
+impl Shell {
+    fn mods(&self) -> Mods {
+        Mods { shift: self.mods.shift_key(), command: self.mods.control_key() || self.mods.super_key(), alt: self.mods.alt_key() }
+    }
+}
+
+fn button(b: MouseButton) -> Option<Button> {
+    match b {
+        MouseButton::Left => Some(Button::Primary),
+        MouseButton::Middle => Some(Button::Middle),
+        MouseButton::Right => Some(Button::Secondary),
+        _ => None,
+    }
+}
+
+/// Reads an image file, applies the import rules, and decodes it to RGBA.
+fn load_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let prepared = wall_media::prepare_image(&bytes, &wall_media::Limits::default())?;
+    let img = image::load_from_memory(&prepared.bytes)?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Ok((img.into_raw(), w, h))
 }
 
 impl ApplicationHandler for Shell {
@@ -47,7 +78,10 @@ impl ApplicationHandler for Shell {
                 use glow::HasContext;
                 let version = unsafe { gl.get_parameter_string(glow::VERSION) };
                 let gpu = unsafe { gl.get_parameter_string(glow::RENDERER) };
-                println!("wall: OpenGL {version} on {gpu}; {} boxes, {} glyphs", self.app.box_count(), self.app.glyph_count());
+                println!("wall: OpenGL {version} on {gpu}; {} items", self.app.item_count());
+                if self.bench {
+                    let _ = gfx.surface.set_swap_interval(&gfx.context, SwapInterval::DontWait);
+                }
                 gfx.window.request_redraw();
                 self.gfx = Some(gfx);
             }
@@ -59,35 +93,61 @@ impl ApplicationHandler for Shell {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let mods = self.mods();
         let Some(gfx) = self.gfx.as_mut() else { return };
         let size = gfx.window.inner_size();
-        let fsize = [size.width as f32, size.height as f32];
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(s) => {
                 if let (Some(w), Some(h)) = (NonZeroU32::new(s.width), NonZeroU32::new(s.height)) {
                     gfx.surface.resize(&gfx.context, w, h);
                 }
-                gfx.window.request_redraw();
+                self.app.resize([s.width as f32, s.height as f32]);
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Middle, .. } => {
-                match state {
-                    ElementState::Pressed => self.app.pointer_down(),
-                    ElementState::Released => self.app.pointer_up(),
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::MouseInput { state, button: b, .. } => {
+                if let Some(b) = button(b) {
+                    let pos = self.cursor;
+                    match state {
+                        ElementState::Pressed => self.app.pointer_down(b, pos, mods),
+                        ElementState::Released => self.app.pointer_up(b, pos),
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.app.pointer_move([position.x as f32, position.y as f32]);
-                gfx.window.request_redraw();
+                self.cursor = [position.x as f32, position.y as f32];
+                self.app.pointer_move(self.cursor);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let w = match delta {
                     MouseScrollDelta::LineDelta(_, y) => Wheel::Lines(y),
                     MouseScrollDelta::PixelDelta(p) => Wheel::Pixels(p.y as f32),
                 };
-                self.app.wheel(w, fsize);
-                gfx.window.request_redraw();
+                self.app.wheel(w);
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let m = mods;
+                let pressed = event.state == ElementState::Pressed;
+                let key = match event.logical_key.as_ref() {
+                    WKey::Named(NamedKey::Space) => Some(Key::Space { pressed }),
+                    _ if !pressed => None,
+                    WKey::Named(NamedKey::Delete | NamedKey::Backspace) => Some(Key::Delete),
+                    WKey::Named(NamedKey::Escape) => Some(Key::Escape),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("z") => Some(if m.shift { Key::Redo } else { Key::Undo }),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("y") => Some(Key::Redo),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("a") => Some(Key::SelectAll),
+                    _ => None,
+                };
+                if let Some(k) = key {
+                    self.app.key(k);
+                }
+            }
+            WindowEvent::DroppedFile(path) => match load_picture(&path) {
+                Ok((rgba, w, h)) => {
+                    self.app.place_picture(rgba, w, h);
+                }
+                Err(e) => eprintln!("wall: could not import {}: {e}", path.display()),
+            },
             WindowEvent::RedrawRequested => {
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames == 3) {
@@ -107,11 +167,14 @@ impl ApplicationHandler for Shell {
                     self.frames = 0;
                     self.fps_clock = Instant::now();
                 }
-                if self.screenshot.is_some() {
+                if self.screenshot.is_some() || self.bench {
                     gfx.window.request_redraw();
                 }
             }
             _ => {}
+        }
+        if self.app.needs_redraw {
+            gfx.window.request_redraw();
         }
     }
 }
@@ -167,7 +230,8 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::demo(60, 40);
+    let notes = std::env::var("WALL_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let mut app = App::demo(notes);
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
         if let [x, y, z] = v[..] {
@@ -180,6 +244,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frames: 0,
         fps_clock: Instant::now(),
         screenshot: std::env::var("WALL_SCREENSHOT").ok(),
+        bench: std::env::var_os("WALL_BENCH").is_some(),
+        mods: ModifiersState::empty(),
+        cursor: [0.0, 0.0],
     };
     event_loop.run_app(&mut shell)?;
     Ok(())

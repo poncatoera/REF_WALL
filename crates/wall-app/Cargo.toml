@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 wall-render.workspace = true
 wall-text.workspace = true
+wall-format.workspace = true
+uuid.workspace = true

@@ -14,6 +14,8 @@ const BOX_VS: &str = include_str!("../../../shaders/generated/sdf_box.vert.glsl"
 const BOX_FS: &str = include_str!("../../../shaders/generated/sdf_box.frag.glsl");
 const GLYPH_VS: &str = include_str!("../../../shaders/generated/glyph.vert.glsl");
 const GLYPH_FS: &str = include_str!("../../../shaders/generated/glyph.frag.glsl");
+const IMAGE_VS: &str = include_str!("../../../shaders/generated/image.vert.glsl");
+const IMAGE_FS: &str = include_str!("../../../shaders/generated/image.frag.glsl");
 
 /// Width of the glyph data textures (must match `wall_text::TEXTURE_WIDTH`).
 pub const GLYPH_TEXTURE_WIDTH: u32 = 4096;
@@ -61,6 +63,20 @@ pub struct GlyphInstance {
     pub data: [f32; 4],
 }
 
+/// One picture quad (see `shaders/image.slang`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct ImageInstance {
+    /// x, y, w, h on the board.
+    pub rect: [f32; 4],
+    /// opacity, corner radius, unused, unused.
+    pub params: [f32; 4],
+}
+
+/// Handle to an uploaded picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId(glow::Texture);
+
 /// Board-to-clip transform, laid out as the shader's std140 `View` block.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -68,7 +84,9 @@ pub struct ViewUniform {
     pub scale: [f32; 2],
     pub offset: [f32; 2],
     pub pixel: f32,
-    pub _pad: [f32; 3],
+    /// Padding; the shader block is 20 bytes of data (32 in std140), and a
+    /// bound buffer may be larger than the block but never smaller.
+    pub _pad: [f32; 7],
 }
 
 impl ViewUniform {
@@ -77,7 +95,7 @@ impl ViewUniform {
     pub fn new(center: [f32; 2], zoom: f32, size_px: [f32; 2]) -> Self {
         let sx = 2.0 * zoom / size_px[0];
         let sy = -2.0 * zoom / size_px[1]; // board y grows downwards
-        Self { scale: [sx, sy], offset: [-center[0] * sx, -center[1] * sy], pixel: 1.0 / zoom, _pad: [0.0; 3] }
+        Self { scale: [sx, sy], offset: [-center[0] * sx, -center[1] * sy], pixel: 1.0 / zoom, _pad: [0.0; 7] }
     }
 }
 
@@ -111,6 +129,7 @@ pub struct Renderer {
     gl: glow::Context,
     boxes: InstancedPass,
     glyphs: InstancedPass,
+    images: InstancedPass,
     curve_tex: glow::Texture,
     band_tex: glow::Texture,
     view_ubo: glow::Buffer,
@@ -126,25 +145,15 @@ impl Renderer {
 
         let boxes = InstancedPass::new(&gl, BOX_VS, BOX_FS, target, std::mem::size_of::<BoxInstance>(), &[4, 4, 4, 2])?;
         let glyphs = InstancedPass::new(&gl, GLYPH_VS, GLYPH_FS, target, std::mem::size_of::<GlyphInstance>(), &[4, 4, 4, 4])?;
+        let images = InstancedPass::new(&gl, IMAGE_VS, IMAGE_FS, target, std::mem::size_of::<ImageInstance>(), &[4, 4])?;
 
-        // Glyph samplers: texture unit 0 = curves, 1 = bands, matched by name
-        // so this keeps working whatever the shader compiler calls them.
-        gl.use_program(Some(glyphs.program));
-        let n = gl.get_active_uniforms(glyphs.program);
-        for i in 0..n {
-            if let Some(u) = gl.get_active_uniform(glyphs.program, i) {
-                if u.utype == glow::SAMPLER_2D {
-                    let unit = if u.name.contains("band") { 1 } else { 0 };
-                    let loc = gl.get_uniform_location(glyphs.program, &u.name);
-                    gl.uniform_1_i32(loc.as_ref(), unit);
-                }
-            }
-        }
-        gl.use_program(None);
+        // Glyph samplers: texture unit 0 = curves, 1 = bands.
+        bind_samplers(&gl, glyphs.program);
+        bind_samplers(&gl, images.program);
 
         let curve_tex = data_texture(&gl, glow::RGBA32F, glow::RGBA)?;
         let band_tex = data_texture(&gl, glow::R32F, glow::RED)?;
-        Ok(Self { gl, boxes, glyphs, curve_tex, band_tex, view_ubo })
+        Ok(Self { gl, boxes, glyphs, images, curve_tex, band_tex, view_ubo })
     }
 
     /// Uploads the glyph curve and band arrays (from `wall_text::Atlas`),
@@ -178,6 +187,48 @@ impl Renderer {
             self.gl.viewport(0, 0, size_px[0] as i32, size_px[1] as i32);
             self.gl.clear_color(rgba[0], rgba[1], rgba[2], rgba[3]);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+    }
+
+    /// Uploads straight-alpha RGBA8 pixels as a mipmapped texture.
+    pub fn create_image(&mut self, rgba: &[u8], width: u32, height: u32) -> Result<ImageId, RenderError> {
+        let gl = &self.gl;
+        unsafe {
+            let tex = gl.create_texture().map_err(RenderError::Gl)?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width as i32, height as i32, 0, glow::RGBA,
+                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(rgba)));
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            for (k, v) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Ok(ImageId(tex))
+        }
+    }
+
+    pub fn delete_image(&mut self, id: ImageId) {
+        unsafe { self.gl.delete_texture(id.0) };
+    }
+
+    /// Draws pictures, one draw call each (batching into arrays comes later).
+    pub fn draw_images(&mut self, view: &ViewUniform, images: &[(ImageId, ImageInstance)]) {
+        if images.is_empty() {
+            return;
+        }
+        self.set_view(view);
+        unsafe {
+            self.gl.active_texture(glow::TEXTURE0);
+            for (id, inst) in images {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(id.0));
+                self.images.draw(&self.gl, bytemuck::bytes_of(inst), 1);
+            }
         }
     }
 
@@ -220,6 +271,7 @@ impl Drop for Renderer {
         unsafe {
             self.boxes.delete(&self.gl);
             self.glyphs.delete(&self.gl);
+            self.images.delete(&self.gl);
             self.gl.delete_texture(self.curve_tex);
             self.gl.delete_texture(self.band_tex);
             self.gl.delete_buffer(self.view_ubo);
@@ -232,8 +284,12 @@ impl InstancedPass {
     /// counts of the instance attributes at locations 0, 1, 2…
     unsafe fn new(gl: &glow::Context, vs: &str, fs: &str, target: GlslTarget, stride: usize, sizes: &[i32]) -> Result<Self, RenderError> {
         let program = link(gl, &adapt_glsl(vs, target), &adapt_glsl(fs, target))?;
-        // Bind the first uniform block to slot 0, whatever the compiler named it.
-        gl.uniform_block_binding(program, 0, 0);
+        // Every uniform block is the View block (naga emits one per stage,
+        // with different names), so bind them all to slot 0.
+        let blocks = gl.get_program_parameter_i32(program, glow::ACTIVE_UNIFORM_BLOCKS);
+        for i in 0..blocks.max(0) as u32 {
+            gl.uniform_block_binding(program, i, 0);
+        }
         let vao = gl.create_vertex_array().map_err(RenderError::Gl)?;
         let instances = gl.create_buffer().map_err(RenderError::Gl)?;
         gl.bind_vertex_array(Some(vao));
@@ -268,6 +324,32 @@ impl InstancedPass {
         gl.delete_vertex_array(self.vao);
         gl.delete_buffer(self.instances);
     }
+}
+
+/// Texture unit for a sampler uniform. Generated shaders name samplers by
+/// their Slang binding (`_group_0_binding_N`); binding 1 → unit 0, 2 → unit 1.
+/// Hand-ported shaders use the Slang names.
+pub fn sampler_unit(name: &str) -> i32 {
+    if let Some(rest) = name.split("_binding_").nth(1) {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(b) = digits.parse::<i32>() {
+            return (b - 1).max(0);
+        }
+    }
+    if name.contains("band") { 1 } else { 0 }
+}
+
+unsafe fn bind_samplers(gl: &glow::Context, program: glow::Program) {
+    gl.use_program(Some(program));
+    for i in 0..gl.get_active_uniforms(program) {
+        if let Some(u) = gl.get_active_uniform(program, i) {
+            if u.utype == glow::SAMPLER_2D {
+                let loc = gl.get_uniform_location(program, &u.name);
+                gl.uniform_1_i32(loc.as_ref(), sampler_unit(&u.name));
+            }
+        }
+    }
+    gl.use_program(None);
 }
 
 /// A float data texture read with texelFetch: nearest sampling, no mips.
@@ -319,7 +401,7 @@ mod tests {
     #[test]
     fn instance_layout_matches_attribute_offsets() {
         assert_eq!(std::mem::size_of::<BoxInstance>(), 56);
-        assert_eq!(std::mem::size_of::<ViewUniform>(), 32);
+        assert_eq!(std::mem::size_of::<ViewUniform>(), 48);
         assert_eq!(std::mem::size_of::<GlyphInstance>(), 64);
     }
 
@@ -333,6 +415,27 @@ mod tests {
         // Board y down maps to clip y down (negative).
         assert_eq!(clip([100.0, 200.0])[1], -1.0);
         assert_eq!(v.pixel, 0.5);
+    }
+
+    #[test]
+    fn sampler_units_follow_slang_bindings() {
+        assert_eq!(sampler_unit("_group_0_binding_1"), 0);
+        assert_eq!(sampler_unit("_group_0_binding_2"), 1);
+        assert_eq!(sampler_unit("curve_tex"), 0);
+        assert_eq!(sampler_unit("band_tex"), 1);
+        assert_eq!(sampler_unit("image_tex"), 0);
+    }
+
+    #[test]
+    fn each_shader_pair_declares_one_uniform_block_name() {
+        let block = |src: &str| -> Vec<String> {
+            src.lines().filter(|l| l.contains("uniform") && l.contains('{')).map(|l| l.split('{').next().unwrap().trim().to_owned()).collect()
+        };
+        for (vs, fs) in [(BOX_VS, BOX_FS), (GLYPH_VS, GLYPH_FS), (IMAGE_VS, IMAGE_FS)] {
+            let (v, f) = (block(vs), block(fs));
+            assert_eq!(v.len(), 1, "vertex shader blocks: {v:?}");
+            assert!(f.is_empty() || f == v, "stage block names differ: {v:?} vs {f:?}");
+        }
     }
 
     #[test]

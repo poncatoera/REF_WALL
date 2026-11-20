@@ -11,7 +11,6 @@ struct View
     float2 offset;
     // Size of one screen pixel in board units, for anti-aliasing.
     float pixel;
-    float3 _pad;
 };
 
 [[vk::binding(0, 0)]]
@@ -51,7 +50,7 @@ float2 quad_corner(uint vid)
 }
 
 [shader("vertex")]
-VsOut vs_main(uint vid : SV_VertexID, BoxInstance box)
+VsOut vs_main(uint vid : SV_VulkanVertexID, BoxInstance box)
 {
     float2 corner = quad_corner(vid);
     float2 half_size = box.rect.zw * 0.5;
