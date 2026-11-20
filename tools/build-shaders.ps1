@@ -28,7 +28,9 @@ $entries = @(
     @("glyph",   "vs_main", "vertex",   "vert"),
     @("glyph",   "fs_main", "fragment", "frag"),
     @("image",   "vs_main", "vertex",   "vert"),
-    @("image",   "fs_main", "fragment", "frag")
+    @("image",   "fs_main", "fragment", "frag"),
+    @("curve",   "vs_main", "vertex",   "vert"),
+    @("curve",   "fs_main", "fragment", "frag")
 )
 
 foreach ($e in $entries) {

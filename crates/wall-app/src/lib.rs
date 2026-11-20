@@ -10,7 +10,7 @@ pub mod video;
 use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
-use wall_format::{Board, BoardItem, Frame, ItemKind, ItemSidecar, Library, MediaKind};
+use wall_format::{ArrowEnd, Board, BoardItem, Frame, ItemKind, ItemSidecar, Library, MediaKind};
 use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
@@ -112,6 +112,8 @@ enum Gesture {
     Pan,
     Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2] },
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
+    /// Alt-dragging out a new arrow.
+    Connect { from: ArrowEnd, start: [f32; 2], now: [f32; 2] },
     /// Dragging an item's bottom-right handle.
     Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64> },
     /// Dragging along a video's scrub strip.
@@ -645,6 +647,27 @@ impl App {
 
     /// Topmost live item under a board point.
     pub fn hit(&self, p: [f32; 2]) -> Option<Uuid> {
+        // Arrows are thin: anything within a few pixels of one picks it first.
+        let tol = 6.0 / self.camera.zoom;
+        let arrow = self
+            .doc
+            .board
+            .live_items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Arrow { from, to } => scene::arrow_points(&self.doc, from, to)
+                    .filter(|pts| scene::segment_distance(p, pts[0], pts[1]) <= tol)
+                    .map(|_| i),
+                _ => None,
+            })
+            .max_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
+        if let Some(a) = arrow {
+            return Some(a.id);
+        }
+        self.hit_item(p)
+    }
+
+    /// Topmost live item (not arrow) under a board point.
+    fn hit_item(&self, p: [f32; 2]) -> Option<Uuid> {
         let (x, y) = (p[0] as f64, p[1] as f64);
         self.doc
             .board
@@ -677,6 +700,15 @@ impl App {
                 return;
             }
             self.end_edit();
+        }
+        if mods.alt {
+            // Alt-drag draws an arrow, from an item or from empty space.
+            let from = match self.hit_item(board) {
+                Some(id) => ArrowEnd::Item { id },
+                None => ArrowEnd::Point { x: board[0] as f64, y: board[1] as f64 },
+            };
+            self.gesture = Gesture::Connect { from, start: board, now: board };
+            return;
         }
         if let Some(item) = self.resize_handle_at(board) {
             // Pictures and videos keep their shape unless Shift is held.
@@ -750,6 +782,7 @@ impl App {
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
             Gesture::Idle => return,
+            Gesture::Connect { now, .. } => *now = board,
             Gesture::Resize { original, start, aspect } => {
                 let mut item = original.clone();
                 let min = 20.0;
@@ -793,6 +826,23 @@ impl App {
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Move { originals, delta, .. } => {
                 self.doc.commit_drag(&originals, delta[0], delta[1]);
+            }
+            Gesture::Connect { from, start, now } => {
+                let board = self.camera.screen_to_board(pos, self.viewport);
+                let _ = now;
+                let to = match self.hit_item(board) {
+                    Some(id) if from != (ArrowEnd::Item { id }) => Some(ArrowEnd::Item { id }),
+                    Some(_) => None, // released on the item it started from
+                    None => {
+                        let far = ((board[0] - start[0]).powi(2) + (board[1] - start[1]).powi(2)).sqrt() * self.camera.zoom > 12.0;
+                        far.then_some(ArrowEnd::Point { x: board[0] as f64, y: board[1] as f64 })
+                    }
+                };
+                if let Some(to) = to {
+                    let frame = Frame { x: start[0].min(board[0]) as f64, y: start[1].min(board[1]) as f64, w: (board[0] - start[0]).abs() as f64, h: (board[1] - start[1]).abs() as f64, ..Default::default() };
+                    let id = self.doc.add(vec![(frame, ItemKind::Arrow { from, to })])[0];
+                    self.selection = [id].into();
+                }
             }
             Gesture::Resize { original, .. } => {
                 if let Some(after) = self.doc.board.items.get(&original.id).cloned() {
@@ -862,7 +912,19 @@ impl App {
         }
         match key {
             Key::Delete | Key::Backspace => {
-                let sel = std::mem::take(&mut self.selection);
+                let mut sel = std::mem::take(&mut self.selection);
+                // Arrows attached to deleted items go with them.
+                let attached: Vec<Uuid> = self
+                    .doc
+                    .board
+                    .live_items()
+                    .filter(|i| match &i.kind {
+                        ItemKind::Arrow { from, to } => [from, to].iter().any(|e| matches!(e, ArrowEnd::Item { id } if sel.contains(id))),
+                        _ => false,
+                    })
+                    .map(|i| i.id)
+                    .collect();
+                sel.extend(attached);
                 self.doc.delete(&sel);
             }
             Key::Enter => {
@@ -889,6 +951,27 @@ impl App {
             Key::BringToFront => self.restack(true),
             Key::SendToBack => self.restack(false),
         }
+    }
+
+    /// Selected arrows highlighted, and the arrow being drawn.
+    fn overlay_curves(&self) -> Vec<wall_render::CurveInstance> {
+        let accent = [0.36, 0.62, 1.0, 1.0];
+        let mut out: Vec<_> = self
+            .selection
+            .iter()
+            .filter_map(|id| match &self.doc.item(id)?.kind {
+                ItemKind::Arrow { from, to } => scene::arrow_points(&self.doc, from, to),
+                _ => None,
+            })
+            .map(|pts| scene::arrow_curve(pts, accent, scene::ARROW_WIDTH + 1.0))
+            .collect();
+        if let Gesture::Connect { from, now, .. } = &self.gesture {
+            let to = ArrowEnd::Point { x: now[0] as f64, y: now[1] as f64 };
+            if let Some(pts) = scene::arrow_points(&self.doc, from, &to) {
+                out.push(scene::arrow_curve(pts, accent, scene::ARROW_WIDTH));
+            }
+        }
+        out
     }
 
     // ---- arranging ---------------------------------------------------------
@@ -1187,6 +1270,7 @@ impl App {
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
         self.scene.draw(renderer, &view, &textures);
         renderer.draw_boxes(&view, &overlays);
+        renderer.draw_curves(&view, &self.overlay_curves());
         if self.doc.board.live_items().next().is_none() {
             // Empty board: a hint in the middle of the screen, constant size.
             let mut hint = Vec::new();
@@ -1448,6 +1532,41 @@ mod tests {
         assert!(a.doc.item(&low).unwrap().frame.z > a.doc.item(&high).unwrap().frame.z);
         a.key(Key::Undo);
         assert!(a.doc.item(&low).unwrap().frame.z < a.doc.item(&high).unwrap().frame.z);
+    }
+
+    #[test]
+    fn alt_drag_connects_items_and_arrows_follow_and_delete_with_them() {
+        let mut a = app();
+        let n1 = add_note(&mut a, 100.0, 100.0);
+        let n2 = add_note(&mut a, 500.0, 100.0);
+        let alt = Mods { alt: true, ..Default::default() };
+        a.pointer_down(Button::Primary, [150.0, 150.0], alt);
+        a.pointer_move([300.0, 150.0]);
+        a.pointer_move([550.0, 150.0]);
+        a.pointer_up(Button::Primary, [550.0, 150.0]);
+        let arrow = *a.selection.iter().next().unwrap();
+        let kind = a.doc.item(&arrow).unwrap().kind.clone();
+        assert_eq!(kind, ItemKind::Arrow { from: ArrowEnd::Item { id: n1 }, to: ArrowEnd::Item { id: n2 } });
+        // Clicking near the line picks the arrow; the notes are unchanged.
+        assert_eq!(a.hit([350.0, 152.0]), Some(arrow));
+        assert_eq!(a.hit([150.0, 120.0]), Some(n1));
+        // Drawing it: the scene ends the arrow at the note edges.
+        let pts = scene::arrow_points(&a.doc, &ArrowEnd::Item { id: n1 }, &ArrowEnd::Item { id: n2 }).unwrap();
+        assert!(pts[0][0] > 200.0 && pts[1][0] < 500.0, "{pts:?}");
+        // Deleting a note takes the arrow with it.
+        a.selection = [n2].into();
+        a.key(Key::Delete);
+        assert!(a.doc.item(&arrow).is_none());
+        a.key(Key::Undo);
+        assert!(a.doc.item(&arrow).is_some());
+        // Alt-drag from empty space to empty space makes a free arrow that moves.
+        a.pointer_down(Button::Primary, [100.0, 600.0], alt);
+        a.pointer_up(Button::Primary, [300.0, 650.0]);
+        let free = *a.selection.iter().next().unwrap();
+        a.pointer_down(Button::Primary, [200.0, 625.0], Mods::default());
+        a.pointer_move([250.0, 625.0]);
+        a.pointer_up(Button::Primary, [250.0, 625.0]);
+        assert_eq!(a.doc.item(&free).unwrap().kind, ItemKind::Arrow { from: ArrowEnd::Point { x: 150.0, y: 600.0 }, to: ArrowEnd::Point { x: 350.0, y: 650.0 } });
     }
 
     #[test]

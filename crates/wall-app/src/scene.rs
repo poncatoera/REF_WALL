@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
 use uuid::Uuid;
-use wall_format::{ContentHash, ItemKind};
-use wall_render::{BoxInstance, GlyphInstance, ImageId, ImageInstance, Renderer, ViewUniform};
+use wall_format::{ArrowEnd, ContentHash, ItemKind};
+use wall_render::{BoxInstance, CurveInstance, GlyphInstance, ImageId, ImageInstance, Renderer, ViewUniform};
 use wall_text::Font;
 
 use crate::doc::Document;
@@ -28,6 +28,7 @@ struct CachedText {
 struct Run {
     boxes: Vec<BoxInstance>,
     images: Vec<(ContentHash, ImageInstance)>,
+    curves: Vec<CurveInstance>,
     glyphs: Vec<GlyphInstance>,
     /// Spatial hash of the run's item rects, for the overlap test.
     cells: HashMap<(i32, i32), Vec<[f32; 4]>>,
@@ -93,7 +94,17 @@ impl Scene {
         for item in items {
             seen.insert(item.id);
             let f = item.frame;
-            let rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+            let mut rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+            let arrow = match &item.kind {
+                ItemKind::Arrow { from, to } => match arrow_points(doc, from, to) {
+                    Some(pts) => {
+                        rect = curve_bounds(pts, ARROW_HEAD);
+                        Some(pts)
+                    }
+                    None => continue, // an end's item is gone
+                },
+                _ => None,
+            };
             let is_group = matches!(item.kind, ItemKind::Group { .. });
             if !is_group {
                 // Start a new run if this item overlaps one already in the current run.
@@ -136,7 +147,11 @@ impl Scene {
                 ItemKind::Board { .. } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
                 }
-                ItemKind::Arrow { .. } => {} // arrows come with the vector pass
+                ItemKind::Arrow { .. } => {
+                    if let Some(pts) = arrow {
+                        run.curves.push(arrow_curve(pts, ARROW_COLOR, ARROW_WIDTH));
+                    }
+                }
             }
             if let Some((t, color)) = label {
                 item_text(&mut self.text_cache, font, &mut run.glyphs, item.id, t, &item.kind, color, rect);
@@ -152,6 +167,7 @@ impl Scene {
             let images: Vec<(ImageId, ImageInstance)> =
                 run.images.iter().filter_map(|(h, inst)| textures.get(h).map(|id| (*id, *inst))).collect();
             renderer.draw_images(view, &images);
+            renderer.draw_curves(view, &run.curves);
             renderer.draw_glyphs(view, &run.glyphs);
         }
     }
@@ -180,12 +196,71 @@ fn item_text(cache: &mut HashMap<Uuid, CachedText>, font: &mut Font, out: &mut V
     }));
 }
 
+pub const ARROW_COLOR: [f32; 4] = [0.62, 0.64, 0.7, 1.0];
+pub const ARROW_WIDTH: f32 = 2.5;
+pub const ARROW_HEAD: f32 = 14.0;
+/// Space between an attached arrow end and its item.
+const ARROW_GAP: f32 = 8.0;
+
+/// Where an arrow end sits: a free point, or an item's centre.
+fn end_anchor(doc: &Document, end: &ArrowEnd) -> Option<([f32; 2], Option<[f32; 4]>)> {
+    match end {
+        ArrowEnd::Point { x, y } => Some(([*x as f32, *y as f32], None)),
+        ArrowEnd::Item { id } => {
+            let f = doc.item(id)?.frame;
+            let r = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+            Some(([r[0] + r[2] / 2.0, r[1] + r[3] / 2.0], Some(r)))
+        }
+    }
+}
+
+/// Where a ray from a rect's centre towards `toward` leaves the rect, plus a gap.
+fn exit_point(r: [f32; 4], toward: [f32; 2]) -> [f32; 2] {
+    let c = [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0];
+    let d = [toward[0] - c[0], toward[1] - c[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-6);
+    let sx = if d[0].abs() > 1e-6 { r[2] / 2.0 / d[0].abs() } else { f32::MAX };
+    let sy = if d[1].abs() > 1e-6 { r[3] / 2.0 / d[1].abs() } else { f32::MAX };
+    let s = sx.min(sy);
+    [c[0] + d[0] * s + d[0] / len * ARROW_GAP, c[1] + d[1] * s + d[1] / len * ARROW_GAP]
+}
+
+/// An arrow's start and end on the board; attached ends stop at their
+/// item's edge. None if an attached item no longer exists.
+pub fn arrow_points(doc: &Document, from: &ArrowEnd, to: &ArrowEnd) -> Option<[[f32; 2]; 2]> {
+    let (a, ra) = end_anchor(doc, from)?;
+    let (b, rb) = end_anchor(doc, to)?;
+    let a2 = ra.map_or(a, |r| exit_point(r, b));
+    let b2 = rb.map_or(b, |r| exit_point(r, a));
+    Some([a2, b2])
+}
+
+/// A straight arrow as a curve instance (control point in the middle).
+pub fn arrow_curve(p: [[f32; 2]; 2], color: [f32; 4], width: f32) -> CurveInstance {
+    let mid = [(p[0][0] + p[1][0]) / 2.0, (p[0][1] + p[1][1]) / 2.0];
+    CurveInstance { p01: [p[0][0], p[0][1], mid[0], mid[1]], p2w: [p[1][0], p[1][1], width / 2.0, ARROW_HEAD], color }
+}
+
+fn curve_bounds(p: [[f32; 2]; 2], pad: f32) -> [f32; 4] {
+    let (x0, y0) = (p[0][0].min(p[1][0]) - pad, p[0][1].min(p[1][1]) - pad);
+    let (x1, y1) = (p[0][0].max(p[1][0]) + pad, p[0][1].max(p[1][1]) + pad);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// Distance from a point to a segment.
+pub fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (pa, ba) = ([p[0] - a[0], p[1] - a[1]], [b[0] - a[0], b[1] - a[1]]);
+    let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1]).max(1e-12)).clamp(0.0, 1.0);
+    ((pa[0] - ba[0] * h).powi(2) + (pa[1] - ba[1] * h).powi(2)).sqrt()
+}
+
 /// Selection outlines and the marquee, sized in screen pixels.
 pub fn overlays(doc: &Document, selection: &BTreeSet<Uuid>, marquee: Option<[f32; 4]>, zoom: f32) -> Vec<BoxInstance> {
     let px = 1.0 / zoom;
     let mut out: Vec<BoxInstance> = selection
         .iter()
         .filter_map(|id| doc.item(id))
+        .filter(|i| !matches!(i.kind, ItemKind::Arrow { .. }))
         .map(|i| {
             let f = i.frame;
             BoxInstance {
@@ -430,6 +505,16 @@ mod tests {
         let p = [500.0, style.at[1] + 2.0 * style.line_height() - 4.0];
         assert_eq!(style.hit(&mut font, text, 10, p), text.len());
         assert!(style.height_for(&mut font, text) > style.height_for(&mut font, "one"));
+    }
+
+    #[test]
+    fn arrow_ends_stop_at_item_edges() {
+        let r = [0.0, 0.0, 100.0, 50.0];
+        let e = exit_point(r, [500.0, 25.0]);
+        assert!((e[0] - (100.0 + ARROW_GAP)).abs() < 1e-3 && (e[1] - 25.0).abs() < 1e-3, "{e:?}");
+        let e = exit_point(r, [50.0, -400.0]);
+        assert!((e[1] + ARROW_GAP).abs() < 1e-3, "{e:?}");
+        assert!((segment_distance([5.0, 3.0], [0.0, 0.0], [10.0, 0.0]) - 3.0).abs() < 1e-6);
     }
 
     #[test]

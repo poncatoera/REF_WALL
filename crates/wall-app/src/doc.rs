@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use uuid::Uuid;
-use wall_format::{Board, BoardItem, Frame, ItemKind};
+use wall_format::{ArrowEnd, Board, BoardItem, Frame, ItemKind};
 
 #[derive(Debug, Clone, PartialEq)]
 struct ItemChange {
@@ -16,6 +16,20 @@ struct ItemChange {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Change {
     items: Vec<ItemChange>,
+}
+
+/// Moves an item by (dx, dy), including an arrow's free (unattached) ends.
+pub fn shift(item: &mut BoardItem, dx: f64, dy: f64) {
+    item.frame.x += dx;
+    item.frame.y += dy;
+    if let ItemKind::Arrow { from, to } = &mut item.kind {
+        for end in [from, to] {
+            if let ArrowEnd::Point { x, y } = end {
+                *x += dx;
+                *y += dy;
+            }
+        }
+    }
 }
 
 pub struct Document {
@@ -107,8 +121,7 @@ impl Document {
             .iter()
             .filter_map(|id| self.item(id).cloned())
             .map(|mut i| {
-                i.frame.x += dx;
-                i.frame.y += dy;
+                shift(&mut i, dx, dy);
                 i
             })
             .collect();
@@ -135,8 +148,7 @@ impl Document {
         let afters = moved
             .into_iter()
             .map(|mut i| {
-                i.frame.x += dx;
-                i.frame.y += dy;
+                shift(&mut i, dx, dy);
                 if !matches!(i.kind, ItemKind::Group { .. }) {
                     z += 1.0;
                     i.frame.z = z;
@@ -151,8 +163,7 @@ impl Document {
     pub fn preview_offset(&mut self, originals: &[BoardItem], dx: f64, dy: f64) {
         for o in originals {
             let mut i = o.clone();
-            i.frame.x += dx;
-            i.frame.y += dy;
+            shift(&mut i, dx, dy);
             self.board.items.insert(i.id, i);
         }
         self.version += 1;

@@ -16,6 +16,8 @@ const GLYPH_VS: &str = include_str!("../../../shaders/generated/glyph.vert.glsl"
 const GLYPH_FS: &str = include_str!("../../../shaders/generated/glyph.frag.glsl");
 const IMAGE_VS: &str = include_str!("../../../shaders/generated/image.vert.glsl");
 const IMAGE_FS: &str = include_str!("../../../shaders/generated/image.frag.glsl");
+const CURVE_VS: &str = include_str!("../../../shaders/generated/curve.vert.glsl");
+const CURVE_FS: &str = include_str!("../../../shaders/generated/curve.frag.glsl");
 
 /// Width of the glyph data textures (must match `wall_text::TEXTURE_WIDTH`).
 pub const GLYPH_TEXTURE_WIDTH: u32 = 4096;
@@ -47,6 +49,18 @@ pub struct BoxInstance {
     pub stroke: [f32; 4],
     /// Corner radius, stroke width (board units).
     pub shape: [f32; 2],
+}
+
+/// One curved stroke with an optional arrowhead (see `shaders/curve.slang`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct CurveInstance {
+    /// Start x, y and control point x, y (board units).
+    pub p01: [f32; 4],
+    /// End x, y, half the stroke width, arrowhead length (0 for none).
+    pub p2w: [f32; 4],
+    /// Premultiplied RGBA.
+    pub color: [f32; 4],
 }
 
 /// One glyph quad (see `shaders/glyph.slang`).
@@ -130,6 +144,7 @@ pub struct Renderer {
     boxes: InstancedPass,
     glyphs: InstancedPass,
     images: InstancedPass,
+    curves: InstancedPass,
     curve_tex: glow::Texture,
     band_tex: glow::Texture,
     view_ubo: glow::Buffer,
@@ -146,6 +161,7 @@ impl Renderer {
         let boxes = InstancedPass::new(&gl, BOX_VS, BOX_FS, target, std::mem::size_of::<BoxInstance>(), &[4, 4, 4, 2])?;
         let glyphs = InstancedPass::new(&gl, GLYPH_VS, GLYPH_FS, target, std::mem::size_of::<GlyphInstance>(), &[4, 4, 4, 4])?;
         let images = InstancedPass::new(&gl, IMAGE_VS, IMAGE_FS, target, std::mem::size_of::<ImageInstance>(), &[4, 4])?;
+        let curves = InstancedPass::new(&gl, CURVE_VS, CURVE_FS, target, std::mem::size_of::<CurveInstance>(), &[4, 4, 4])?;
 
         // Glyph samplers: texture unit 0 = curves, 1 = bands.
         bind_samplers(&gl, glyphs.program);
@@ -153,7 +169,7 @@ impl Renderer {
 
         let curve_tex = data_texture(&gl, glow::RGBA32F, glow::RGBA)?;
         let band_tex = data_texture(&gl, glow::R32F, glow::RED)?;
-        Ok(Self { gl, boxes, glyphs, images, curve_tex, band_tex, view_ubo })
+        Ok(Self { gl, boxes, glyphs, images, curves, curve_tex, band_tex, view_ubo })
     }
 
     /// Uploads the glyph curve and band arrays (from `wall_text::Atlas`),
@@ -289,6 +305,15 @@ impl Renderer {
         }
         self.set_view(view);
         unsafe { self.boxes.draw(&self.gl, bytemuck::cast_slice(boxes), boxes.len()) };
+    }
+
+    /// Draws arrows and other curved strokes.
+    pub fn draw_curves(&mut self, view: &ViewUniform, curves: &[CurveInstance]) {
+        if curves.is_empty() {
+            return;
+        }
+        self.set_view(view);
+        unsafe { self.curves.draw(&self.gl, bytemuck::cast_slice(curves), curves.len()) };
     }
 
     pub fn draw_glyphs(&mut self, view: &ViewUniform, glyphs: &[GlyphInstance]) {
@@ -472,7 +497,7 @@ mod tests {
         let block = |src: &str| -> Vec<String> {
             src.lines().filter(|l| l.contains("uniform") && l.contains('{')).map(|l| l.split('{').next().unwrap().trim().to_owned()).collect()
         };
-        for (vs, fs) in [(BOX_VS, BOX_FS), (GLYPH_VS, GLYPH_FS), (IMAGE_VS, IMAGE_FS)] {
+        for (vs, fs) in [(BOX_VS, BOX_FS), (GLYPH_VS, GLYPH_FS), (IMAGE_VS, IMAGE_FS), (CURVE_VS, CURVE_FS)] {
             let (v, f) = (block(vs), block(fs));
             assert_eq!(v.len(), 1, "vertex shader blocks: {v:?}");
             assert!(f.is_empty() || f == v, "stage block names differ: {v:?} vs {f:?}");
