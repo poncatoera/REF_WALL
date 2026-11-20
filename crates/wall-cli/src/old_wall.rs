@@ -409,6 +409,13 @@ fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut Hash
             sc.range = Some(ClipRange { in_ms: a, out_ms: b.min(dur) });
         }
     }
+    // Markers are frame numbers in the old Wall; labels stay in extra below.
+    if let (Some(list), Some(fps)) = (it["markers"].as_array(), sc.fps.filter(|f| *f > 0.0)) {
+        let mut ms: Vec<u64> = list.iter().filter_map(|m| m["f"].as_f64()).filter(|f| *f >= 0.0).map(|f| (f / fps as f64 * 1000.0).round() as u64).collect();
+        ms.sort_unstable();
+        ms.dedup();
+        sc.markers = ms;
+    }
     // What the new format has no field for yet, kept for later.
     let mut kept = Map::new();
     for k in ["notes", "markers", "speed", "pingpong", "onion", "strokes", "tracks", "lockTrack", "section", "aiDesc", "opacity", "origin", "id"] {

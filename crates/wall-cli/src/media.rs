@@ -41,6 +41,7 @@ fn import_video(lib: &Library, path: &Path, name: &str, now: u64) -> Res<(Conten
             colors,
             original,
             range: None,
+            markers: Vec::new(),
             extra: Default::default(),
         };
         lib.write_sidecar(&sc).map_err(|e| e.to_string())?;
@@ -92,6 +93,7 @@ pub fn import_one(lib: &Library, path: &Path, name: &str, now: u64) -> Res<(Cont
             colors,
             original: p.original.clone(),
             range: None,
+            markers: Vec::new(),
             extra: Default::default(),
         };
         lib.write_sidecar(&sc).map_err(|e| e.to_string())?;

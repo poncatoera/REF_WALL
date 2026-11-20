@@ -81,6 +81,9 @@ pub struct ItemSidecar {
     /// Video in and out points: playback loops between them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<ClipRange>,
+    /// Marked moments in a video, in milliseconds from the start, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<u64>,
     #[serde(flatten)]
     pub extra: Extra,
 }

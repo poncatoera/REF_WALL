@@ -42,6 +42,27 @@ pub fn mark(range: Option<(f64, f64)>, t: f64, duration: f64, set_in: bool) -> O
     (a > 0.01 || b < duration - 0.01).then_some((a, b))
 }
 
+/// Markers after pressing M at `t` seconds: removes a marker within a
+/// tenth of a second of `t`, otherwise adds one there. Kept sorted.
+pub fn toggle_marker(markers: &[u64], t: f64) -> Vec<u64> {
+    let ms = (t.max(0.0) * 1000.0).round() as u64;
+    let mut out: Vec<u64> = markers.iter().copied().filter(|m| m.abs_diff(ms) > 100).collect();
+    if out.len() == markers.len() {
+        out.push(ms);
+        out.sort_unstable();
+    }
+    out
+}
+
+/// The marker to jump to from `t` seconds: the next one after it
+/// (`forward`) or the one before it, in seconds.
+pub fn next_marker(markers: &[u64], t: f64, forward: bool) -> Option<f64> {
+    let ms = (t.max(0.0) * 1000.0).round() as i64;
+    let mut it = markers.iter().map(|m| *m as i64);
+    let found = if forward { it.find(|m| *m > ms + 30) } else { it.rev().find(|m| *m < ms - 30) };
+    found.map(|m| m as f64 / 1000.0)
+}
+
 /// What a player reports each frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VideoStatus {
@@ -91,6 +112,18 @@ mod tests {
         assert_eq!(mark(Some((8.0, 10.0)), 3.0, 10.0, false), Some((0.0, 3.0)));
         assert_eq!(mark(Some((0.0, 3.0)), 10.0, 10.0, false), None, "whole clip");
         assert_eq!(format_time(61.25), "1:01.3");
+    }
+
+    #[test]
+    fn markers_toggle_and_jump() {
+        let m = toggle_marker(&[], 2.0);
+        let m = toggle_marker(&m, 0.5);
+        assert_eq!(m, vec![500, 2000]);
+        assert_eq!(toggle_marker(&m, 2.05), vec![500], "pressing M near one removes it");
+        assert_eq!(next_marker(&m, 1.0, true), Some(2.0));
+        assert_eq!(next_marker(&m, 2.0, true), None, "already on the last one");
+        assert_eq!(next_marker(&m, 2.0, false), Some(0.5));
+        assert_eq!(next_marker(&m, 0.2, false), None);
     }
 
     #[test]

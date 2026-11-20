@@ -184,6 +184,8 @@ pub const MENUS: &[Menu] = &[
             ("Step a frame back / forward", ", / .", None),
             ("Slower / faster", "[ / ]", None),
             ("Set in point / out point", "I / O", None),
+            ("Add or remove a marker", "M", None),
+            ("Previous / next marker", "; / '", None),
             ("Clear in and out", "Side panel", None),
             ("Scrub", "Drag the bar", None),
         ],

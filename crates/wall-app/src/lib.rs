@@ -452,6 +452,7 @@ impl App {
             colors: Vec::new(),
             original: prepared.original.clone(),
             range: None,
+            markers: Vec::new(),
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, Some(rgba.as_raw()));
@@ -498,6 +499,7 @@ impl App {
             colors: Vec::new(),
             original: None,
             range: None,
+            markers: Vec::new(),
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, None);
@@ -594,6 +596,19 @@ impl App {
                     self.set_video_range(&hash, range);
                     continue;
                 }
+                'm' => {
+                    let Some(st) = self.video_status.get(&hash).copied() else { continue };
+                    let markers = video::toggle_marker(&self.video_markers(&hash), st.time);
+                    self.update_sidecar(&hash, |sc| sc.markers = markers);
+                    continue;
+                }
+                c @ (';' | '\'') => {
+                    let Some(st) = self.video_status.get(&hash).copied() else { continue };
+                    match video::next_marker(&self.video_markers(&hash), st.time, c == '\'') {
+                        Some(t) => VideoCommand::Seek(t),
+                        None => continue,
+                    }
+                }
                 ',' => VideoCommand::Step(-1),
                 '.' => VideoCommand::Step(1),
                 '[' => VideoCommand::Speed(video::next_speed(speed, false)),
@@ -671,6 +686,11 @@ impl App {
         self.sidecars.get(hash)?.range.map(|r| (r.in_ms as f64 / 1000.0, r.out_ms as f64 / 1000.0))
     }
 
+    /// A video's markers, in milliseconds.
+    pub fn video_markers(&self, hash: &ContentHash) -> Vec<u64> {
+        self.sidecars.get(hash).map(|s| s.markers.clone()).unwrap_or_default()
+    }
+
     /// Sets (or clears) a video's in and out points, saves them and tells
     /// the player.
     pub fn set_video_range(&mut self, hash: &ContentHash, range: Option<(f64, f64)>) {
@@ -712,6 +732,13 @@ impl App {
                 out.push(wall_render::BoxInstance { rect: [xa, y - 5.0 * px, xb - xa, 3.0 * px], fill: band, stroke: [0.0; 4], shape: [px, 0.0] });
                 for xe in [xa, xb] {
                     out.push(wall_render::BoxInstance { rect: [xe - px, y - 7.0 * px, 2.0 * px, 13.0 * px], fill: band, stroke: [0.0; 4], shape: [0.0, 0.0] });
+                }
+            }
+            if st.duration > 0.0 {
+                // Markers: small pink ticks through the track.
+                for m in self.video_markers(&hash) {
+                    let xm = x + w * ((m as f64 / 1000.0) / st.duration).clamp(0.0, 1.0) as f32;
+                    out.push(wall_render::BoxInstance { rect: [xm - px, y - 6.0 * px, 2.0 * px, 16.0 * px], fill: [1.0, 0.36, 0.62, 1.0], stroke: [0.0; 4], shape: [px, 0.0] });
                 }
             }
             out.push(wall_render::BoxInstance { rect: [x, y, w * t, h], fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
@@ -781,6 +808,7 @@ impl App {
                     colors: Vec::new(),
                     original: None,
                     range: None,
+                    markers: Vec::new(),
                     extra: Default::default(),
                 },
             );
@@ -2266,6 +2294,10 @@ impl App {
                 if !look.is_plain() {
                     info.rows.push(("Shown".into(), describe_look(look)));
                 }
+                if let Some(m) = sc.filter(|s| !s.markers.is_empty()) {
+                    let times: Vec<String> = m.markers.iter().map(|ms| video::format_time(*ms as f64 / 1000.0)).collect();
+                    info.rows.push(("Markers".into(), times.join("  ")));
+                }
                 let video = self.videos.contains_key(hash);
                 info.kind = if video { "Video" } else { "Image" }.into();
                 info.title = Some(sc.and_then(|s| s.title.clone()).unwrap_or_default());
@@ -3211,6 +3243,27 @@ mod tests {
     }
 
     #[test]
+    fn video_markers_are_kept_and_jumped_between() {
+        let mut a = app();
+        let meta = VideoMeta { width: 400, height: 200, duration_ms: 8000, fps: Some(25.0) };
+        a.pointer_move([500.0, 400.0]);
+        let id = a.import_video(b"clip", "mp4", meta, None, 1).unwrap();
+        let hash = a.media_hash(&id).unwrap();
+        for t in [1.0, 4.0] {
+            a.set_video_status(hash.clone(), VideoStatus { time: t, duration: 8.0, playing: false, speed: 1.0 });
+            a.key(Key::Char('m'));
+        }
+        assert_eq!(a.video_markers(&hash), vec![1000, 4000]);
+        a.take_video_commands();
+        a.set_video_status(hash.clone(), VideoStatus { time: 2.0, duration: 8.0, playing: false, speed: 1.0 });
+        a.key(Key::Char('\''));
+        a.key(Key::Char(';'));
+        assert_eq!(a.take_video_commands(), vec![(hash.clone(), VideoCommand::Seek(4.0)), (hash.clone(), VideoCommand::Seek(1.0))]);
+        a.panel_open = true;
+        assert!(a.panel_info().unwrap().rows.contains(&("Markers".into(), "0:01.0  0:04.0".into())));
+    }
+
+    #[test]
     fn video_shortcuts_and_scrubbing_queue_commands() {
         let mut a = app();
         let meta = VideoMeta { width: 400, height: 200, duration_ms: 8000, fps: Some(25.0) };
@@ -4031,6 +4084,7 @@ mod tests {
                 colors: vec!["#112233".into(), "#445566".into()],
                 original: None,
                 range: None,
+                markers: Vec::new(),
                 extra: Default::default(),
             },
         );

@@ -263,6 +263,7 @@ mod tests {
             colors: vec![],
             original: None,
             range: None,
+            markers: Vec::new(),
             extra: Default::default(),
         }
     }
