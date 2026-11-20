@@ -140,6 +140,9 @@ struct Editing {
     caret: usize,
     /// The item before editing, or None if this edit created it.
     original: Option<BoardItem>,
+    /// A to-do list being edited as text: the title on the first line, one
+    /// entry per line after it. It turns back into a to-do card when done.
+    todo: bool,
 }
 
 /// The editable text of an item, if it has one.
@@ -900,6 +903,12 @@ impl App {
             self.gesture = Gesture::Resize { original: item, start: board, aspect };
             return;
         }
+        if let Some((id, k)) = hit.and_then(|id| self.todo_box_at(id, board).map(|k| (id, k))) {
+            self.selection = [id].into();
+            self.toggle_todo(id, k);
+            self.last_click = None;
+            return;
+        }
         if let Some((hash, x, w, duration)) = hit.and_then(|id| self.scrub_target(id, board)) {
             self.selection = [hit.unwrap()].into();
             self.video_commands.push((hash.clone(), VideoCommand::Seek(video::time_at(board[0], x, w, duration))));
@@ -1230,6 +1239,10 @@ impl App {
                 self.new_board();
             }
             Key::Char('p' | 'P') => self.panel_open = !self.panel_open,
+            Key::Char('t' | 'T') => {
+                let at = self.camera.screen_to_board(self.cursor, self.viewport);
+                self.new_todo(at);
+            }
             Key::Char('f' | 'F') => self.run_command(menu::Command::FitBoard),
             Key::Char('+' | '=') => self.run_command(menu::Command::ZoomIn),
             Key::Char('-' | '_') => self.run_command(menu::Command::ZoomOut),
@@ -1275,6 +1288,7 @@ impl App {
                 .map(|sc| sc.title.iter().chain(&sc.tags).chain(sc.auto_tags.iter().map(|t| &t.tag)).cloned().collect::<Vec<_>>().join(" "))
                 .unwrap_or_default(),
             ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_default(),
+            ItemKind::Todo { title, entries } => todo_to_text(title, entries),
             kind => item_text(kind).unwrap_or_default().to_owned(),
         };
         text.to_lowercase()
@@ -1557,11 +1571,53 @@ impl App {
     /// Starts typing into an item's text, caret at the end.
     pub fn begin_edit(&mut self, id: Uuid) {
         self.end_edit();
-        let Some(item) = self.doc.item(&id) else { return };
+        let Some(item) = self.doc.item(&id).cloned() else { return };
+        if let ItemKind::Todo { title, entries } = &item.kind {
+            let text = todo_to_text(title, entries);
+            let mut as_text = item.clone();
+            as_text.kind = ItemKind::Note { text: text.clone(), color: None };
+            self.doc.preview(as_text);
+            self.editing = Some(Editing { id, caret: text.len(), original: Some(item), todo: true });
+            self.selection = [id].into();
+            self.edit(|_, _| {});
+            return;
+        }
         let Some(text) = item_text(&item.kind) else { return };
-        self.editing = Some(Editing { id, caret: text.len(), original: Some(item.clone()) });
+        self.editing = Some(Editing { id, caret: text.len(), original: Some(item.clone()), todo: false });
         self.selection = [id].into();
         self.needs_redraw = true;
+    }
+
+    /// Creates a to-do list at a board point and starts typing into it.
+    pub fn new_todo(&mut self, at: [f32; 2]) -> Uuid {
+        let id = self.new_note(at, "To-do\n".into());
+        if let Some(e) = &mut self.editing {
+            e.todo = true;
+        }
+        id
+    }
+
+    /// Ticks or unticks entry `k` of a to-do card. One undo step.
+    pub fn toggle_todo(&mut self, id: Uuid, k: usize) {
+        let Some(mut item) = self.doc.item(&id).cloned() else { return };
+        let ItemKind::Todo { entries, .. } = &mut item.kind else { return };
+        let Some(e) = entries.get_mut(k) else { return };
+        e.done = !e.done;
+        self.doc.replace(vec![item]);
+        self.needs_redraw = true;
+    }
+
+    /// The to-do entry whose tick box is under a board point.
+    fn todo_box_at(&self, id: Uuid, p: [f32; 2]) -> Option<usize> {
+        let item = self.doc.item(&id)?;
+        let ItemKind::Todo { entries, .. } = &item.kind else { return None };
+        let f = item.frame;
+        let rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+        (0..entries.len()).find(|k| {
+            let b = scene::todo_box(rect, *k);
+            let pad = 4.0;
+            p[0] >= b[0] - pad && p[0] <= b[0] + b[2] + pad && p[1] >= b[1] - pad && p[1] <= b[1] + b[3] + pad && b[1] + b[3] <= rect[1] + rect[3]
+        })
     }
 
     /// Finishes typing: records the edit as one undo step. A new note left
@@ -1569,7 +1625,25 @@ impl App {
     pub fn end_edit(&mut self) {
         let Some(e) = self.editing.take() else { return };
         self.needs_redraw = true;
-        let Some(item) = self.doc.board.items.get(&e.id).cloned() else { return };
+        let Some(mut item) = self.doc.board.items.get(&e.id).cloned() else { return };
+        if e.todo {
+            // Back from text to a to-do card; ticks follow their entries.
+            let text = item_text(&item.kind).unwrap_or_default().to_owned();
+            let old = match e.original.as_ref().map(|o| &o.kind) {
+                Some(ItemKind::Todo { entries, .. }) => entries.clone(),
+                _ => Vec::new(),
+            };
+            let (title, entries) = text_to_todo(&text, &old);
+            if e.original.is_none() && entries.is_empty() && (title.is_empty() || title == "To-do") {
+                self.doc.discard_preview(&e.id);
+                self.selection.remove(&e.id);
+                return;
+            }
+            item.frame.h = scene::todo_height(entries.len()) as f64;
+            item.kind = ItemKind::Todo { title, entries };
+            self.doc.commit_edit(e.original.as_ref(), item);
+            return;
+        }
         let empty = item_text(&item.kind).is_some_and(|t| t.trim().is_empty());
         if e.original.is_none() && empty {
             self.doc.discard_preview(&e.id);
@@ -1587,7 +1661,7 @@ impl App {
         let caret = text.len();
         let item = BoardItem { id, frame, kind: ItemKind::Note { text, color: None }, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false };
         self.doc.preview(item);
-        self.editing = Some(Editing { id, caret, original: None });
+        self.editing = Some(Editing { id, caret, original: None, todo: false });
         self.selection = [id].into();
         self.edit(|_, _| {}); // grows the frame to fit pasted text
         self.needs_redraw = true;
@@ -2263,6 +2337,10 @@ impl App {
                 let at = self.camera.center;
                 self.new_note(at, String::new());
             }
+            C::NewTodo => {
+                let at = self.camera.center;
+                self.new_todo(at);
+            }
             C::NewBoard => {
                 let cursor = std::mem::replace(&mut self.cursor, centre);
                 self.new_board();
@@ -2308,6 +2386,33 @@ impl App {
         }
         renderer.draw_glyphs(&view, &glyphs);
     }
+}
+
+/// A to-do list as editable text: title, then one entry per line.
+fn todo_to_text(title: &str, entries: &[wall_format::TodoEntry]) -> String {
+    let mut s = title.to_owned();
+    for e in entries {
+        s.push('\n');
+        s.push_str(&e.text);
+    }
+    s
+}
+
+/// Text back to a to-do list. An entry keeps its tick when an entry with
+/// the same text was ticked.
+fn text_to_todo(text: &str, old: &[wall_format::TodoEntry]) -> (String, Vec<wall_format::TodoEntry>) {
+    let mut lines = text.lines();
+    let title = lines.next().unwrap_or("").trim().to_owned();
+    let mut used = vec![false; old.len()];
+    let texts: Vec<String> = lines.map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
+    let mut entries: Vec<wall_format::TodoEntry> = texts.iter().map(|t| wall_format::TodoEntry { text: t.clone(), done: false }).collect();
+    for e in entries.iter_mut() {
+        if let Some(j) = old.iter().enumerate().position(|(j, o)| !used[j] && o.text == e.text) {
+            used[j] = true;
+            e.done = old[j].done;
+        }
+    }
+    (title, entries)
 }
 
 /// Fills in main colours and local auto-tags (colour, shape, length).
@@ -2911,6 +3016,49 @@ mod tests {
         assert!(a.scrub_bars().len() >= 6);
         panel_click(&mut a, panel::Action::ClearRange);
         assert_eq!(a.video_range(&hash), None);
+    }
+
+    #[test]
+    fn todo_cards_type_tick_and_keep_ticks() {
+        let mut a = app();
+        a.cursor = [100.0, 100.0];
+        a.key(Key::Char('t'));
+        assert!(a.is_editing());
+        // Typing starts on the first entry, under the "To-do" title.
+        a.text_input("Reference pass");
+        a.key(Key::Enter);
+        a.text_input("Grade");
+        a.key(Key::Enter);
+        a.text_input("Export");
+        a.key(Key::Escape);
+        let id = *a.selection.iter().next().unwrap();
+        let ItemKind::Todo { title, entries } = a.doc.item(&id).unwrap().kind.clone() else { panic!("not a to-do") };
+        assert_eq!(title, "To-do");
+        assert_eq!(entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["Reference pass", "Grade", "Export"]);
+
+        // Click the second tick box.
+        let f = a.doc.item(&id).unwrap().frame;
+        let b = scene::todo_box([f.x as f32, f.y as f32, f.w as f32, f.h as f32], 1);
+        click(&mut a, 90_000, [b[0] + 8.0, b[1] + 8.0]);
+        assert!(matches!(&a.doc.item(&id).unwrap().kind, ItemKind::Todo { entries, .. } if entries[1].done && !entries[0].done));
+
+        // Edit as text: drop the first entry; "Grade" keeps its tick.
+        a.begin_edit(id);
+        a.edit(|t, c| {
+            *t = "Shot list\nGrade\nExport\nUpload".into();
+            *c = t.len();
+        });
+        a.end_edit();
+        let ItemKind::Todo { title, entries } = a.doc.item(&id).unwrap().kind.clone() else { panic!() };
+        assert_eq!(title, "Shot list");
+        assert_eq!(entries.iter().map(|e| (e.text.as_str(), e.done)).collect::<Vec<_>>(), [("Grade", true), ("Export", false), ("Upload", false)]);
+        a.key(Key::Undo);
+        assert!(matches!(&a.doc.item(&id).unwrap().kind, ItemKind::Todo { entries, .. } if entries.len() == 3 && entries[0].text == "Reference pass"));
+
+        // An untouched new list is dropped.
+        a.key(Key::Char('t'));
+        a.key(Key::Escape);
+        assert_eq!(a.doc.board.live_items().count(), 1);
     }
 
     #[test]

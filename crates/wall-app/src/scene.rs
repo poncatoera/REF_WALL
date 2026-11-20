@@ -167,9 +167,36 @@ impl Scene {
                 ItemKind::Label { text } => {
                     label = Some((text.as_str(), [1.0; 4]));
                 }
-                ItemKind::Todo { title, .. } => {
+                ItemKind::Todo { title, entries } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
-                    label = Some((title.as_str(), TEXT));
+                    // Title on top, then one row per entry with a tick box.
+                    let shown = todo_rows_that_fit(rect[3], entries.len());
+                    for (k, e) in entries.iter().take(shown).enumerate() {
+                        let b = todo_box(rect, k);
+                        let (fill, stroke) = if e.done { (ACCENT, ACCENT) } else { (NOTE_FILL, [0.45, 0.47, 0.52, 1.0]) };
+                        run.boxes.push(BoxInstance { rect: b, fill, stroke, shape: [3.0, 1.5] });
+                        if e.done {
+                            // A tick: two short strokes.
+                            run.curves.push(CurveInstance { p01: [b[0] + 3.5, b[1] + 8.0, b[0] + 6.0, b[1] + 10.5], p2w: [b[0] + 6.5, b[1] + 11.5, 2.0, 0.0], color: [1.0; 4] });
+                            run.curves.push(CurveInstance { p01: [b[0] + 6.5, b[1] + 11.5, b[0] + 9.5, b[1] + 7.5], p2w: [b[0] + 12.5, b[1] + 4.0, 2.0, 0.0], color: [1.0; 4] });
+                        }
+                        let ink = if e.done { [0.5, 0.52, 0.57, 1.0] } else { TEXT };
+                        let max = rect[2] - TODO_TEXT_X - 12.0;
+                        let text = clip_line(font, &e.text, TODO_SIZE, max);
+                        add_text(font, &mut run.glyphs, &text, [rect[0] + TODO_TEXT_X, b[1] + 13.5], TODO_SIZE, ink);
+                        if e.done {
+                            let w = (font.layout_line(&text).width * TODO_SIZE).min(max);
+                            run.boxes.push(BoxInstance { rect: [rect[0] + TODO_TEXT_X, b[1] + 8.0, w, 1.2], fill: ink, stroke: [0.0; 4], shape: [0.0, 0.0] });
+                        }
+                    }
+                    if shown < entries.len() {
+                        let more = format!("+{} more", entries.len() - shown);
+                        add_text(font, &mut run.glyphs, &more, [rect[0] + TODO_TEXT_X, todo_box(rect, shown)[1] + 13.5], 13.0, [0.5, 0.52, 0.57, 1.0]);
+                    }
+                    if !title.is_empty() {
+                        let t = clip_line(font, title, 17.0, rect[2] - 28.0);
+                        add_text(font, &mut run.glyphs, &t, [rect[0] + 14.0, rect[1] + 30.0], 17.0, TEXT);
+                    }
                 }
                 ItemKind::Board { board_id } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
@@ -242,6 +269,45 @@ fn item_text(cache: &mut HashMap<Uuid, CachedText>, gen: u64, font: &mut Font, o
         g.rect[1] += rect[1];
         g
     }));
+}
+
+/// To-do card layout, in board units from the card's top-left.
+const TODO_FIRST_ROW: f32 = 44.0;
+pub const TODO_ROW: f32 = 26.0;
+const TODO_TEXT_X: f32 = 40.0;
+const TODO_SIZE: f32 = 15.0;
+
+/// The tick box of entry `k` on a to-do card at `rect`.
+pub fn todo_box(rect: [f32; 4], k: usize) -> [f32; 4] {
+    [rect[0] + 14.0, rect[1] + TODO_FIRST_ROW + k as f32 * TODO_ROW, 16.0, 16.0]
+}
+
+/// Card height that shows a title and `n` entries.
+pub fn todo_height(n: usize) -> f32 {
+    TODO_FIRST_ROW + n as f32 * TODO_ROW + 10.0
+}
+
+/// How many entry rows fit in a card of height `h` (one row is kept for
+/// "+n more" when they don't all fit).
+fn todo_rows_that_fit(h: f32, n: usize) -> usize {
+    let rows = ((h - TODO_FIRST_ROW - 4.0) / TODO_ROW).floor().max(0.0) as usize;
+    if rows >= n { n } else { rows.saturating_sub(1) }
+}
+
+/// `text` cut with an ellipsis to fit `max` board units at `size`.
+fn clip_line(font: &mut Font, text: &str, size: f32, max: f32) -> String {
+    if font.layout_line(text).width * size <= max {
+        return text.to_owned();
+    }
+    let mut s = text.to_owned();
+    while !s.is_empty() {
+        s.pop();
+        let t = format!("{}…", s.trim_end());
+        if font.layout_line(&t).width * size <= max {
+            return t;
+        }
+    }
+    String::new()
 }
 
 pub const ARROW_COLOR: [f32; 4] = [0.62, 0.64, 0.7, 1.0];
