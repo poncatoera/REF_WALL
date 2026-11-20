@@ -14,7 +14,7 @@ const MARGIN: f32 = 12.0;
 const PAD: f32 = 16.0;
 
 pub const PALETTE: [&str; 7] = ["#e5534b", "#e8a15d", "#e6c84f", "#57ab5a", "#7aa2f7", "#b083f0", "#8b8f98"];
-const SPEEDS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
+const SPEEDS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 
 pub const BG: [f32; 4] = [0.105, 0.11, 0.125, 1.0];
 const LINE: [f32; 4] = [0.2, 0.21, 0.24, 1.0];
@@ -53,6 +53,10 @@ pub enum Action {
     OpenBoard,
     /// Show only items with this tag; clicking the active tag clears it.
     FilterTag(String),
+    /// Turn a suggested tag into a real one.
+    AcceptTag(String),
+    /// Drop a suggested tag.
+    DismissTag(String),
     /// A click on the panel that does nothing, so it doesn't reach the board.
     None,
 }
@@ -78,6 +82,10 @@ pub struct PanelInfo {
     pub rows: Vec<(String, String)>,
     /// Some when the item takes tags.
     pub tags: Option<Vec<String>>,
+    /// Tags Wall suggested that aren't real tags yet.
+    pub suggested: Vec<String>,
+    /// Main colours of a picture, `#rrggbb`.
+    pub palette: Vec<String>,
     /// Some(current colour) when the selection can be coloured.
     pub color: Option<Option<String>>,
     pub video: Option<VideoInfo>,
@@ -210,6 +218,15 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         l.text(value, [vx, y + 12.0], 12.5, INK);
         y += 20.0;
     }
+    if !info.palette.is_empty() {
+        l.text("Colours", [left, y + 12.0], 12.5, DIM);
+        let mut x = left + 84.0;
+        for c in &info.palette {
+            l.rect([x, y + 1.0, 14.0, 14.0], parse_hex(c).unwrap_or(DIM), LINE, 7.0);
+            x += 20.0;
+        }
+        y += 20.0;
+    }
     if !info.rows.is_empty() {
         y += 8.0;
     }
@@ -290,6 +307,31 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             x += w + 6.0;
         }
         if !tags.is_empty() {
+            y += h + 8.0;
+        }
+        if !info.suggested.is_empty() {
+            l.text("Suggested", [left, y + 12.0], 11.5, DIM);
+            y += 18.0;
+            let mut x = left;
+            for tag in &info.suggested {
+                let label = fit(font, tag, size, inner - 60.0);
+                let w = text_width(font, &label, size) + 54.0;
+                if x + w > left + inner && x > left {
+                    x = left;
+                    y += h + 6.0;
+                }
+                let r = [x, y, w, h];
+                l.rect(r, FIELD, LINE, h / 2.0);
+                l.text(label, [x + 10.0, y + 16.5], size, DIM);
+                l.hits.push((r, Action::FilterTag(tag.clone())));
+                let add = [x + w - 44.0, y + 2.0, 20.0, 20.0];
+                l.text("+", [add[0] + 4.0, add[1] + 15.0], 15.0, ACCENT);
+                l.hits.push((add, Action::AcceptTag(tag.clone())));
+                let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
+                l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM);
+                l.hits.push((xr, Action::DismissTag(tag.clone())));
+                x += w + 6.0;
+            }
             y += h + 8.0;
         }
         let r = [left, y, inner, 30.0];

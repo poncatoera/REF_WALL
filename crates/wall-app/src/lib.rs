@@ -349,6 +349,13 @@ impl App {
                 Some(img) => {
                     let img = img.to_rgba8();
                     let (w, h) = img.dimensions();
+                    // Libraries from before auto-tags get them on first open.
+                    if let Some(sc) = self.sidecars.get_mut(&hash).filter(|s| s.colors.is_empty() && s.auto_tags.is_empty()) {
+                        auto_tag(sc, Some(img.as_raw()));
+                        if let Err(e) = library.write_sidecar(sc) {
+                            eprintln!("wall: could not save auto-tags: {e}");
+                        }
+                    }
                     self.pictures.insert(hash, Picture::Pending { rgba: img.into_raw(), width: w, height: h });
                 }
                 None => eprintln!("wall: picture {hash} is missing from the library"),
@@ -396,6 +403,7 @@ impl App {
             original: prepared.original.clone(),
             extra: Default::default(),
         };
+        auto_tag(&mut sidecar, Some(rgba.as_raw()));
         if let Some(lib) = &self.library {
             let known = lib.has_media(&hash);
             lib.import_bytes(&prepared.bytes, prepared.ext)?;
@@ -437,6 +445,7 @@ impl App {
             original: None,
             extra: Default::default(),
         };
+        auto_tag(&mut sidecar, None);
         if let Some(lib) = &self.library {
             let known = lib.has_media(&hash);
             lib.import_bytes(bytes, ext)?;
@@ -554,6 +563,22 @@ impl App {
             .collect()
     }
 
+    /// A frame of a video (its poster or first played frame): picks the
+    /// video's main colours and colour tags if it has none yet.
+    pub fn video_frame_seen(&mut self, hash: &ContentHash, rgba: &[u8], width: u32, height: u32) {
+        if !self.sidecars.get(hash).is_some_and(|s| s.colors.is_empty()) {
+            return;
+        }
+        let colors = wall_media::autotag::dominant_colors(rgba, width, height, 4);
+        if colors.is_empty() {
+            return;
+        }
+        self.update_sidecar(hash, |sc| {
+            sc.colors = colors;
+            auto_tag(sc, None);
+        });
+    }
+
     /// Commands for the shell's players, oldest first.
     pub fn take_video_commands(&mut self) -> Vec<(ContentHash, VideoCommand)> {
         std::mem::take(&mut self.video_commands)
@@ -649,6 +674,9 @@ impl App {
                     extra: Default::default(),
                 },
             );
+            if let Some(sc) = app.sidecars.get_mut(&hash) {
+                auto_tag(sc, Some(&demo_picture(i, w, h)));
+            }
             let (c, r) = (i % 6, i / 6);
             items.push((f(c as f64 * 340.0, 20.0 + r as f64 * 230.0, w as f64, h as f64), ItemKind::Media { hash, crop: None }));
         }
@@ -1121,7 +1149,11 @@ impl App {
     /// Everything searchable about an item, lowercase.
     fn item_search_text(&self, item: &BoardItem) -> String {
         let text = match &item.kind {
-            ItemKind::Media { hash, .. } => self.sidecars.get(hash).map(|sc| sc.title.iter().chain(&sc.tags).cloned().collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+            ItemKind::Media { hash, .. } => self
+                .sidecars
+                .get(hash)
+                .map(|sc| sc.title.iter().chain(&sc.tags).chain(sc.auto_tags.iter().map(|t| &t.tag)).cloned().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default(),
             ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_default(),
             kind => item_text(kind).unwrap_or_default().to_owned(),
         };
@@ -1742,6 +1774,8 @@ impl App {
                     info.rows.push(("Added".into(), format_date(sc.added_ms)));
                     info.rows.push(("Source".into(), sc.source_url.clone().unwrap_or_else(|| "—".into())));
                     info.tags = Some(sc.tags.clone());
+                    info.suggested = sc.auto_tags.iter().map(|t| t.tag.clone()).filter(|t| !sc.tags.contains(t)).collect();
+                    info.palette = sc.colors.clone();
                 } else {
                     info.tags = None;
                 }
@@ -1811,8 +1845,10 @@ impl App {
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for i in self.doc.board.live_items() {
             if let ItemKind::Media { hash, .. } = &i.kind {
-                for t in self.sidecars.get(hash).map(|s| s.tags.as_slice()).unwrap_or_default() {
-                    *counts.entry(t).or_default() += 1;
+                if let Some(sc) = self.sidecars.get(hash) {
+                    for t in sidecar_tags(sc) {
+                        *counts.entry(t).or_default() += 1;
+                    }
                 }
             }
         }
@@ -1829,7 +1865,7 @@ impl App {
             .board
             .live_items()
             .filter(|i| match &i.kind {
-                ItemKind::Media { hash, .. } => !self.sidecars.get(hash).is_some_and(|s| s.tags.contains(tag)),
+                ItemKind::Media { hash, .. } => !self.sidecars.get(hash).is_some_and(|s| sidecar_tags(s).any(|t| t == tag)),
                 ItemKind::Group { .. } | ItemKind::Arrow { .. } => false,
                 _ => true,
             })
@@ -1887,6 +1923,21 @@ impl App {
                 }
             }
             Action::Color(c) => self.set_color_value(c),
+            Action::AcceptTag(t) => {
+                if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
+                    self.update_sidecar(&hash, |sc| {
+                        if !sc.tags.contains(&t) {
+                            sc.tags.push(t.clone());
+                        }
+                        sc.auto_tags.retain(|a| a.tag != t);
+                    });
+                }
+            }
+            Action::DismissTag(t) => {
+                if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
+                    self.update_sidecar(&hash, |sc| sc.auto_tags.retain(|a| a.tag != t));
+                }
+            }
             Action::FilterTag(t) => {
                 let same = self.tag_filter.as_ref() == Some(&t);
                 self.filter_by_tag((!same).then_some(t));
@@ -2020,6 +2071,28 @@ impl App {
         }
         renderer.draw_glyphs(&view, &glyphs);
     }
+}
+
+/// Fills in main colours and local auto-tags (colour, shape, length).
+/// `rgba` is the decoded picture, when there is one.
+fn auto_tag(sc: &mut ItemSidecar, rgba: Option<&[u8]>) {
+    use wall_media::autotag;
+    if let Some(px) = rgba {
+        if sc.colors.is_empty() {
+            sc.colors = autotag::dominant_colors(px, sc.width, sc.height, 4);
+        }
+    }
+    let fresh = autotag::local_tags(&sc.colors, sc.width, sc.height, sc.duration_ms);
+    for t in fresh {
+        if !sc.auto_tags.iter().any(|a| a.tag == t.tag) {
+            sc.auto_tags.push(t);
+        }
+    }
+}
+
+/// A picture's own tags and suggested tags, without repeats.
+fn sidecar_tags(sc: &ItemSidecar) -> impl Iterator<Item = &str> {
+    sc.tags.iter().map(String::as_str).chain(sc.auto_tags.iter().map(|a| a.tag.as_str()).filter(|t| !sc.tags.iter().any(|u| u == t)))
 }
 
 /// A picture with one corner moved by `d` board units, cropping: the image
@@ -2490,6 +2563,31 @@ mod tests {
         a.key(Key::Enter);
         assert_eq!(a.doc.board.name, "Demo board");
         assert_eq!(a.breadcrumb(), vec!["Demo board"]);
+    }
+
+    #[test]
+    fn imported_pictures_get_suggested_tags() {
+        let mut a = app();
+        a.panel_open = true;
+        // A tall, mostly blue picture.
+        let img = image::RgbaImage::from_fn(60, 120, |_, y| if y < 100 { image::Rgba([30, 80, 220, 255]) } else { image::Rgba([240, 140, 40, 255]) });
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let id = a.import_image_bytes(&png, Some("sky.png"), 0).unwrap();
+        a.selection = [id].into();
+        let info = a.panel_info().unwrap();
+        assert_eq!(info.suggested, vec!["blue", "orange", "portrait"]);
+        assert_eq!(info.palette.len(), 2);
+        panel_click(&mut a, panel::Action::AcceptTag("blue".into()));
+        panel_click(&mut a, panel::Action::DismissTag("orange".into()));
+        let info = a.panel_info().unwrap();
+        assert_eq!(info.tags.unwrap(), vec!["blue"]);
+        assert_eq!(info.suggested, vec!["portrait"]);
+        // Suggested tags still count for search and the tag filter.
+        a.selection.clear();
+        assert!(a.board_tags().contains(&("portrait".to_owned(), 1)));
+        a.filter_by_tag(Some("portrait".into()));
+        assert!(a.filtered_out().is_empty());
     }
 
     #[test]

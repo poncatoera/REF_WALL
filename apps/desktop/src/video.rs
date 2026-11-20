@@ -140,6 +140,19 @@ pub fn playback_size(w: u32, h: u32) -> (u32, u32) {
     (even(w as f32 * scale), even(h as f32 * scale))
 }
 
+/// One still frame at `at` seconds, scaled to `w`×`h`, as RGBA. Used as a
+/// video's poster until (or unless) it plays.
+pub fn poster(path: &Path, w: u32, h: u32, at: f64) -> Option<Vec<u8>> {
+    let out = command(ffmpeg()?)
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{at:.3}"), "-i"])
+        .arg(path)
+        .args(["-an", "-frames:v", "1", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    (out.stdout.len() == (w * h * 4) as usize).then_some(out.stdout)
+}
+
 /// A decoded frame: generation (bumped on every seek), time in seconds, RGBA.
 type Frame = (u64, f64, Vec<u8>);
 
@@ -317,6 +330,26 @@ mod tests {
 
     /// Needs ffmpeg; skipped without it.
     #[test]
+    fn poster_grabs_one_frame() {
+        if ffmpeg().is_none() {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("p.mp4");
+        let ok = command(ffmpeg().unwrap())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:size=64x36:rate=25", "-t", "2", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let frame = poster(&clip, 64, 36, 0.5).expect("a frame");
+        assert_eq!(frame.len(), 64 * 36 * 4);
+        let colors = wall_media::autotag::dominant_colors(&frame, 64, 36, 2);
+        assert_eq!(wall_media::autotag::color_name(&colors[0]), Some("blue"));
+    }
+
+    #[test]
     fn player_paces_pauses_steps_and_seeks() {
         if ffmpeg().is_none() {
             eprintln!("skipped: no ffmpeg");
@@ -387,6 +420,8 @@ struct Slot {
     player: Option<Player>,
     /// Where to resume when it comes back on screen.
     saved: wall_app::VideoStatus,
+    /// A still frame being grabbed for videos that haven't played yet.
+    poster: Option<Receiver<Option<Vec<u8>>>>,
 }
 
 /// Imports running in the background and the videos on the board.
@@ -453,7 +488,13 @@ impl Videos {
             let Some(path) = src.path.clone().filter(|p| p.is_file()).or_else(|| self.paths.get(&src.hash).cloned()) else { continue };
             let (duration, fps) = probe(&path).map_or((0.0, 30.0), |p| (p.probe.duration_ms as f64 / 1000.0, p.fps.unwrap_or(30.0) as f64));
             let saved = wall_app::VideoStatus { time: 0.0, duration, playing: true, speed: 1.0 };
-            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, player: None, saved });
+            let (pw, ph) = playback_size(src.width, src.height);
+            let (tx, rx) = mpsc::sync_channel(1);
+            let (p2, at) = (path.clone(), (duration / 3.0).min(1.0));
+            std::thread::spawn(move || {
+                let _ = tx.send(poster(&p2, pw, ph, at));
+            });
+            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, player: None, saved, poster: Some(rx) });
         }
 
         let playable = app.playable_videos();
@@ -495,6 +536,29 @@ impl Videos {
         }
 
         for slot in &mut self.slots {
+            if let Some(rx) = &slot.poster {
+                match rx.try_recv() {
+                    Ok(frame) => {
+                        slot.poster = None;
+                        if let Some(frame) = frame {
+                            let (pw, ph) = playback_size(slot.width, slot.height);
+                            app.video_frame_seen(&slot.hash, &frame, pw, ph);
+                            if slot.tex.is_none() {
+                                match renderer.create_video_texture(pw, ph) {
+                                    Ok(tex) => {
+                                        renderer.update_image(tex, &frame, pw, ph);
+                                        app.attach_texture(slot.hash.clone(), tex);
+                                        slot.tex = Some(tex);
+                                    }
+                                    Err(e) => eprintln!("wall: video texture failed: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => slot.poster = None,
+                }
+            }
             let Some(player) = &mut slot.player else {
                 app.set_video_status(slot.hash.clone(), slot.saved);
                 continue;

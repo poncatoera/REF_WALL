@@ -6,6 +6,7 @@
 //!   This crate only *plans* the encode; desktop runs it with ffmpeg and the web
 //!   build runs it with WebCodecs.
 
+pub mod autotag;
 pub mod image_rules;
 pub mod video_rules;
 
