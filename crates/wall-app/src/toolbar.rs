@@ -15,6 +15,8 @@ pub enum Tool {
     Group,
     /// While on, a drag on the board draws an arrow (as Alt-drag does).
     Arrow,
+    /// While on, drags on the board draw pen lines (stays on until Esc).
+    Pen,
     Board,
     /// A web link card.
     Link,
@@ -38,6 +40,7 @@ pub const TOOLS: &[Option<(Tool, &str)>] = &[
     Some((Tool::Todo, "To-do list  ·  T")),
     Some((Tool::Group, "Group")),
     Some((Tool::Arrow, "Arrow  ·  or Alt-drag")),
+    Some((Tool::Pen, "Pen  ·  Esc to stop")),
     Some((Tool::Board, "Board  ·  B")),
     Some((Tool::Link, "Link  ·  or paste an address")),
     None,
@@ -154,6 +157,14 @@ fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
         Tool::Select => glyph(l, "↖", c, 19.0, ink),
         Tool::Arrow => glyph(l, "↗", c, 19.0, ink),
         Tool::Text => glyph(l, "T", c, 19.0, ink),
+        Tool::Pen => {
+            // A slanted line of dots with a heavier tip.
+            for k in 0..5 {
+                let o = k as f32 * 3.2;
+                l.fill([x + 6.0 - o - 1.2, y - 7.0 + o - 1.2, 2.6, 2.6], ink, 1.3);
+            }
+            l.fill([x - 9.0, y + 6.0, 3.0, 3.0], ink, 0.5);
+        }
         Tool::Link => {
             // Two linked rings.
             l.outline([x - 9.0, y - 4.0, 11.0, 8.0], ink, 4.0);

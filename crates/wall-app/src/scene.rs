@@ -241,6 +241,10 @@ impl Scene {
                     let name = board_names.get(board_id).map_or("Board", |n| n.as_str());
                     label = Some((name, TEXT()));
                 }
+                ItemKind::Stroke { points, width, color } => {
+                    let ink = parse_hex(color.as_deref()).map_or(TEXT(), |c| [c[0], c[1], c[2], 1.0]);
+                    run.curves.extend(stroke_curves(points, rect, *width, ink));
+                }
                 ItemKind::Link { url, title } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
                     if title.is_empty() {
@@ -738,4 +742,35 @@ pub fn link_site(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     host.strip_prefix("www.").unwrap_or(host).to_owned()
+}
+
+/// A pen line as quadratic pieces through the midpoints of its points
+/// (`pts` in board units), so it bends smoothly. Ends are round.
+pub fn pen_curves(pts: &[[f32; 2]], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
+    let curve = |a: [f32; 2], c: [f32; 2], b: [f32; 2]| CurveInstance { p01: [a[0], a[1], c[0], c[1]], p2w: [b[0], b[1], width / 2.0, 0.0], color: ink };
+    let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    match pts {
+        [] => Vec::new(),
+        [p] => vec![curve(*p, *p, [p[0] + 0.01, p[1]])],
+        [a, b] => vec![curve(*a, mid(*a, *b), *b)],
+        _ => {
+            let n = pts.len();
+            let mut out = Vec::with_capacity(n);
+            out.push(curve(pts[0], mid(pts[0], pts[1]), mid(pts[0], pts[1])));
+            for i in 1..n - 1 {
+                out.push(curve(mid(pts[i - 1], pts[i]), pts[i], mid(pts[i], pts[i + 1])));
+            }
+            out.push(curve(mid(pts[n - 2], pts[n - 1]), pts[n - 1], pts[n - 1]));
+            out
+        }
+    }
+}
+
+/// A stroke item's points (0–1 of `rect`) on the board.
+pub fn stroke_points(points: &[[f32; 2]], rect: [f32; 4]) -> Vec<[f32; 2]> {
+    points.iter().map(|p| [rect[0] + p[0] * rect[2], rect[1] + p[1] * rect[3]]).collect()
+}
+
+fn stroke_curves(points: &[[f32; 2]], rect: [f32; 4], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
+    pen_curves(&stroke_points(points, rect), width, ink)
 }

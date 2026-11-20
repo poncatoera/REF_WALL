@@ -215,6 +215,15 @@ pub enum ItemKind {
         from: ArrowEnd,
         to: ArrowEnd,
     },
+    /// A pen line drawn on the board. `points` are in 0–1 of the frame
+    /// (so resizing the frame scales the line); `width` is in board units.
+    /// No colour: drawn in the board's text colour.
+    Stroke {
+        points: Vec<[f32; 2]>,
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+    },
     /// A web link: its address, and a title to show instead of it.
     Link {
         url: String,

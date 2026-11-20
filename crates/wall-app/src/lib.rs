@@ -136,6 +136,8 @@ enum Gesture {
     /// Dragging a tool out of the rail; released on the board, it makes
     /// that thing there (released on the rail, in the middle of the view).
     RailDrag { tool: toolbar::Tool },
+    /// Drawing with the pen: the line so far, in board units.
+    Draw { points: Vec<[f32; 2]> },
 }
 
 /// Text being typed into an item. The item shows the live text through
@@ -861,6 +863,20 @@ impl App {
     }
 
     /// Topmost live item under a board point.
+    /// True unless `item` is a pen line that `p` is not close to (a drawing
+    /// is picked by its line, not by the empty box around it).
+    fn near_stroke(&self, item: &BoardItem, p: [f32; 2]) -> bool {
+        let ItemKind::Stroke { points, width, .. } = &item.kind else { return true };
+        let f = item.frame;
+        let pts = scene::stroke_points(points, [f.x as f32, f.y as f32, f.w as f32, f.h as f32]);
+        let tol = width / 2.0 + 6.0 / self.camera.zoom;
+        match pts.len() {
+            0 => false,
+            1 => scene::segment_distance(p, pts[0], pts[0]) <= tol,
+            _ => pts.windows(2).any(|w| scene::segment_distance(p, w[0], w[1]) <= tol),
+        }
+    }
+
     pub fn hit(&self, p: [f32; 2]) -> Option<Uuid> {
         // Arrows are thin: anything within a few pixels of one picks it first.
         let tol = 6.0 / self.camera.zoom;
@@ -889,6 +905,7 @@ impl App {
             .live_items()
             .filter(|i| !matches!(i.kind, ItemKind::Arrow { .. }))
             .filter(|i| x >= i.frame.x && x <= i.frame.x + i.frame.w && y >= i.frame.y && y <= i.frame.y + i.frame.h)
+            .filter(|i| self.near_stroke(i, p))
             .max_by(|a, b| a.frame.z.total_cmp(&b.frame.z))
             .map(|i| i.id)
     }
@@ -936,6 +953,11 @@ impl App {
                 return;
             }
             self.end_edit();
+        }
+        if self.tool == toolbar::Tool::Pen {
+            self.selection.clear();
+            self.gesture = Gesture::Draw { points: vec![board] };
+            return;
         }
         if mods.alt || self.tool == toolbar::Tool::Arrow {
             // Alt-drag (or any drag with the arrow tool) draws an arrow, from an item or from empty space.
@@ -1084,6 +1106,13 @@ impl App {
                 return;
             }
             Gesture::RailDrag { .. } => {}
+            Gesture::Draw { points } => {
+                // A new point every 2 screen pixels keeps lines smooth and small.
+                let last = points.last().copied().unwrap_or(board);
+                if ((board[0] - last[0]).powi(2) + (board[1] - last[1]).powi(2)).sqrt() * self.camera.zoom >= 2.0 {
+                    points.push(board);
+                }
+            }
             Gesture::Connect { now, .. } => *now = board,
             Gesture::Crop { original, start, left, top } => {
                 let item = crop_item(original, [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64], *left, *top);
@@ -1138,6 +1167,10 @@ impl App {
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Move { originals, delta, .. } => {
                 self.doc.commit_drag(&originals, delta[0], delta[1]);
+            }
+            Gesture::Draw { mut points } => {
+                points.push(self.camera.screen_to_board(pos, self.viewport));
+                self.add_stroke(&points);
             }
             Gesture::RailDrag { tool } => {
                 let at = if self.rail_layout().contains(pos) { self.camera.center } else { self.camera.screen_to_board(pos, self.viewport) };
@@ -1350,6 +1383,9 @@ impl App {
             })
             .map(|pts| scene::arrow_curve(pts, accent, scene::ARROW_WIDTH + 1.0))
             .collect();
+        if let Gesture::Draw { points } = &self.gesture {
+            out.extend(scene::pen_curves(points, PEN_PX / self.camera.zoom, theme::t().text));
+        }
         if let Gesture::Connect { from, now, .. } = &self.gesture {
             let to = ArrowEnd::Point { x: now[0] as f64, y: now[1] as f64 };
             if let Some(pts) = scene::arrow_points(&self.doc, from, &to) {
@@ -2271,6 +2307,11 @@ impl App {
                 info.rows.push(size_row(f.w, f.h));
                 info.color = Some(color.clone());
             }
+            ItemKind::Stroke { points, .. } => {
+                info.kind = "Drawing".into();
+                info.rows.push(("Points".into(), points.len().to_string()));
+                info.rows.push(size_row(item.frame.w, item.frame.h));
+            }
             ItemKind::Link { url, title } => {
                 info.kind = "Link".into();
                 info.title = Some(title.clone());
@@ -2573,7 +2614,7 @@ impl App {
         self.end_edit();
         match tool {
             Tool::Select => self.tool = Tool::Select,
-            Tool::Arrow => self.tool = if self.tool == Tool::Arrow { Tool::Select } else { Tool::Arrow },
+            Tool::Arrow | Tool::Pen => self.tool = if self.tool == tool { Tool::Select } else { tool },
             Tool::Import => self.run_command(menu::Command::Import),
             t => self.gesture = Gesture::RailDrag { tool: t },
         }
@@ -2612,9 +2653,29 @@ impl App {
                 self.new_board();
                 self.cursor = cursor;
             }
-            Tool::Select | Tool::Arrow | Tool::Import => {}
+            Tool::Select | Tool::Arrow | Tool::Pen | Tool::Import => {}
         }
         self.needs_redraw = true;
+    }
+
+    /// Turns a pen line (board units) into a drawing item. One undo step.
+    pub fn add_stroke(&mut self, line: &[[f32; 2]]) -> Option<Uuid> {
+        let width = PEN_PX / self.camera.zoom;
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in line {
+            b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
+        }
+        if line.is_empty() {
+            return None;
+        }
+        // Pad so a straight line still has a box with some size.
+        let pad = width;
+        let (x, y, w, h) = (b[0] - pad, b[1] - pad, b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad);
+        let points = line.iter().map(|p| [(p[0] - x) / w, (p[1] - y) / h]).collect();
+        let frame = Frame { x: x as f64, y: y as f64, w: w as f64, h: h as f64, z: self.doc.top_z() + 1.0, ..Default::default() };
+        let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None })])[0];
+        self.needs_redraw = true;
+        Some(id)
     }
 
     /// A link card at a board point. Empty `url`: ready for typing one.
@@ -2920,6 +2981,9 @@ fn as_url(text: &str) -> Option<String> {
     let ok = (t.starts_with("https://") || t.starts_with("http://")) && t.len() > 10 && !t.contains(char::is_whitespace);
     ok.then(|| t.to_owned())
 }
+
+/// Pen line width in screen pixels when drawn.
+const PEN_PX: f32 = 3.0;
 
 #[cfg(test)]
 mod tests {
@@ -3797,6 +3861,32 @@ mod tests {
         let id = a.editing.as_ref().unwrap().id;
         a.end_edit();
         assert!(matches!(&a.doc.item(&id).unwrap().kind, ItemKind::Link { url, .. } if url == "example.org"));
+    }
+
+    #[test]
+    fn pen_draws_lines_that_are_picked_by_the_line_not_their_box() {
+        let mut a = app();
+        a.rail_click(toolbar::Tool::Pen);
+        // An L shape: down the left, then along the bottom.
+        let to_screen = |a: &App, p: [f32; 2]| [(p[0] - a.camera.center[0]) * a.camera.zoom + a.viewport[0] / 2.0, (p[1] - a.camera.center[1]) * a.camera.zoom + a.viewport[1] / 2.0];
+        let path = [[100.0, 100.0], [100.0, 200.0], [100.0, 300.0], [200.0, 300.0], [300.0, 300.0]];
+        a.pointer_down(Button::Primary, to_screen(&a, path[0]), Mods::default());
+        for p in &path[1..] {
+            a.pointer_move(to_screen(&a, *p));
+        }
+        a.pointer_up(Button::Primary, to_screen(&a, path[4]));
+        let stroke = a.doc.board.live_items().find(|i| matches!(i.kind, ItemKind::Stroke { .. })).unwrap().clone();
+        let ItemKind::Stroke { points, .. } = &stroke.kind else { unreachable!() };
+        assert!(points.len() >= 5 && points.iter().all(|p| (0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[1])));
+        // Still drawing: a second line.
+        assert_eq!(a.tool, toolbar::Tool::Pen);
+        a.key(Key::Escape);
+        assert_eq!(a.tool, toolbar::Tool::Select);
+        assert_eq!(a.hit([101.0, 250.0]), Some(stroke.id), "on the line");
+        assert_eq!(a.hit([250.0, 150.0]), None, "inside the box but far from the line");
+        // Moving it keeps the shape; undo takes it away.
+        a.key(Key::Undo);
+        assert!(a.doc.item(&stroke.id).is_none());
     }
 
     #[test]
