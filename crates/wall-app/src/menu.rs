@@ -103,10 +103,10 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "View",
         entries: &[
-            ("Fit board", "Shift 1", Some(Command::FitBoard)),
-            ("Zoom in", "Ctrl +", Some(Command::ZoomIn)),
-            ("Zoom out", "Ctrl −", Some(Command::ZoomOut)),
-            ("Actual size", "Shift 0", Some(Command::ActualSize)),
+            ("Fit board", "F", Some(Command::FitBoard)),
+            ("Zoom in", "+", Some(Command::ZoomIn)),
+            ("Zoom out", "−", Some(Command::ZoomOut)),
+            ("Actual size", "Z", Some(Command::ActualSize)),
             SEP,
             ("Show or hide side panel", "P", Some(Command::TogglePanel)),
             ("Library and trash", "L", Some(Command::ToggleLibrary)),

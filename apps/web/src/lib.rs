@@ -74,7 +74,10 @@ async fn load_demo_videos(s: Rc<RefCell<State>>, urls: Vec<String>) {
         if let Err(e) = fetched.await {
             web_sys::console::warn_1(&format!("wall: demo video {url}: {e:?}").into());
         }
-    }
+    }    // Show the pictures and the clips together.
+    let mut st = s.borrow_mut();
+    st.app.camera = wall_app::Camera { center: [1300.0, 470.0], zoom: 0.46 };
+    st.app.needs_redraw = true;
 }
 
 /// Carries out a menu command that needs the browser.

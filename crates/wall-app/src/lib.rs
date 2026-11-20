@@ -1230,6 +1230,10 @@ impl App {
                 self.new_board();
             }
             Key::Char('p' | 'P') => self.panel_open = !self.panel_open,
+            Key::Char('f' | 'F') => self.run_command(menu::Command::FitBoard),
+            Key::Char('+' | '=') => self.run_command(menu::Command::ZoomIn),
+            Key::Char('-' | '_') => self.run_command(menu::Command::ZoomOut),
+            Key::Char('z' | 'Z') => self.run_command(menu::Command::ActualSize),
             Key::Char('l' | 'L') => self.toggle_library(),
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
