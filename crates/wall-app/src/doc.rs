@@ -141,6 +141,38 @@ impl Document {
         self.version += 1;
     }
 
+    /// Shows an item edit in progress (typing) without recording it.
+    pub fn preview(&mut self, item: BoardItem) {
+        self.board.items.insert(item.id, item);
+        self.version += 1;
+    }
+
+    /// Records an edit that was shown live with [`Self::preview`]. `original`
+    /// is the item before the edit, or None if the edit created it.
+    pub fn commit_edit(&mut self, original: Option<&BoardItem>, after: BoardItem) -> bool {
+        match original {
+            Some(o) => {
+                self.board.items.insert(o.id, o.clone());
+                if o.kind == after.kind && o.frame == after.frame {
+                    self.version += 1;
+                    return false;
+                }
+            }
+            None => {
+                self.board.items.remove(&after.id);
+            }
+        }
+        self.commit(vec![after])
+    }
+
+    /// Drops an item that was only ever previewed (never committed).
+    pub fn discard_preview(&mut self, id: &Uuid) {
+        if self.board.items.get(id).is_some_and(|i| i.rev == 0) {
+            self.board.items.remove(id);
+            self.version += 1;
+        }
+    }
+
     /// Deletes items (as tombstones, so the deletion syncs).
     pub fn delete(&mut self, ids: &BTreeSet<Uuid>) -> bool {
         let afters = ids

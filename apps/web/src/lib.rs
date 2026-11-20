@@ -71,6 +71,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
         let s = state.clone();
         let cb = Closure::<dyn FnMut(PointerEvent)>::new(move |e: PointerEvent| {
             let mut s = s.borrow_mut();
+            s.app.set_time(js_sys::Date::now() as u64);
             let _ = s.canvas.set_pointer_capture(e.pointer_id());
             let mods = Mods { shift: e.shift_key(), command: e.ctrl_key() || e.meta_key(), alt: e.alt_key() };
             if let Some(b) = button(e.button()) {
@@ -119,11 +120,20 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
         let cb = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
             let cmd = e.ctrl_key() || e.meta_key();
             let k = e.key();
+            let mut s = s.borrow_mut();
+            s.app.set_time(js_sys::Date::now() as u64);
+            let editing = s.app.is_editing();
             let key = match k.as_str() {
-                " " => Some(Key::Space { pressed: down }),
+                " " if !editing => Some(Key::Space { pressed: down }),
                 _ if !down => None,
-                "Delete" | "Backspace" => Some(Key::Delete),
+                "Delete" => Some(Key::Delete),
+                "Backspace" => Some(Key::Backspace),
+                "Enter" => Some(Key::Enter),
                 "Escape" => Some(Key::Escape),
+                "ArrowLeft" => Some(Key::Left),
+                "ArrowRight" => Some(Key::Right),
+                "Home" => Some(Key::Home),
+                "End" => Some(Key::End),
                 "z" | "Z" if cmd => Some(if e.shift_key() { Key::Redo } else { Key::Undo }),
                 "y" | "Y" if cmd => Some(Key::Redo),
                 "a" | "A" if cmd => Some(Key::SelectAll),
@@ -131,10 +141,40 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             };
             if let Some(key) = key {
                 e.prevent_default();
-                s.borrow_mut().app.key(key);
+                s.app.key(key);
+            } else if down && editing && !cmd && k.chars().count() == 1 {
+                // A printable key (the browser gives its character in `key`).
+                e.prevent_default();
+                s.app.text_input(&k);
             }
         });
         document.add_event_listener_with_callback(kind, cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
+    // Paste: image files are imported like drops; text is typed into the
+    // note being edited, or becomes a new note at the cursor.
+    {
+        let s = state.clone();
+        let cb = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |e: web_sys::ClipboardEvent| {
+            let Some(data) = e.clipboard_data() else { return };
+            e.prevent_default();
+            let editing = s.borrow().app.is_editing();
+            if let (false, Some(files)) = (editing, data.files()) {
+                if files.length() > 0 {
+                    for i in 0..files.length() {
+                        if let Some(file) = files.get(i) {
+                            import_file(s.clone(), file);
+                        }
+                    }
+                    return;
+                }
+            }
+            if let Ok(text) = data.get_data("text/plain") {
+                s.borrow_mut().app.paste_text(&text);
+            }
+        });
+        document.add_event_listener_with_callback("paste", cb.as_ref().unchecked_ref())?;
         cb.forget();
     }
 
@@ -151,16 +191,9 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             s.borrow_mut().app.pointer_move([e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]);
             let Some(files) = e.data_transfer().and_then(|d| d.files()) else { return };
             for i in 0..files.length() {
-                let Some(file) = files.get(i) else { continue };
-                let s = s.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { return };
-                    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
-                    let now = js_sys::Date::now() as u64;
-                    if let Err(err) = s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), now) {
-                        web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into());
-                    }
-                });
+                if let Some(file) = files.get(i) {
+                    import_file(s.clone(), file);
+                }
             }
         });
         canvas.add_event_listener_with_callback("drop", cb.as_ref().unchecked_ref())?;
@@ -183,6 +216,18 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
     }));
     request_frame(frame2.borrow().as_ref().unwrap());
     Ok(())
+}
+
+/// Reads a dropped or pasted file and imports it as a picture.
+fn import_file(s: Rc<RefCell<State>>, file: web_sys::File) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { return };
+        let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+        let now = js_sys::Date::now() as u64;
+        if let Err(err) = s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), now) {
+            web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into());
+        }
+    });
 }
 
 fn request_frame(f: &Closure<dyn FnMut()>) {

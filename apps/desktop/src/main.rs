@@ -61,6 +61,37 @@ fn button(b: MouseButton) -> Option<Button> {
     }
 }
 
+/// Ctrl/Cmd+V: an image on the clipboard is imported like a dropped file;
+/// text is typed into the note being edited, or becomes a new note.
+fn paste(app: &mut App) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wall: clipboard unavailable: {e}");
+            return;
+        }
+    };
+    if !app.is_editing() {
+        if let Ok(img) = clipboard.get_image() {
+            let (w, h) = (img.width as u32, img.height as u32);
+            let mut png = Vec::new();
+            let encoded = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())
+                .ok_or_else(|| "clipboard image has the wrong size".to_owned())
+                .and_then(|rgba| {
+                    rgba.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())
+                })
+                .and_then(|()| app.import_image_bytes(&png, Some("Pasted image"), now_ms()).map_err(|e| e.to_string()));
+            if let Err(e) = encoded {
+                eprintln!("wall: could not paste image: {e}");
+            }
+            return;
+        }
+    }
+    if let Ok(text) = clipboard.get_text() {
+        app.paste_text(&text);
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -100,6 +131,7 @@ impl ApplicationHandler for Shell {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.app.set_time(now_ms());
         let mods = self.mods();
         let Some(gfx) = self.gfx.as_mut() else { return };
         let size = gfx.window.inner_size();
@@ -135,18 +167,33 @@ impl ApplicationHandler for Shell {
             WindowEvent::KeyboardInput { event, .. } => {
                 let m = mods;
                 let pressed = event.state == ElementState::Pressed;
+                let editing = self.app.is_editing();
                 let key = match event.logical_key.as_ref() {
-                    WKey::Named(NamedKey::Space) => Some(Key::Space { pressed }),
+                    WKey::Named(NamedKey::Space) if !editing => Some(Key::Space { pressed }),
                     _ if !pressed => None,
-                    WKey::Named(NamedKey::Delete | NamedKey::Backspace) => Some(Key::Delete),
+                    WKey::Named(NamedKey::Delete) => Some(Key::Delete),
+                    WKey::Named(NamedKey::Backspace) => Some(Key::Backspace),
+                    WKey::Named(NamedKey::Enter) => Some(Key::Enter),
                     WKey::Named(NamedKey::Escape) => Some(Key::Escape),
+                    WKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
+                    WKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
+                    WKey::Named(NamedKey::Home) => Some(Key::Home),
+                    WKey::Named(NamedKey::End) => Some(Key::End),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("z") => Some(if m.shift { Key::Redo } else { Key::Undo }),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("y") => Some(Key::Redo),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("a") => Some(Key::SelectAll),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("v") => {
+                        paste(&mut self.app);
+                        None
+                    }
                     _ => None,
                 };
                 if let Some(k) = key {
                     self.app.key(k);
+                } else if pressed && editing && !m.command {
+                    if let Some(text) = event.text.as_deref() {
+                        self.app.text_input(text);
+                    }
                 }
             }
             WindowEvent::DroppedFile(path) => {

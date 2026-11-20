@@ -76,7 +76,16 @@ pub struct Mods {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
+    /// Delete key: removes the selection, or the character after the caret.
     Delete,
+    /// Backspace: removes the selection, or the character before the caret.
+    Backspace,
+    /// Starts editing the selected text item; in a note, a line break.
+    Enter,
+    Left,
+    Right,
+    Home,
+    End,
     Undo,
     Redo,
     SelectAll,
@@ -92,6 +101,40 @@ enum Gesture {
     Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2] },
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
 }
+
+/// Text being typed into an item. The item shows the live text through
+/// `Document::preview`; leaving the edit records one undo step.
+#[derive(Debug, Clone)]
+struct Editing {
+    id: Uuid,
+    /// Byte offset in the item's text.
+    caret: usize,
+    /// The item before editing, or None if this edit created it.
+    original: Option<BoardItem>,
+}
+
+/// The editable text of an item, if it has one.
+fn item_text(kind: &ItemKind) -> Option<&str> {
+    match kind {
+        ItemKind::Note { text, .. } | ItemKind::Label { text } => Some(text),
+        ItemKind::Todo { title, .. } => Some(title),
+        ItemKind::Group { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+fn item_text_mut(kind: &mut ItemKind) -> Option<&mut String> {
+    match kind {
+        ItemKind::Note { text, .. } | ItemKind::Label { text } => Some(text),
+        ItemKind::Todo { title, .. } => Some(title),
+        ItemKind::Group { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+const DOUBLE_CLICK_MS: u64 = 450;
+/// Height of a group's name strip, in board units.
+const GROUP_HEADER: f64 = 44.0;
 
 /// Decoded pixels for a media hash, waiting for upload or already on the GPU.
 enum Picture {
@@ -114,6 +157,9 @@ pub struct App {
     pub needs_redraw: bool,
     library: Option<Library>,
     saved_version: u64,
+    editing: Option<Editing>,
+    last_click: Option<(u64, [f32; 2])>,
+    now_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -144,6 +190,9 @@ impl App {
             needs_redraw: true,
             library: None,
             saved_version: 0,
+            editing: None,
+            last_click: None,
+            now_ms: 0,
         }
     }
 
@@ -257,7 +306,7 @@ impl App {
     /// progress. Returns true when it saved.
     pub fn save_if_dirty(&mut self) -> Result<bool, AppError> {
         let Some(lib) = &self.library else { return Ok(false) };
-        if self.saved_version == self.doc.version || !matches!(self.gesture, Gesture::Idle) {
+        if self.saved_version == self.doc.version || !matches!(self.gesture, Gesture::Idle) || self.editing.is_some() {
             return Ok(false);
         }
         lib.write_board(&self.doc.board)?;
@@ -360,7 +409,35 @@ impl App {
         if button != Button::Primary {
             return;
         }
-        match self.hit(board) {
+        let hit = self.hit(board);
+        let double = self
+            .last_click
+            .is_some_and(|(t, p)| self.now_ms.saturating_sub(t) <= DOUBLE_CLICK_MS && (p[0] - pos[0]).abs() < 6.0 && (p[1] - pos[1]).abs() < 6.0);
+        self.last_click = Some((self.now_ms, pos));
+        if let Some(e) = &self.editing {
+            if hit == Some(e.id) {
+                self.place_caret(board);
+                return;
+            }
+            self.end_edit();
+        }
+        if double && !mods.shift {
+            // Inside a group, only the header edits its name; the rest of
+            // the group is space for new notes.
+            let in_group_body = hit
+                .and_then(|id| self.doc.item(&id))
+                .is_some_and(|i| matches!(i.kind, ItemKind::Group { .. }) && (board[1] as f64) > i.frame.y + GROUP_HEADER);
+            match hit {
+                Some(id) if !in_group_body && self.doc.item(&id).is_some_and(|i| item_text(&i.kind).is_some()) => self.begin_edit(id),
+                Some(_) if !in_group_body => {}
+                _ => {
+                    self.new_note(board, String::new());
+                }
+            }
+            self.last_click = None;
+            return;
+        }
+        match hit {
             Some(id) => {
                 if mods.shift {
                     if !self.selection.remove(&id) {
@@ -446,10 +523,48 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) {
+        self.needs_redraw = true;
+        if self.editing.is_some() {
+            match key {
+                Key::Escape => self.end_edit(),
+                Key::Backspace => self.edit(|t, c| {
+                    if let Some(prev) = t[..*c].chars().next_back() {
+                        *c -= prev.len_utf8();
+                        t.remove(*c);
+                    }
+                }),
+                Key::Delete => self.edit(|t, c| {
+                    if *c < t.len() {
+                        t.remove(*c);
+                    }
+                }),
+                Key::Enter if self.editing_multiline() => {
+                    self.text_input("\n");
+                }
+                Key::Enter => self.end_edit(),
+                Key::Left => self.move_caret(|t, c| t[..c].chars().next_back().map_or(c, |ch| c - ch.len_utf8())),
+                Key::Right => self.move_caret(|t, c| t[c..].chars().next().map_or(c, |ch| c + ch.len_utf8())),
+                Key::Home => self.move_caret(|t, c| t[..c].rfind('\n').map_or(0, |i| i + 1)),
+                Key::End => self.move_caret(|t, c| t[c..].find('\n').map_or(t.len(), |i| c + i)),
+                Key::Undo | Key::Redo => {
+                    self.end_edit();
+                    self.key(key);
+                }
+                Key::SelectAll | Key::Space { .. } => {}
+            }
+            return;
+        }
         match key {
-            Key::Delete => {
+            Key::Delete | Key::Backspace => {
                 let sel = std::mem::take(&mut self.selection);
                 self.doc.delete(&sel);
+            }
+            Key::Enter => {
+                if let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] {
+                    if self.doc.item(&id).is_some_and(|i| item_text(&i.kind).is_some()) {
+                        self.begin_edit(id);
+                    }
+                }
             }
             Key::Undo => {
                 self.doc.undo();
@@ -462,8 +577,158 @@ impl App {
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
+            Key::Left | Key::Right | Key::Home | Key::End => {}
         }
+    }
+
+    // ---- text editing ------------------------------------------------------
+
+    /// Wall-clock time for double clicks and `updated_ms`; shells call this
+    /// before forwarding each event.
+    pub fn set_time(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
+        self.doc.set_clock(now_ms);
+    }
+
+    /// True while the keyboard types into an item; shells then send typed
+    /// characters to [`Self::text_input`] instead of shortcuts like Space.
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// Starts typing into an item's text, caret at the end.
+    pub fn begin_edit(&mut self, id: Uuid) {
+        self.end_edit();
+        let Some(item) = self.doc.item(&id) else { return };
+        let Some(text) = item_text(&item.kind) else { return };
+        self.editing = Some(Editing { id, caret: text.len(), original: Some(item.clone()) });
+        self.selection = [id].into();
         self.needs_redraw = true;
+    }
+
+    /// Finishes typing: records the edit as one undo step. A new note left
+    /// empty is dropped.
+    pub fn end_edit(&mut self) {
+        let Some(e) = self.editing.take() else { return };
+        self.needs_redraw = true;
+        let Some(item) = self.doc.board.items.get(&e.id).cloned() else { return };
+        let empty = item_text(&item.kind).is_some_and(|t| t.trim().is_empty());
+        if e.original.is_none() && empty {
+            self.doc.discard_preview(&e.id);
+            self.selection.remove(&e.id);
+            return;
+        }
+        self.doc.commit_edit(e.original.as_ref(), item);
+    }
+
+    /// Creates a note at a board point and starts typing into it.
+    pub fn new_note(&mut self, at: [f32; 2], text: String) -> Uuid {
+        self.end_edit();
+        let frame = Frame { x: at[0] as f64 - 20.0, y: at[1] as f64 - 20.0, w: 240.0, h: 72.0, z: self.doc.top_z() + 1.0, ..Default::default() };
+        let id = Uuid::new_v4();
+        let caret = text.len();
+        let item = BoardItem { id, frame, kind: ItemKind::Note { text, color: None }, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false };
+        self.doc.preview(item);
+        self.editing = Some(Editing { id, caret, original: None });
+        self.selection = [id].into();
+        self.edit(|_, _| {}); // grows the frame to fit pasted text
+        self.needs_redraw = true;
+        id
+    }
+
+    /// Types text at the caret. Returns false when nothing is being edited.
+    pub fn text_input(&mut self, s: &str) -> bool {
+        if self.editing.is_none() {
+            return false;
+        }
+        let multiline = self.editing_multiline();
+        let clean: String = s
+            .chars()
+            .map(|c| if c == '\r' || (c == '\n' && !multiline) || c == '\t' { ' ' } else { c })
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect();
+        if !clean.is_empty() {
+            self.edit(|t, c| {
+                t.insert_str(*c, &clean);
+                *c += clean.len();
+            });
+        }
+        true
+    }
+
+    /// Pasted text: typed at the caret, or a new note at the cursor.
+    pub fn paste_text(&mut self, s: &str) {
+        if self.text_input(s) {
+            return;
+        }
+        let text = s.replace("\r\n", "\n");
+        if text.trim().is_empty() {
+            return;
+        }
+        let at = self.camera.screen_to_board(self.cursor, self.viewport);
+        let id = self.new_note(at, text);
+        let _ = id;
+        self.end_edit();
+    }
+
+    fn editing_multiline(&self) -> bool {
+        self.editing
+            .as_ref()
+            .and_then(|e| self.doc.item(&e.id))
+            .and_then(|i| scene::TextStyle::of(&i.kind, i.frame.w as f32))
+            .is_some_and(|s| s.multiline)
+    }
+
+    /// Applies a change to the edited text and caret, growing the frame so
+    /// all of the text shows.
+    fn edit(&mut self, f: impl FnOnce(&mut String, &mut usize)) {
+        let Some(e) = self.editing.as_mut() else { return };
+        let Some(mut item) = self.doc.board.items.get(&e.id).cloned() else { return };
+        let Some(text) = item_text_mut(&mut item.kind) else { return };
+        e.caret = e.caret.min(text.len());
+        f(text, &mut e.caret);
+        let text = text.clone();
+        if let Some(style) = scene::TextStyle::of(&item.kind, item.frame.w as f32) {
+            match item.kind {
+                ItemKind::Note { .. } | ItemKind::Todo { .. } => {
+                    let need = (style.height_for(&mut self.font, &text) + 16.0) as f64;
+                    let min = e.original.as_ref().map_or(72.0, |o| o.frame.h);
+                    item.frame.h = need.max(min);
+                }
+                ItemKind::Label { .. } => {
+                    let w = (self.font.layout_line(&text).width * style.size + style.at[0]) as f64;
+                    item.frame.w = item.frame.w.max(w);
+                }
+                _ => {}
+            }
+        }
+        self.doc.preview(item);
+        self.needs_redraw = true;
+    }
+
+    fn move_caret(&mut self, f: impl FnOnce(&str, usize) -> usize) {
+        let Some(e) = self.editing.as_mut() else { return };
+        let Some(text) = self.doc.item(&e.id).and_then(|i| item_text(&i.kind)) else { return };
+        e.caret = f(text, e.caret.min(text.len()));
+    }
+
+    /// Moves the caret to the character nearest a board point.
+    fn place_caret(&mut self, board: [f32; 2]) {
+        let Some(e) = self.editing.as_mut() else { return };
+        let Some(item) = self.doc.item(&e.id) else { return };
+        let (Some(text), Some(style)) = (item_text(&item.kind), scene::TextStyle::of(&item.kind, item.frame.w as f32)) else { return };
+        let local = [board[0] - item.frame.x as f32, board[1] - item.frame.y as f32];
+        e.caret = style.hit(&mut self.font, text, style.max_lines(item.frame.h as f32), local);
+    }
+
+    /// The caret as a board rect, while editing.
+    fn caret_rect(&mut self) -> Option<[f32; 4]> {
+        let e = self.editing.as_ref()?;
+        let item = self.doc.item(&e.id)?;
+        let text = item_text(&item.kind)?;
+        let style = scene::TextStyle::of(&item.kind, item.frame.w as f32)?;
+        let r = style.caret(&mut self.font, text, style.max_lines(item.frame.h as f32), e.caret.min(text.len()));
+        Some([item.frame.x as f32 + r[0], item.frame.y as f32 + r[1], 1.5 / self.camera.zoom, r[3]])
     }
 
     fn prune_selection(&mut self) {
@@ -483,6 +748,7 @@ impl App {
                 }
             }
         }
+        let caret = self.caret_rect();
         let textures: HashMap<&ContentHash, ImageId> = self
             .pictures
             .iter()
@@ -501,7 +767,10 @@ impl App {
             Gesture::Marquee { start, now, .. } => Some(norm_rect(*start, *now)),
             _ => None,
         };
-        let overlays = scene::overlays(&self.doc, &self.selection, marquee, self.camera.zoom);
+        let mut overlays = scene::overlays(&self.doc, &self.selection, marquee, self.camera.zoom);
+        if let Some(r) = caret {
+            overlays.push(wall_render::BoxInstance { rect: r, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
+        }
 
         renderer.begin_frame(size_px, BACKGROUND);
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
@@ -566,6 +835,105 @@ mod tests {
     fn add_note(a: &mut App, x: f64, y: f64) -> Uuid {
         let f = Frame { x, y, w: 100.0, h: 100.0, ..Default::default() };
         a.doc.add(vec![(f, ItemKind::Note { text: "n".into(), color: None })])[0]
+    }
+
+    fn note_text(a: &App, id: &Uuid) -> String {
+        item_text(&a.doc.item(id).unwrap().kind).unwrap().to_owned()
+    }
+
+    fn click(a: &mut App, t: u64, p: [f32; 2]) {
+        a.set_time(t);
+        a.pointer_down(Button::Primary, p, Mods::default());
+        a.pointer_up(Button::Primary, p);
+    }
+
+    #[test]
+    fn double_click_empty_space_makes_a_note_you_type_into() {
+        let mut a = app();
+        click(&mut a, 1000, [300.0, 300.0]);
+        click(&mut a, 1200, [301.0, 300.0]);
+        assert!(a.is_editing());
+        let id = *a.selection.iter().next().unwrap();
+        a.text_input("Hello");
+        a.key(Key::Enter);
+        a.text_input("wörld");
+        a.key(Key::Backspace);
+        a.key(Key::Left);
+        a.key(Key::Backspace);
+        assert_eq!(note_text(&a, &id), "Hello\nwöl");
+        // Not saved or recorded while typing; one undo step after.
+        assert!(!a.doc.can_undo());
+        a.key(Key::Escape);
+        assert!(!a.is_editing());
+        assert_eq!(note_text(&a, &id), "Hello\nwöl");
+        a.key(Key::Undo);
+        assert!(a.doc.item(&id).is_none());
+        a.key(Key::Redo);
+        assert_eq!(note_text(&a, &id), "Hello\nwöl");
+    }
+
+    #[test]
+    fn double_click_in_a_group_body_adds_a_note_and_on_its_header_renames() {
+        let mut a = app();
+        let f = Frame { x: 100.0, y: 100.0, w: 600.0, h: 400.0, ..Default::default() };
+        let g = a.doc.add(vec![(f, ItemKind::Group { name: "Refs".into(), color: None })])[0];
+        click(&mut a, 1000, [400.0, 300.0]);
+        click(&mut a, 1100, [400.0, 300.0]);
+        let id = *a.selection.iter().next().unwrap();
+        assert_ne!(id, g);
+        a.text_input("x");
+        a.key(Key::Escape);
+        click(&mut a, 3000, [150.0, 120.0]);
+        click(&mut a, 3100, [150.0, 120.0]);
+        a.text_input("!");
+        a.key(Key::Enter);
+        assert!(!a.is_editing());
+        assert_eq!(note_text(&a, &g), "Refs!");
+    }
+
+    #[test]
+    fn empty_new_note_disappears_and_slow_clicks_do_not_edit() {
+        let mut a = app();
+        click(&mut a, 1000, [300.0, 300.0]);
+        click(&mut a, 2000, [300.0, 300.0]);
+        assert!(!a.is_editing());
+        click(&mut a, 2100, [300.0, 300.0]);
+        assert!(a.is_editing());
+        a.key(Key::Escape);
+        assert_eq!(a.item_count(), 0);
+        assert!(!a.doc.can_undo());
+    }
+
+    #[test]
+    fn editing_an_existing_note_grows_it_and_undoes_in_one_step() {
+        let mut a = app();
+        let id = add_note(&mut a, 100.0, 100.0);
+        a.selection = [id].into();
+        a.key(Key::Enter);
+        assert!(a.is_editing());
+        for _ in 0..12 {
+            a.text_input(" more words to wrap");
+        }
+        assert!(a.doc.item(&id).unwrap().frame.h > 100.0);
+        // Clicking elsewhere ends the edit.
+        click(&mut a, 5000, [900.0, 700.0]);
+        assert!(!a.is_editing());
+        a.key(Key::Undo);
+        assert_eq!(note_text(&a, &id), "n");
+        assert_eq!(a.doc.item(&id).unwrap().frame.h, 100.0);
+    }
+
+    #[test]
+    fn pasted_text_becomes_a_note_at_the_cursor() {
+        let mut a = app();
+        a.pointer_move([400.0, 300.0]);
+        a.paste_text("from the clipboard\r\nline two");
+        assert_eq!(a.item_count(), 1);
+        let id = *a.selection.iter().next().unwrap();
+        assert_eq!(note_text(&a, &id), "from the clipboard\nline two");
+        assert!(!a.is_editing());
+        a.key(Key::Undo);
+        assert_eq!(a.item_count(), 0);
     }
 
     #[test]

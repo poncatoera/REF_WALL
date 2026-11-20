@@ -2,6 +2,7 @@
 //! stored relative to the item, so dragging only offsets them.
 
 use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
 
 use uuid::Uuid;
 use wall_format::{ContentHash, ItemKind};
@@ -16,7 +17,7 @@ const NOTE_STROKE: [f32; 4] = [0.24, 0.25, 0.28, 1.0];
 const TEXT: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
 
 struct CachedText {
-    key: (String, u32),
+    key: (String, u32, u32, u32),
     glyphs: Vec<GlyphInstance>,
 }
 
@@ -62,7 +63,7 @@ impl Scene {
                         stroke: [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 0.9],
                         shape: [10.0, 1.5],
                     });
-                    self.text(font, item.id, name, 20, [12.0, 30.0], 20.0, [c[0], c[1], c[2], 1.0], rect, None);
+                    self.text(font, item.id, name, &item.kind, [c[0], c[1], c[2], 1.0], rect);
                 }
                 ItemKind::Media { hash, .. } => {
                     self.images.push((hash.clone(), ImageInstance { rect, params: [1.0, 6.0, 0.0, 0.0] }));
@@ -70,14 +71,14 @@ impl Scene {
                 ItemKind::Note { text, color } => {
                     let fill = parse_hex(color.as_deref()).map(|c| [c[0] * 0.25, c[1] * 0.25, c[2] * 0.25, 1.0]).unwrap_or(NOTE_FILL);
                     self.cards.push(BoxInstance { rect, fill, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
-                    self.text(font, item.id, text, 16, [14.0, 30.0], 16.0, TEXT, rect, Some(f.w as f32 - 28.0));
+                    self.text(font, item.id, text, &item.kind, TEXT, rect);
                 }
                 ItemKind::Label { text } => {
-                    self.text(font, item.id, text, 96, [0.0, 96.0], 96.0, [1.0; 4], rect, None);
+                    self.text(font, item.id, text, &item.kind, [1.0; 4], rect);
                 }
                 ItemKind::Todo { title, .. } => {
                     self.cards.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
-                    self.text(font, item.id, title, 16, [14.0, 30.0], 16.0, TEXT, rect, Some(f.w as f32 - 28.0));
+                    self.text(font, item.id, title, &item.kind, TEXT, rect);
                 }
                 ItemKind::Board { .. } => {
                     self.cards.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
@@ -88,20 +89,17 @@ impl Scene {
         self.text_cache.retain(|id, _| seen.contains(id));
     }
 
-    /// Appends an item's text, from cache when the text and size are unchanged.
-    #[allow(clippy::too_many_arguments)]
-    fn text(&mut self, font: &mut Font, id: Uuid, text: &str, size_key: u32, at: [f32; 2], size: f32, color: [f32; 4], rect: [f32; 4], wrap: Option<f32>) {
-        let key = (text.to_owned(), size_key);
-        let entry = self.text_cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0), glyphs: Vec::new() });
+    /// Appends an item's text, from cache when text, style and width are unchanged.
+    fn text(&mut self, font: &mut Font, id: Uuid, text: &str, kind: &ItemKind, color: [f32; 4], rect: [f32; 4]) {
+        let Some(style) = TextStyle::of(kind, rect[2]) else { return };
+        let key = (text.to_owned(), style.size.to_bits(), rect[2].to_bits(), rect[3].to_bits());
+        let entry = self.text_cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0, 0, 0), glyphs: Vec::new() });
         if entry.key != key {
             entry.glyphs.clear();
-            let max_lines = ((rect[3] - at[1]) / (size * 1.35)).floor().max(1.0) as usize;
-            let lines = match wrap {
-                Some(w) => wrap_text(font, text, w / size, max_lines),
-                None => vec![text.to_owned()],
-            };
-            for (n, line) in lines.iter().enumerate() {
-                crate::scene::add_text(font, &mut entry.glyphs, line, [at[0], at[1] + n as f32 * size * 1.35], size, color);
+            let max_lines = style.max_lines(rect[3]);
+            for (n, range) in style.lines(font, text, max_lines).into_iter().enumerate() {
+                let line = text[range].trim_end();
+                add_text(font, &mut entry.glyphs, line, [style.at[0], style.at[1] + n as f32 * style.line_height()], style.size, color);
             }
             entry.key = key;
         }
@@ -150,25 +148,144 @@ pub fn overlays(doc: &Document, selection: &BTreeSet<Uuid>, marquee: Option<[f32
     out
 }
 
-/// Greedy word wrap to `max_em` (width in em units).
+/// Where and how an item's text is laid out, relative to the item's frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyle {
+    /// First baseline, relative to the item's top-left.
+    pub at: [f32; 2],
+    /// Board units per em.
+    pub size: f32,
+    /// Wrap width in board units, or None for one line per paragraph.
+    pub wrap: Option<f32>,
+    /// Enter adds a line break (notes) instead of finishing the edit.
+    pub multiline: bool,
+}
+
+impl TextStyle {
+    pub fn of(kind: &ItemKind, width: f32) -> Option<Self> {
+        Some(match kind {
+            ItemKind::Note { .. } | ItemKind::Todo { .. } => TextStyle { at: [14.0, 30.0], size: 16.0, wrap: Some(width - 28.0), multiline: true },
+            ItemKind::Group { .. } => TextStyle { at: [12.0, 30.0], size: 20.0, wrap: None, multiline: false },
+            ItemKind::Label { .. } => TextStyle { at: [0.0, 96.0], size: 96.0, wrap: None, multiline: false },
+            _ => return None,
+        })
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.size * 1.35
+    }
+
+    /// Lines that fit in a frame of this height (at least one).
+    pub fn max_lines(&self, height: f32) -> usize {
+        ((height - self.at[1]) / self.line_height() + 1.0).floor().max(1.0) as usize
+    }
+
+    /// Byte ranges of the laid-out lines.
+    pub fn lines(&self, font: &mut Font, text: &str, max_lines: usize) -> Vec<Range<usize>> {
+        match self.wrap {
+            Some(w) => wrap_ranges(font, text, w / self.size, max_lines),
+            None => {
+                let mut out = Vec::new();
+                let mut start = 0;
+                for para in text.split('\n') {
+                    out.push(start..start + para.len());
+                    start += para.len() + 1;
+                }
+                out.truncate(max_lines);
+                out
+            }
+        }
+    }
+
+    /// Height a frame needs to show every line of `text`.
+    pub fn height_for(&self, font: &mut Font, text: &str) -> f32 {
+        let n = self.lines(font, text, usize::MAX).len().max(1);
+        self.at[1] + (n - 1) as f32 * self.line_height() + self.size * 0.9
+    }
+
+    /// Caret box (x, y, w, h) relative to the item for a byte offset.
+    pub fn caret(&self, font: &mut Font, text: &str, max_lines: usize, caret: usize) -> [f32; 4] {
+        let lines = self.lines(font, text, max_lines);
+        let n = lines.iter().rposition(|r| r.start <= caret).unwrap_or(0);
+        let start = lines.get(n).map_or(0, |r| r.start);
+        let end = caret.min(text.len()).max(start);
+        let x = font.layout_line(&text[start..end]).width * self.size;
+        let y = self.at[1] + n as f32 * self.line_height();
+        [self.at[0] + x, y - self.size * 0.95, 0.0, self.size * 1.2]
+    }
+
+    /// Byte offset nearest to a point relative to the item.
+    pub fn hit(&self, font: &mut Font, text: &str, max_lines: usize, p: [f32; 2]) -> usize {
+        let lines = self.lines(font, text, max_lines);
+        let Some(last) = lines.len().checked_sub(1) else { return 0 };
+        let row = ((p[1] - self.at[1] + self.size * 0.95) / self.line_height()).floor().clamp(0.0, last as f32) as usize;
+        let r = lines[row].clone();
+        let mut best = (f32::MAX, r.start);
+        let mut i = r.start;
+        loop {
+            let x = self.at[0] + font.layout_line(&text[r.start..i]).width * self.size;
+            if (x - p[0]).abs() < best.0 {
+                best = ((x - p[0]).abs(), i);
+            }
+            if i >= r.end {
+                break;
+            }
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
+        }
+        best.1
+    }
+}
+
+/// Greedy word wrap to `max_em` (width in em units); returns byte ranges of
+/// lines. Line breaks in the text start new lines; an empty paragraph is an
+/// empty line. A single word wider than the line gets a line of its own.
+pub fn wrap_ranges(font: &mut Font, text: &str, max_em: f32, max_lines: usize) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for para in text.split('\n') {
+        let mut line: Option<(usize, usize)> = None;
+        let mut start = None;
+        let mut words = Vec::new();
+        for (i, ch) in para.char_indices() {
+            match (ch.is_whitespace(), start) {
+                (false, None) => start = Some(i),
+                (true, Some(s)) => {
+                    words.push((s, i));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            words.push((s, para.len()));
+        }
+        for (ws, we) in words {
+            let (ws, we) = (base + ws, base + we);
+            line = match line {
+                None => Some((ws, we)),
+                Some((ls, _)) if font.layout_line(&text[ls..we]).width <= max_em => Some((ls, we)),
+                Some((ls, le)) => {
+                    out.push(ls..le);
+                    if out.len() >= max_lines {
+                        return out;
+                    }
+                    Some((ws, we))
+                }
+            };
+        }
+        out.push(line.map_or(base..base, |(ls, le)| ls..le));
+        if out.len() >= max_lines {
+            return out;
+        }
+        base += para.len() + 1;
+    }
+    out
+}
+
+/// Greedy word wrap returning the line strings (see [`wrap_ranges`]).
+#[cfg(test)]
 pub fn wrap_text(font: &mut Font, text: &str, max_em: f32, max_lines: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let candidate = if current.is_empty() { word.to_owned() } else { format!("{current} {word}") };
-        if font.layout_line(&candidate).width <= max_em || current.is_empty() {
-            current = candidate;
-        } else {
-            lines.push(std::mem::replace(&mut current, word.to_owned()));
-        }
-        if lines.len() == max_lines {
-            return lines;
-        }
-    }
-    if !current.is_empty() && lines.len() < max_lines {
-        lines.push(current);
-    }
-    lines
+    wrap_ranges(font, text, max_em, max_lines).into_iter().map(|r| text[r].to_owned()).collect()
 }
 
 /// Lays out `text` with its baseline starting at `baseline` (board units,
@@ -237,6 +354,23 @@ mod tests {
         assert!(lines.iter().all(|l| font.layout_line(l).width <= 8.0 || !l.contains(' ')));
         assert_eq!(lines.join(" "), "Kinetic type on a grid with long tail easing");
         assert_eq!(wrap_text(&mut font, "a b c d e f g h", 0.5, 3).len(), 3);
+    }
+
+    #[test]
+    fn line_breaks_and_caret_positions() {
+        let mut font = Font::new(wall_text::INTER_REGULAR).unwrap();
+        let style = TextStyle::of(&ItemKind::Note { text: String::new(), color: None }, 240.0).unwrap();
+        let text = "one\n\nthree";
+        let lines = style.lines(&mut font, text, 10);
+        assert_eq!(lines, vec![0..3, 4..4, 5..10]);
+        let c0 = style.caret(&mut font, text, 10, 0);
+        let c_end = style.caret(&mut font, text, 10, text.len());
+        assert_eq!(c0[0], style.at[0]);
+        assert!((c_end[1] - c0[1] - 2.0 * style.line_height()).abs() < 1e-3);
+        // Clicking right of line 3 puts the caret at its end.
+        let p = [500.0, style.at[1] + 2.0 * style.line_height() - 4.0];
+        assert_eq!(style.hit(&mut font, text, 10, p), text.len());
+        assert!(style.height_for(&mut font, text) > style.height_for(&mut font, "one"));
     }
 
     #[test]
