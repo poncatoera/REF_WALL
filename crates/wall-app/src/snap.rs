@@ -1,6 +1,8 @@
 //! Snapping while moving items: the dragged selection's left, centre and
 //! right edges (and top, middle, bottom) snap to the same lines of nearby
-//! items, and a guide line shows what it lined up with.
+//! items, and a guide line shows what it lined up with. With the dot grid
+//! showing, an axis that lines up with nothing snaps its top-left corner to
+//! the nearest dot instead.
 
 /// Snap targets for one drag, gathered when it starts (nothing else moves
 /// during a drag).
@@ -10,6 +12,8 @@ pub struct Snap {
     pub bounds: [f64; 4],
     /// Bounds of the items it can snap to.
     pub targets: Vec<[f64; 4]>,
+    /// Dot spacing when the dot grid is showing.
+    pub grid: Option<f64>,
 }
 
 /// A guide: a line segment on the board, x0, y0, x1, y1.
@@ -45,7 +49,11 @@ impl Snap {
         let (x, y) = (b[0] + delta[0], b[1] + delta[1]);
         let sx = best(lines(x, b[2]), self.targets.iter().map(|t| lines(t[0], t[2])), threshold);
         let sy = best(lines(y, b[3]), self.targets.iter().map(|t| lines(t[1], t[3])), threshold);
-        let d = [delta[0] + sx.map_or(0.0, |s| s.0), delta[1] + sy.map_or(0.0, |s| s.0)];
+        let on_grid = |v: f64| self.grid.map(|g| (v / g).round() * g - v).filter(|d| d.abs() <= threshold).unwrap_or(0.0);
+        let d = [
+            delta[0] + sx.map_or_else(|| on_grid(x), |s| s.0),
+            delta[1] + sy.map_or_else(|| on_grid(y), |s| s.0),
+        ];
 
         // Guides span the moved bounds and every target touching the line.
         let moved = [b[0] + d[0], b[1] + d[1], b[2], b[3]];
@@ -71,7 +79,7 @@ mod tests {
 
     fn snap() -> Snap {
         // Dragged 100x50 box at the origin; a target 200 to the right, 300 down.
-        Snap { bounds: [0.0, 0.0, 100.0, 50.0], targets: vec![[200.0, 300.0, 80.0, 40.0]] }
+        Snap { bounds: [0.0, 0.0, 100.0, 50.0], targets: vec![[200.0, 300.0, 80.0, 40.0]], grid: None }
     }
 
     #[test]
@@ -99,8 +107,20 @@ mod tests {
 
     #[test]
     fn nearest_line_wins() {
-        let s = Snap { bounds: [0.0, 0.0, 100.0, 50.0], targets: vec![[203.0, 0.0, 10.0, 10.0], [201.0, 500.0, 10.0, 10.0]] };
+        let s = Snap { bounds: [0.0, 0.0, 100.0, 50.0], targets: vec![[203.0, 0.0, 10.0, 10.0], [201.0, 500.0, 10.0, 10.0]], grid: None };
         let (d, _) = s.apply([200.0, 1000.0], 6.0);
         assert_eq!(d[0], 201.0);
+    }
+
+    #[test]
+    fn grid_snaps_axes_that_line_up_with_nothing() {
+        let s = Snap { grid: Some(24.0), ..snap() };
+        // x: left 196 is 4 from the target's 200 (item wins). y: 50 is 2 from dot 48.
+        let (d, guides) = s.apply([196.0, 50.0], 6.0);
+        assert_eq!(d, [200.0, 48.0]);
+        assert_eq!(guides.len(), 1);
+        // Too far from any dot: left alone.
+        let (d, _) = s.apply([420.0, 12.0], 6.0);
+        assert_eq!(d, [420.0, 12.0]);
     }
 }

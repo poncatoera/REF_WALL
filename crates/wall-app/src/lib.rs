@@ -1029,7 +1029,8 @@ impl App {
             .map(|i| [i.frame.x, i.frame.y, i.frame.w, i.frame.h])
             .filter(|t| t[0] < area[2] && t[0] + t[2] > area[0] && t[1] < area[3] && t[1] + t[3] > area[1])
             .collect();
-        Some(snap::Snap { bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], targets })
+        let grid = self.show_grid.then(|| theme::grid_spacing(self.camera.zoom) as f64);
+        Some(snap::Snap { bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], targets, grid })
     }
 
     fn drag_set(&self) -> Vec<BoardItem> {
@@ -3487,6 +3488,7 @@ mod tests {
     #[test]
     fn dragging_a_group_carries_its_contents() {
         let mut a = app();
+        a.set_grid(false); // no snapping to dots, so the move is exact
         let g = Frame { x: 50.0, y: 50.0, w: 400.0, h: 300.0, ..Default::default() };
         let group = a.doc.add(vec![(g, ItemKind::Group { name: "g".into(), color: None })])[0];
         let inside = add_note(&mut a, 100.0, 120.0);
