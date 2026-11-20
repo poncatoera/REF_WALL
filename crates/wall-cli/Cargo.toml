@@ -1,0 +1,20 @@
+[package]
+name = "wall-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line tool for .wall libraries"
+
+[[bin]]
+name = "wall-cli"
+path = "src/main.rs"
+
+[dependencies]
+wall-format.workspace = true
+wall-media.workspace = true
+image.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
