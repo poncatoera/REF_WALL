@@ -1,0 +1,9 @@
+[package]
+name = "wall-app"
+description = "Wall app logic shared by desktop and web: camera, input, scene."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wall-render.workspace = true

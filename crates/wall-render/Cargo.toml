@@ -1,0 +1,10 @@
+[package]
+name = "wall-render"
+description = "GLES3 / WebGL2 renderer for Wall, using shaders compiled from Slang."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glow.workspace = true
+bytemuck.workspace = true

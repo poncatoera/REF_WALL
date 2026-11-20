@@ -1,0 +1,20 @@
+[package]
+name = "wall-desktop"
+description = "Wall for macOS and Windows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wall"
+path = "src/main.rs"
+
+[dependencies]
+wall-app.workspace = true
+wall-render.workspace = true
+glow.workspace = true
+image = { workspace = true, features = ["png"] }
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+raw-window-handle = "0.6"

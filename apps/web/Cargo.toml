@@ -1,0 +1,17 @@
+[package]
+name = "wall-web"
+description = "Wall in the browser: WASM + WebGL2."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wall-app.workspace = true
+wall-render.workspace = true
+glow.workspace = true
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "PointerEvent", "MouseEvent", "WheelEvent", "AddEventListenerOptions", "console"] }

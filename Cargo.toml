@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/desktop", "apps/web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+tempfile = "3"
+glow = "0.16"
+bytemuck = { version = "1", features = ["derive"] }
+wall-format = { path = "crates/wall-format" }
+wall-media = { path = "crates/wall-media" }
+wall-render = { path = "crates/wall-render" }
+wall-app = { path = "crates/wall-app" }
