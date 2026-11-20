@@ -201,6 +201,7 @@ impl ApplicationHandler for Shell {
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("y") => Some(Key::Redo),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("a") => Some(Key::SelectAll),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("d") => Some(Key::Duplicate),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("f") => Some(Key::Find),
                     WKey::Character("]") if m.command => Some(Key::BringToFront),
                     WKey::Character("[") if m.command => Some(Key::SendToBack),
                     WKey::Character(c) if m.command && !editing && (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x")) => {

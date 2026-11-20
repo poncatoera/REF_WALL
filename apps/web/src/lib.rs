@@ -142,6 +142,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
                 "y" | "Y" if cmd => Some(Key::Redo),
                 "a" | "A" if cmd => Some(Key::SelectAll),
                 "d" | "D" if cmd => Some(Key::Duplicate),
+                "f" | "F" if cmd => Some(Key::Find),
                 "]" if cmd => Some(Key::BringToFront),
                 "[" if cmd => Some(Key::SendToBack),
                 _ => None,

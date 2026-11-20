@@ -89,6 +89,8 @@ pub enum Key {
     Right,
     Home,
     End,
+    /// Ctrl/Cmd+F: search the board.
+    Find,
     /// Ctrl/Cmd+D: duplicate the selection.
     Duplicate,
     /// Ctrl/Cmd+]: bring the selection to the front.
@@ -218,6 +220,19 @@ pub struct App {
     board_names: HashMap<Uuid, String>,
     /// The boards above the open one, outermost first.
     nav: Vec<Uuid>,
+    /// The search box, while open.
+    search: Option<Search>,
+    /// Titles and tags of pictures and videos, for search.
+    media_text: HashMap<ContentHash, String>,
+}
+
+/// Find on the board: matches update as you type, Enter steps through them.
+#[derive(Debug, Clone, Default)]
+struct Search {
+    query: String,
+    matches: Vec<Uuid>,
+    /// Index into `matches` of the one shown, if any.
+    current: Option<usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -261,6 +276,8 @@ impl App {
             parked: HashMap::new(),
             board_names: [(board_id, board_name)].into(),
             nav: Vec::new(),
+            search: None,
+            media_text: HashMap::new(),
         }
     }
 
@@ -308,6 +325,8 @@ impl App {
             .collect();
         for hash in hashes {
             if let Ok(sc) = library.read_sidecar(&hash) {
+                let words: Vec<&str> = sc.title.iter().map(|t| t.as_str()).chain(sc.tags.iter().map(|t| t.as_str())).collect();
+                self.media_text.insert(hash.clone(), words.join(" "));
                 if sc.kind == MediaKind::Video {
                     self.videos.insert(hash, (sc.ext, sc.width, sc.height));
                     continue;
@@ -373,6 +392,9 @@ impl App {
                 })?;
             }
         }
+        if let Some(t) = source {
+            self.media_text.insert(hash.clone(), t.to_owned());
+        }
         let (w, h) = rgba.dimensions();
         self.pictures.entry(hash.clone()).or_insert(Picture::Pending { rgba: rgba.into_raw(), width: w, height: h });
         Ok(self.place_media(hash, w, h))
@@ -412,6 +434,9 @@ impl App {
             }
         }
         self.videos.insert(hash.clone(), (ext.to_owned(), meta.width, meta.height));
+        if let Some(t) = source {
+            self.media_text.insert(hash.clone(), t.to_owned());
+        }
         Ok(self.place_media(hash, meta.width, meta.height))
     }
 
@@ -909,6 +934,27 @@ impl App {
 
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
+        if let Some(search) = &mut self.search {
+            match key {
+                Key::Escape | Key::Find => self.search = None,
+                Key::Backspace => {
+                    search.query.pop();
+                    self.run_search();
+                }
+                Key::Enter | Key::Right => self.step_search(1),
+                Key::Left => self.step_search(-1),
+                Key::Char(c) => {
+                    self.text_input(&c.to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        if key == Key::Find {
+            self.end_edit();
+            self.search = Some(Search::default());
+            return;
+        }
         if self.editing.is_some() {
             match key {
                 Key::Escape => self.end_edit(),
@@ -935,7 +981,7 @@ impl App {
                     self.end_edit();
                     self.key(key);
                 }
-                Key::SelectAll | Key::Space { .. } | Key::Duplicate | Key::BringToFront | Key::SendToBack => {}
+                Key::SelectAll | Key::Space { .. } | Key::Duplicate | Key::BringToFront | Key::SendToBack | Key::Find => {}
                 Key::Char(c) => {
                     self.text_input(&c.to_string());
                 }
@@ -985,6 +1031,7 @@ impl App {
             }
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
+            Key::Find => {}
             Key::BringToFront => self.restack(true),
             Key::SendToBack => self.restack(false),
         }
@@ -1009,6 +1056,77 @@ impl App {
             }
         }
         out
+    }
+
+    // ---- search ------------------------------------------------------------
+
+    /// Everything searchable about an item, lowercase.
+    fn item_search_text(&self, item: &BoardItem) -> String {
+        let text = match &item.kind {
+            ItemKind::Media { hash, .. } => self.media_text.get(hash).cloned().unwrap_or_default(),
+            ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_default(),
+            kind => item_text(kind).unwrap_or_default().to_owned(),
+        };
+        text.to_lowercase()
+    }
+
+    /// Finds items containing every word of the query, top-left first, and
+    /// shows the first.
+    fn run_search(&mut self) {
+        let Some(search) = &self.search else { return };
+        let words: Vec<String> = search.query.to_lowercase().split_whitespace().map(str::to_owned).collect();
+        let mut matches: Vec<&BoardItem> = if words.is_empty() {
+            Vec::new()
+        } else {
+            self.doc
+                .board
+                .live_items()
+                .filter(|i| {
+                    let t = self.item_search_text(i);
+                    words.iter().all(|w| t.contains(w.as_str()))
+                })
+                .collect()
+        };
+        matches.sort_by(|a, b| (a.frame.y, a.frame.x).partial_cmp(&(b.frame.y, b.frame.x)).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<Uuid> = matches.iter().map(|i| i.id).collect();
+        if let Some(search) = &mut self.search {
+            search.matches = ids;
+            search.current = None;
+        }
+        self.step_search(1);
+    }
+
+    /// Shows the next (or previous) match: selects it and centres the view.
+    fn step_search(&mut self, dir: i32) {
+        let Some(search) = &mut self.search else { return };
+        let n = search.matches.len();
+        if n == 0 {
+            search.current = None;
+            self.needs_redraw = true;
+            return;
+        }
+        let next = match search.current {
+            None => 0,
+            Some(c) => (c as i64 + dir as i64).rem_euclid(n as i64) as usize,
+        };
+        search.current = Some(next);
+        let id = search.matches[next];
+        if let Some(item) = self.doc.item(&id) {
+            let f = item.frame;
+            self.camera.center = [(f.x + f.w / 2.0) as f32, (f.y + f.h / 2.0) as f32];
+            // Zoom in if the match would be tiny, out if it wouldn't fit.
+            let fit = (self.viewport[0] / (f.w as f32 + 80.0)).min(self.viewport[1] / (f.h as f32 + 80.0));
+            if self.camera.zoom * (f.w as f32) < 60.0 || self.camera.zoom > fit {
+                self.camera.zoom = fit.clamp(MIN_ZOOM, 2.0);
+            }
+            self.selection = [id].into();
+        }
+        self.needs_redraw = true;
+    }
+
+    /// The search box text and the "n of m" count, while searching.
+    pub fn search_status(&self) -> Option<(String, usize, usize)> {
+        self.search.as_ref().map(|s| (s.query.clone(), s.current.map_or(0, |c| c + 1), s.matches.len()))
     }
 
     // ---- boards inside boards ---------------------------------------------
@@ -1220,7 +1338,7 @@ impl App {
     /// True while the keyboard types into an item; shells then send typed
     /// characters to [`Self::text_input`] instead of shortcuts like Space.
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some()
+        self.editing.is_some() || self.search.is_some()
     }
 
     /// Starts typing into an item's text, caret at the end.
@@ -1265,6 +1383,11 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
+        if let Some(search) = &mut self.search {
+            search.query.push_str(&s.replace(['\n', '\r', '\t'], " "));
+            self.run_search();
+            return true;
+        }
         if self.editing.is_none() {
             return false;
         }
@@ -1432,6 +1555,26 @@ impl App {
         self.scene.draw(renderer, &view, &textures);
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
+        if let Some((query, at, total)) = self.search_status() {
+            // Search box: top centre, constant size on screen.
+            let px = 1.0 / self.camera.zoom;
+            let (w, h) = (360.0, 40.0);
+            let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, 16.0], self.viewport);
+            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: [0.1, 0.105, 0.12, 0.97], stroke: [0.36, 0.62, 1.0, 1.0], shape: [8.0 * px, 1.5 * px] };
+            renderer.draw_boxes(&view, &[bx]);
+            let shown = if query.is_empty() { "Search this board".to_owned() } else { query.clone() };
+            let colour = if query.is_empty() { [0.5, 0.52, 0.58, 1.0] } else { [0.92, 0.92, 0.94, 1.0] };
+            let count = if query.is_empty() { String::new() } else { format!("{at} of {total}") };
+            let mut glyphs = Vec::new();
+            scene::add_text(&mut self.font, &mut glyphs, &shown, [tl[0] + 14.0 * px, tl[1] + 26.0 * px], 15.0 * px, colour);
+            let cw = self.font.layout_line(&count).width * 13.0 * px;
+            scene::add_text(&mut self.font, &mut glyphs, &count, [tl[0] + (w - 14.0) * px - cw, tl[1] + 26.0 * px], 13.0 * px, [0.6, 0.62, 0.68, 1.0]);
+            if self.font.atlas.dirty {
+                renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+                self.font.atlas.dirty = false;
+            }
+            renderer.draw_glyphs(&view, &glyphs);
+        }
         if !self.nav.is_empty() {
             // Breadcrumb at the top-left, constant size on screen.
             let text = format!("{}   (Esc to go up)", self.breadcrumb().join("  ›  "));
@@ -1860,6 +2003,30 @@ mod tests {
         let mut b = b;
         b.open_board(child, true);
         assert_eq!(b.item_count(), 1);
+    }
+
+    #[test]
+    fn find_matches_words_steps_and_types_into_the_box() {
+        let mut a = App::demo(40);
+        a.resize([1000.0, 800.0]);
+        a.key(Key::Find);
+        assert!(a.is_editing(), "typing goes to the search box");
+        a.text_input("neon");
+        let (_, at, total) = a.search_status().unwrap();
+        assert_eq!((at, total), (1, 5)); // notes 7, 15, 23, 31, 39 are "Neon #n"
+        let first = *a.selection.iter().next().unwrap();
+        a.key(Key::Enter);
+        assert_ne!(*a.selection.iter().next().unwrap(), first);
+        a.key(Key::Left);
+        assert_eq!(*a.selection.iter().next().unwrap(), first);
+        a.text_input(" #15");
+        assert_eq!(a.search_status().unwrap().2, 1);
+        a.key(Key::Backspace);
+        a.key(Key::Backspace);
+        a.key(Key::Backspace);
+        assert_eq!(a.search_status().unwrap().0, "neon ");
+        a.key(Key::Escape);
+        assert!(a.search_status().is_none() && !a.is_editing());
     }
 
     #[test]
