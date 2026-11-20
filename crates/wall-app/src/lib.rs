@@ -1465,6 +1465,8 @@ impl App {
                 .unwrap_or_default(),
             ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_default(),
             ItemKind::Todo { title, entries } => todo_to_text(title, entries),
+            ItemKind::Link { url, title } => format!("{title} {url}"),
+            ItemKind::Palette { colors, name } => format!("{name} palette {}", colors.join(" ")),
             kind => item_text(kind).unwrap_or_default().to_owned(),
         };
         text.to_lowercase()
