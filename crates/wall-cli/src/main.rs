@@ -7,10 +7,14 @@
 //! wall-cli export <library> <board> <folder> copy a board's pictures and videos out
 //! wall-cli import <library> <file>... [--board <board>]   pictures and videos (videos need ffmpeg)
 //! wall-cli check  <library>                  look for missing or damaged files
+//! wall-cli import-old <old Wall library folder> <library>
+//!                                            bring in the old Electron Wall's boards
 //! ```
 //!
 //! `<board>` is a board's name or id. The format is described in
 //! `docs/wall-format.md`.
+
+mod old_wall;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -23,7 +27,8 @@ const USAGE: &str = "usage:
   wall-cli find   <library> <word>...
   wall-cli export <library> <board> <folder>
   wall-cli import <library> <file>... [--board <board>]
-  wall-cli check  <library>";
+  wall-cli check  <library>
+  wall-cli import-old <old Wall library folder> <library>";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,10 +41,14 @@ fn main() {
     }
 }
 
-type Res<T> = Result<T, String>;
+pub(crate) type Res<T> = Result<T, String>;
 
 fn run(args: &[String]) -> Res<String> {
     let (cmd, rest) = args.split_first().ok_or(USAGE)?;
+    if cmd == "import-old" {
+        let [old, new] = rest else { return Err(USAGE.into()) };
+        return old_wall::import(Path::new(old), Path::new(new), now_ms()).map(|r| r.text());
+    }
     let lib_path = rest.first().ok_or(USAGE)?;
     let lib = Library::open(lib_path).map_err(|e| e.to_string())?;
     let rest = &rest[1..];
@@ -299,7 +308,7 @@ fn video_frame(path: &Path, v: &wall_media::ffmpeg::PreparedVideo) -> Option<(Ve
 }
 
 /// Stores one file and its sidecar. Returns its hash and pixel size.
-fn import_one(lib: &Library, path: &Path, name: &str, now: u64) -> Res<(ContentHash, u32, u32)> {
+pub(crate) fn import_one(lib: &Library, path: &Path, name: &str, now: u64) -> Res<(ContentHash, u32, u32)> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if matches!(ext.as_str(), "mp4" | "mov" | "webm" | "m4v" | "mkv" | "avi") {
@@ -471,6 +480,86 @@ mod tests {
         assert!(sc.auto_tags.iter().any(|t| t.tag == "red"), "{:?}", sc.auto_tags);
         let info = run(&s(&["info", root.to_str().unwrap()])).unwrap();
         assert!(info.contains("videos    1"), "{info}");
+    }
+
+    #[test]
+    fn imports_an_old_wall_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("RefLoop Library");
+        std::fs::create_dir_all(old.join("Walk cycles").join("Sub")).unwrap();
+        std::fs::write(old.join("Walk cycles").join("sky.png"), png(400, 200, [30, 80, 220])).unwrap();
+        let lib_json = serde_json::json!({
+            "version": 1,
+            "boards": [
+                { "id": "a1b2c3d4e5", "name": "Walk cycles", "parentId": null, "folder": "Walk cycles", "createdAt": 1, "view": { "x": 0, "y": 0, "zoom": 1 } },
+                { "id": "b1b2c3d4e5", "name": "Sub", "parentId": "a1b2c3d4e5", "folder": "Walk cycles\\Sub", "createdAt": 2 }
+            ],
+            "items": [
+                { "id": "0000000001", "boardId": "a1b2c3d4e5", "kind": "image", "x": 10, "y": 20, "w": 400, "h": 200, "z": 3,
+                  "status": "ready", "tags": ["Sky", "blue"], "notes": "look at the clouds", "title": "Sky", "file": "Walk cycles\\sky.png",
+                  "width": 400, "height": 200, "crop": { "x": 0.1, "y": 0, "w": 0.8, "h": 1 }, "sourceUrl": "https://example.com/sky.png" },
+                { "id": "0000000002", "boardId": "a1b2c3d4e5", "kind": "note", "x": 500, "y": 0, "w": 240, "h": 120, "z": 4,
+                  "status": "ready", "text": "Heel strike on 9", "color": "orange", "scale": 1 },
+                { "id": "0000000003", "boardId": "a1b2c3d4e5", "kind": "arrow", "x": null, "y": null, "w": null, "h": null, "z": 5,
+                  "status": "ready", "from": { "id": "0000000002" }, "to": { "x": 0, "y": 0 }, "head": "end" },
+                { "id": "0000000004", "boardId": "a1b2c3d4e5", "kind": "todo", "x": null, "y": null, "z": 6, "status": "ready", "scale": 1,
+                  "title": "Shots", "tasks": [{ "id": "t1", "text": "Pose", "done": true }, { "id": "t2", "text": "Timing", "done": false }] },
+                { "id": "0000000005", "boardId": "b1b2c3d4e5", "kind": "palette", "x": 0, "y": 0, "w": 400, "h": 170, "z": 1, "status": "ready",
+                  "title": "Dusk", "swatches": [{ "hex": "#112233" }, { "hex": "#445566", "name": "sea" }] },
+                { "id": "0000000006", "boardId": "a1b2c3d4e5", "kind": "video", "x": 0, "y": 0, "w": 10, "h": 10, "z": 1, "status": "error", "title": "Broken" },
+                { "id": "0000000007", "boardId": "a1b2c3d4e5", "kind": "image", "x": 0, "y": 0, "w": 10, "h": 10, "z": 1, "status": "ready", "file": "..\\..\\secret.png" },
+                { "id": "0000000008", "boardId": "a1b2c3d4e5", "kind": "frame", "x": -40, "y": -40, "w": 900, "h": 400, "z": 0, "status": "ready", "title": "Refs", "color": "pink" }
+            ]
+        });
+        // Old Wall files start with a BOM sometimes.
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend(serde_json::to_vec(&lib_json).unwrap());
+        std::fs::write(old.join("library.json"), bytes).unwrap();
+        let before = std::fs::read(old.join("library.json")).unwrap();
+
+        let new = dir.path().join("Imported.wall");
+        let r = old_wall::import(&old, &new, 99).unwrap();
+        let text = r.text();
+        assert!(text.starts_with("imported 2 boards, 6 items"), "{text}");
+        assert!(text.contains("skipped video \"Broken\": it failed to download"), "{text}");
+        assert!(text.contains("skipped image \"0000000007\": its file"), "a path out of the library is refused: {text}");
+        assert_eq!(r.converted_to_notes, 1);
+        assert_eq!(std::fs::read(old.join("library.json")).unwrap(), before, "the old library is untouched");
+
+        let lib = Library::open(&new).unwrap();
+        let boards = all_boards(&lib).unwrap();
+        let home = boards.iter().find(|b| b.parent.is_none()).unwrap();
+        let walk = boards.iter().find(|b| b.name == "Walk cycles").unwrap();
+        let sub = boards.iter().find(|b| b.name == "Sub").unwrap();
+        assert_eq!(walk.parent, Some(home.id));
+        assert_eq!(sub.parent, Some(walk.id));
+        assert!(home.live_items().any(|i| i.kind == ItemKind::Board { board_id: walk.id }), "home has a card for the old board");
+        assert!(walk.live_items().any(|i| i.kind == ItemKind::Board { board_id: sub.id }), "parent has a card for the sub-board");
+
+        let media = walk.live_items().find_map(|i| match &i.kind { ItemKind::Media { hash, crop } => Some((i, hash, crop)), _ => None }).unwrap();
+        assert_eq!((media.0.frame.x, media.0.frame.y, media.0.frame.w, media.0.frame.z), (10.0, 20.0, 400.0, 3.0));
+        assert_eq!(media.2.unwrap().x, 0.1);
+        let sc = lib.read_sidecar(media.1).unwrap();
+        assert_eq!(sc.title.as_deref(), Some("Sky"));
+        assert_eq!(sc.tags, vec!["sky", "blue"]);
+        assert_eq!(sc.source_url.as_deref(), Some("https://example.com/sky.png"));
+        assert_eq!(sc.extra["old_wall"]["notes"], "look at the clouds");
+
+        let note = walk.live_items().find(|i| matches!(i.kind, ItemKind::Note { .. })).unwrap();
+        assert_eq!(note.kind, ItemKind::Note { text: "Heel strike on 9".into(), color: Some("#e8a15d".into()) });
+        let arrow = walk.live_items().find_map(|i| match &i.kind { ItemKind::Arrow { from, to } => Some((from.clone(), to.clone())), _ => None }).unwrap();
+        assert_eq!(arrow.0, wall_format::ArrowEnd::Item { id: note.id });
+        assert_eq!(arrow.1, wall_format::ArrowEnd::Point { x: 0.0, y: 0.0 });
+        let todo = walk.live_items().find(|i| matches!(i.kind, ItemKind::Todo { .. })).unwrap();
+        assert!(todo.frame.y > 200.0, "an unplaced item goes under the rest");
+        if let ItemKind::Todo { title, entries } = &todo.kind {
+            assert_eq!((title.as_str(), entries.len(), entries[0].done), ("Shots", 2, true));
+        }
+        assert!(walk.live_items().any(|i| i.kind == ItemKind::Group { name: "Refs".into(), color: Some("#b083f0".into()) }));
+        assert!(sub.live_items().any(|i| matches!(&i.kind, ItemKind::Note { text, .. } if text == "Dusk\n#112233\n#445566 sea")));
+
+        // Refuses to import into the old library itself.
+        assert!(old_wall::import(&old, &old.join("x.wall"), 1).is_err());
     }
 
     #[test]
