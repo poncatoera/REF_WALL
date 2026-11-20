@@ -71,6 +71,8 @@ boards save automatically. To open another library: wall.exe D:\Refs\Moodboard.w
 Graphics: ANGLE (OpenGL ES 3.0 on Direct3D 11), the same shaders as the web
 version. Set WALL_GL=gl to use desktop OpenGL instead.
 $videoNote
+GPU video decoding (less CPU, more memory with many videos playing): add
+"gpu_video_decode": true to %APPDATA%\Wall\settings.json, or set WALL_GPU_DECODE=1.
 
 Keys: L library and trash, P side panel, T to-do list, B new board,
 Ctrl+F search, Alt-drag arrow, Ctrl-drag move without snapping, I / O video

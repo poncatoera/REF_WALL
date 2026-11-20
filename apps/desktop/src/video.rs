@@ -190,6 +190,12 @@ impl Player {
     }
 }
 
+/// The `gpu_video_decode` setting, read once.
+pub fn gpu_decode() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(crate::settings::gpu_video_decode)
+}
+
 fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Frame>, seeks: Receiver<(u64, f64)>) {
     let (mut gen, mut start) = (0u64, 0.0f64);
     'outer: loop {
@@ -197,7 +203,11 @@ fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Fr
             // Two decode threads each: with many videos on screen, ffmpeg's
             // default (one per core, plus frame buffers each) oversubscribes
             // the CPU and costs ~150 MB per video.
-            .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-stream_loop", "-1", "-ss", &format!("{start:.3}"), "-i"])
+            .args(["-hide_banner", "-loglevel", "error"])
+            // GPU decoding when the setting is on; ffmpeg falls back to the
+            // CPU by itself when the GPU can't decode a file.
+            .args(if gpu_decode() { &["-hwaccel", "auto"][..] } else { &[][..] })
+            .args(["-threads", "2", "-stream_loop", "-1", "-ss", &format!("{start:.3}"), "-i"])
             .arg(path)
             .args(["-an", "-vf", &format!("scale={w}:{h}"), "-threads", "2", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())

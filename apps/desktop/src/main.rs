@@ -14,6 +14,8 @@
 //! - `WALL_EXPORT=board.png` also exports the whole board with the screenshot.
 //! - `WALL_DEMO=n` opens a generated demo board with n notes instead of a library.
 //! - `WALL_BOARD=<id>` opens that board of the library at start.
+//! - `WALL_GPU_DECODE=1` decodes videos on the GPU (same as the
+//!   `"gpu_video_decode": true` setting; off by default).
 //!
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
 //! `Wall/Library.wall` in the home folder. Boards save automatically.
@@ -320,6 +322,18 @@ mod settings {
             .unwrap_or_default()
     }
 
+    /// Decode videos on the GPU (`"gpu_video_decode": true`, or
+    /// `WALL_GPU_DECODE=1`). Off by default: it frees most of the CPU while
+    /// many videos play but ffmpeg then keeps GPU frame pools, about 4x the
+    /// memory (16 1080p clips: 7.0 -> 2.6 cores, 0.7 -> 3.3 GB).
+    pub fn gpu_video_decode() -> bool {
+        match std::env::var("WALL_GPU_DECODE").ok().as_deref() {
+            Some("1" | "true" | "on") => true,
+            Some("0" | "false" | "off") => false,
+            _ => read().get("gpu_video_decode").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        }
+    }
+
     /// The library opened last, if it still exists.
     pub fn last_library() -> Option<PathBuf> {
         let p = PathBuf::from(read().get("last_library")?.as_str()?);
@@ -402,6 +416,9 @@ impl ApplicationHandler for Shell {
                 // Desktop GL reports "3.3.0 ...", GLES (ANGLE) "OpenGL ES 3.0.0 ...".
                 let api = if version.starts_with("OpenGL") { "" } else { "OpenGL " };
                 println!("wall: {api}{version} on {gpu}; {} items", self.app.item_count());
+                if video::gpu_decode() {
+                    println!("wall: videos decode on the GPU (gpu_video_decode)");
+                }
                 if self.bench {
                     let _ = gfx.surface.set_swap_interval(&gfx.context, SwapInterval::DontWait);
                 }
