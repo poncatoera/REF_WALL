@@ -22,6 +22,7 @@ const FIELD: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
 const INK: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
 const DIM: [f32; 4] = [0.56, 0.58, 0.64, 1.0];
 const ACCENT: [f32; 4] = [0.36, 0.62, 1.0, 1.0];
+const CHIP: [f32; 4] = [0.17, 0.19, 0.24, 1.0];
 
 /// Which text field of the panel has the keyboard.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +51,8 @@ pub enum Action {
     PlayPause,
     Speed(f32),
     OpenBoard,
+    /// Show only items with this tag; clicking the active tag clears it.
+    FilterTag(String),
     /// A click on the panel that does nothing, so it doesn't reach the board.
     None,
 }
@@ -79,6 +82,10 @@ pub struct PanelInfo {
     pub color: Option<Option<String>>,
     pub video: Option<VideoInfo>,
     pub can_open: bool,
+    /// Every tag on the board with how many items carry it (board panel).
+    pub board_tags: Option<Vec<(String, usize)>>,
+    /// The tag the board is filtered by.
+    pub filter: Option<String>,
 }
 
 pub struct TextRun {
@@ -273,8 +280,10 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
                 y += h + 6.0;
             }
             let r = [x, y, w, h];
-            l.rect(r, [0.17, 0.19, 0.24, 1.0], [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, INK);
+            let on = info.filter.as_ref() == Some(tag);
+            l.rect(r, if on { ACCENT } else { CHIP }, [0.0; 4], h / 2.0);
+            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK });
+            l.hits.push((r, Action::FilterTag(tag.clone())));
             let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
             l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM);
             l.hits.push((xr, Action::RemoveTag(tag.clone())));
@@ -296,6 +305,39 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         }
         l.hits.push((r, Action::Edit(Field::Tag)));
         y += 30.0 + 16.0;
+    }
+
+    // Board panel: every tag with its count; a click filters the board.
+    if let Some(tags) = &info.board_tags {
+        divider(&mut l, x0, &mut y);
+        l.text("TAGS ON THIS BOARD", [left, y + 11.0], 11.0, DIM);
+        y += 20.0;
+        if tags.is_empty() {
+            l.text("No tags yet. Select a picture to add some.", [left, y + 13.0], 12.5, DIM);
+            y += 22.0;
+        }
+        let (h, size) = (24.0, 12.5);
+        let mut x = left;
+        for (tag, n) in tags {
+            let label = fit(font, tag, size, inner - 50.0);
+            let count = n.to_string();
+            let cw = text_width(font, &count, 11.5);
+            let w = text_width(font, &label, size) + cw + 28.0;
+            if x + w > left + inner && x > left {
+                x = left;
+                y += h + 6.0;
+            }
+            let r = [x, y, w, h];
+            let on = info.filter.as_ref() == Some(tag);
+            l.rect(r, if on { ACCENT } else { CHIP }, [0.0; 4], h / 2.0);
+            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK });
+            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { [1.0; 4] } else { DIM });
+            l.hits.push((r, Action::FilterTag(tag.clone())));
+            x += w + 6.0;
+        }
+        if !tags.is_empty() {
+            y += h + 16.0;
+        }
     }
 
     if info.can_open {

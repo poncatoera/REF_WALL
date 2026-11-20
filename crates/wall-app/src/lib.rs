@@ -229,6 +229,8 @@ pub struct App {
     panel_open: bool,
     /// Typing into a side panel field.
     panel_edit: Option<panel::FieldEdit>,
+    /// Show only items with this tag (others are dimmed).
+    tag_filter: Option<String>,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -285,6 +287,7 @@ impl App {
             sidecars: HashMap::new(),
             panel_open: true,
             panel_edit: None,
+            tag_filter: None,
         }
     }
 
@@ -1074,6 +1077,7 @@ impl App {
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
+            Key::Escape if self.selection.is_empty() && self.tag_filter.is_some() => self.filter_by_tag(None),
             Key::Escape if self.selection.is_empty() => self.go_up(),
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
@@ -1615,6 +1619,19 @@ impl App {
         renderer.begin_frame(size_px, BACKGROUND);
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
         self.scene.draw(renderer, &view, &textures);
+        let dim: Vec<wall_render::BoxInstance> = self
+            .filtered_out()
+            .iter()
+            .map(|i| wall_render::BoxInstance {
+                rect: [i.frame.x as f32 - 1.0, i.frame.y as f32 - 1.0, i.frame.w as f32 + 2.0, i.frame.h as f32 + 2.0],
+                fill: [BACKGROUND[0] * 0.85, BACKGROUND[1] * 0.85, BACKGROUND[2] * 0.85, 0.85],
+                stroke: [0.0; 4],
+                shape: [0.0, 0.0],
+            })
+            .collect();
+        if !dim.is_empty() {
+            renderer.draw_boxes(&view, &dim);
+        }
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
         if let Some((query, at, total)) = self.search_status() {
@@ -1675,8 +1692,19 @@ impl App {
     /// What the side panel shows for the selection, if it is open.
     pub fn panel_info(&self) -> Option<panel::PanelInfo> {
         use panel::{format_bytes, format_date, format_duration, PanelInfo, VideoInfo};
-        if !self.panel_open || self.selection.is_empty() {
+        if !self.panel_open {
             return None;
+        }
+        if self.selection.is_empty() {
+            return Some(PanelInfo {
+                kind: "Board".into(),
+                title: Some(self.doc.board.name.clone()),
+                title_hint: "Name this board".into(),
+                rows: vec![("Items".into(), self.doc.board.live_items().filter(|i| !matches!(i.kind, ItemKind::Arrow { .. })).count().to_string())],
+                board_tags: Some(self.board_tags()),
+                filter: self.tag_filter.clone(),
+                ..Default::default()
+            });
         }
         let items = self.selected_items();
         let colorable = |k: &ItemKind| matches!(k, ItemKind::Note { .. } | ItemKind::Group { .. });
@@ -1773,7 +1801,45 @@ impl App {
                 info.rows.push(("To".into(), end(to)));
             }
         }
+        info.filter = self.tag_filter.clone();
         Some(info)
+    }
+
+    /// Tags of the pictures and videos on this board with their counts,
+    /// most used first.
+    pub fn board_tags(&self) -> Vec<(String, usize)> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for i in self.doc.board.live_items() {
+            if let ItemKind::Media { hash, .. } = &i.kind {
+                for t in self.sidecars.get(hash).map(|s| s.tags.as_slice()).unwrap_or_default() {
+                    *counts.entry(t).or_default() += 1;
+                }
+            }
+        }
+        let mut v: Vec<(String, usize)> = counts.into_iter().map(|(t, n)| (t.to_owned(), n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Items hidden by the tag filter: pictures and videos without the tag,
+    /// and notes, labels and boards. Groups and arrows stay visible.
+    fn filtered_out(&self) -> Vec<&BoardItem> {
+        let Some(tag) = &self.tag_filter else { return Vec::new() };
+        self.doc
+            .board
+            .live_items()
+            .filter(|i| match &i.kind {
+                ItemKind::Media { hash, .. } => !self.sidecars.get(hash).is_some_and(|s| s.tags.contains(tag)),
+                ItemKind::Group { .. } | ItemKind::Arrow { .. } => false,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// Sets or clears the tag filter.
+    pub fn filter_by_tag(&mut self, tag: Option<String>) {
+        self.tag_filter = tag;
+        self.needs_redraw = true;
     }
 
     /// A short human name for an item, for the panel.
@@ -1821,6 +1887,10 @@ impl App {
                 }
             }
             Action::Color(c) => self.set_color_value(c),
+            Action::FilterTag(t) => {
+                let same = self.tag_filter.as_ref() == Some(&t);
+                self.filter_by_tag((!same).then_some(t));
+            }
             Action::PlayPause => {
                 if let Some(hash) = id.and_then(|id| self.video_of(&id)) {
                     self.toggle_play(hash);
@@ -1847,8 +1917,17 @@ impl App {
         use panel::Field;
         let Some(e) = self.panel_edit.take() else { return };
         self.needs_redraw = true;
-        let Some(item) = self.selection.iter().next().and_then(|id| self.doc.item(id)).cloned() else { return };
         let text = e.text.trim().to_owned();
+        if self.selection.is_empty() {
+            if e.field == Field::Title && !text.is_empty() {
+                let id = self.doc.board.id;
+                self.doc.board.name = text.clone();
+                self.doc.version += 1;
+                self.board_names.insert(id, text);
+            }
+            return;
+        }
+        let Some(item) = self.selection.iter().next().and_then(|id| self.doc.item(id)).cloned() else { return };
         match (e.field, &item.kind) {
             (Field::Tag, ItemKind::Media { hash, .. }) => {
                 let hash = hash.clone();
@@ -2013,6 +2092,7 @@ mod tests {
         let mut a = App::new(Board::new("t", 0), "test");
         a.resize([1000.0, 800.0]);
         a.camera = Camera { center: [500.0, 400.0], zoom: 1.0 }; // screen == board
+        a.panel_open = false; // keep the right of the test window for the board
         a
     }
 
@@ -2310,7 +2390,7 @@ mod tests {
     fn side_panel_shows_and_edits_picture_details() {
         let mut a = App::demo(4);
         a.resize([1400.0, 900.0]);
-        assert!(a.panel_info().is_none(), "nothing selected, no panel");
+        assert_eq!(a.panel_info().unwrap().kind, "Board", "nothing selected: the board panel");
         let pic = a
             .doc
             .board
@@ -2360,6 +2440,7 @@ mod tests {
     #[test]
     fn side_panel_colours_and_renames() {
         let mut a = app();
+        a.panel_open = true;
         let n = add_note(&mut a, 0.0, 0.0);
         let m = add_note(&mut a, 120.0, 0.0);
         a.selection = [n, m].into();
@@ -2386,8 +2467,35 @@ mod tests {
     }
 
     #[test]
+    fn tag_filter_dims_other_items() {
+        let mut a = App::demo(4);
+        a.resize([1400.0, 900.0]);
+        let info = a.panel_info().unwrap();
+        assert_eq!(info.kind, "Board");
+        let tags = info.board_tags.unwrap();
+        assert_eq!(tags[0], ("demo".to_owned(), 24));
+        assert!(tags.contains(&("warm".to_owned(), 4)));
+        panel_click(&mut a, panel::Action::FilterTag("warm".into()));
+        assert_eq!(a.tag_filter.as_deref(), Some("warm"));
+        // 20 pictures without "warm", 4 notes and the label are dimmed.
+        assert_eq!(a.filtered_out().len(), 20 + 4 + 1);
+        panel_click(&mut a, panel::Action::FilterTag("warm".into()));
+        assert!(a.tag_filter.is_none(), "clicking the active tag clears it");
+        a.filter_by_tag(Some("cool".into()));
+        a.key(Key::Escape);
+        assert!(a.tag_filter.is_none(), "Esc clears the filter");
+        // Rename the board from the board panel.
+        panel_click(&mut a, panel::Action::Edit(panel::Field::Title));
+        a.text_input(" board");
+        a.key(Key::Enter);
+        assert_eq!(a.doc.board.name, "Demo board");
+        assert_eq!(a.breadcrumb(), vec!["Demo board"]);
+    }
+
+    #[test]
     fn clicking_the_board_ends_panel_typing() {
         let mut a = app();
+        a.panel_open = true;
         let n = add_note(&mut a, 0.0, 0.0);
         a.selection = [n].into();
         let g = a.doc.add(vec![(Frame { x: 0.0, y: 300.0, w: 300.0, h: 200.0, ..Default::default() }, ItemKind::Group { name: "Old".into(), color: None })])[0];
