@@ -1216,8 +1216,8 @@ mod tests {
         let meta = VideoMeta { width: 400, height: 200, duration_ms: 1000, fps: None };
         a.pointer_move([500.0, 400.0]);
         let on = a.import_video(b"a", "mp4", meta, None, 1).unwrap();
-        a.pointer_move([5000.0, 400.0]);
         let off = a.import_video(b"b", "mp4", meta, None, 1).unwrap();
+        a.doc.translate(&[off].into(), 5000.0, 0.0);
         let (on, off) = (a.media_hash(&on).unwrap(), a.media_hash(&off).unwrap());
         assert_eq!(a.playable_videos(), [on.clone()].into());
         assert!(!a.playable_videos().contains(&off));
