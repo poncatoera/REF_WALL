@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
-use wall_format::{ArrowEnd, Board, BoardItem, ClipRange, ContentHash, Frame, ItemKind, Library, Rect, TodoEntry};
+use wall_format::{ArrowEnd, Board, BoardItem, ClipRange, ContentHash, Frame, ItemKind, Look, Library, Rect, TodoEntry};
 
 use crate::Res;
 
@@ -407,7 +407,7 @@ fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut Hash
     }
     // What the new format has no field for yet, kept for later.
     let mut kept = Map::new();
-    for k in ["notes", "markers", "speed", "pingpong", "onion", "strokes", "tracks", "lockTrack", "section", "aiDesc", "rotate", "mirror", "flipV", "grayscale", "opacity", "origin", "id"] {
+    for k in ["notes", "markers", "speed", "pingpong", "onion", "strokes", "tracks", "lockTrack", "section", "aiDesc", "opacity", "origin", "id"] {
         if let Some(v) = it.get(k).filter(|v| !v.is_null() && *v != &json!("") && *v != &json!([])) {
             kept.insert(k.into(), v.clone());
         }
@@ -422,5 +422,8 @@ fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut Hash
         let full = r.x <= 0.0 && r.y <= 0.0 && r.w >= 1.0 && r.h >= 1.0;
         (r.w > 0.0 && r.h > 0.0 && !full).then_some(r)
     });
-    Ok(ItemKind::Media { hash, crop })
+    let turns = num(it, "rotate").map_or(0, |r| ((r / 90.0).round() as i64).rem_euclid(4) as u8);
+    let flag = |k: &str| it[k].as_bool().unwrap_or(false);
+    let look = Look { turns, mirror: flag("mirror"), flip_v: flag("flipV"), grayscale: flag("grayscale") };
+    Ok(ItemKind::Media { hash, crop, look })
 }

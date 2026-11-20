@@ -347,9 +347,11 @@ impl App {
                 (f.x as f32) < br[0] && ((f.x + f.w) as f32) > tl[0] && (f.y as f32) < br[1] && ((f.y + f.h) as f32) > tl[1]
             })
             .filter_map(|i| match &i.kind {
-                ItemKind::Media { hash, crop } => {
+                ItemKind::Media { hash, crop, look } => {
+                    // Screen pixels across the source's width (its height on screen when turned).
                     let cw = crop.map_or(1.0, |c| c.w).max(1e-3) as f32;
-                    Some((hash.clone(), i.frame.w as f32 * zoom / cw))
+                    let across = if look.sideways() { i.frame.h } else { i.frame.w };
+                    Some((hash.clone(), across as f32 * zoom / cw))
                 }
                 _ => None,
             })

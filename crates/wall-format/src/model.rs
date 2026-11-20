@@ -100,6 +100,41 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// How a picture or video is shown. `crop` is in the source's own
+/// coordinates; the look applies after it. Mirroring happens on screen,
+/// after turning, so "mirror" always flips left and right as you see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Look {
+    /// Quarter turns clockwise, 0–3.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub turns: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mirror: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_v: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grayscale: bool,
+}
+
+impl Look {
+    pub fn is_plain(&self) -> bool {
+        *self == Look::default()
+    }
+
+    /// True when the picture is on its side (a quarter or three-quarter turn).
+    pub fn sideways(&self) -> bool {
+        self.turns % 2 == 1
+    }
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Where an item sits on the board, in board units.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Frame {
@@ -155,6 +190,9 @@ pub enum ItemKind {
         hash: ContentHash,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crop: Option<Rect>,
+        /// Turned, mirrored or black-and-white. Left out when plain.
+        #[serde(default, skip_serializing_if = "Look::is_plain")]
+        look: Look,
     },
     Note {
         text: String,

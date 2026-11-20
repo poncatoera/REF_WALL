@@ -44,6 +44,18 @@ smooth out vec2 _vs2fs_location1;
 smooth out vec2 _vs2fs_location2;
 smooth out vec4 _vs2fs_location3;
 
+// Hand-edited to match shaders/image.slang's source_corner (no slangc in
+// the cloud session); rerun tools/build-shaders.ps1 to regenerate.
+vec2 source_corner(vec2 c, uint look) {
+    if ((look & 4u) != 0u) { c.x = 1.0 - c.x; }
+    if ((look & 8u) != 0u) { c.y = 1.0 - c.y; }
+    uint turns = look & 3u;
+    if (turns == 1u) { return vec2(c.y, 1.0 - c.x); }
+    if (turns == 2u) { return vec2(1.0 - c.x, 1.0 - c.y); }
+    if (turns == 3u) { return vec2(1.0 - c.y, c.x); }
+    return c;
+}
+
 void vs_main_1() {
     uint phi_116_ = 0u;
     int _e19 = global;
@@ -64,7 +76,7 @@ void vs_main_1() {
     vec4 _e50 = img_u002e_params_1;
     global_1 = vec4((((_e34.xy + (_e30 * _e36.zw)) * _e41) + _e44), 0.0, 1.0);
     vec4 _e51 = img_u002e_uv_rect_1;
-    entryPointParam_vs_main_u002e_uv = (_e51.xy + (_e30 * _e51.zw));
+    entryPointParam_vs_main_u002e_uv = (_e51.xy + (source_corner(_e30, uint(_e50.z + 0.5)) * _e51.zw));
     entryPointParam_vs_main_u002e_local = (((_e30 * 2.0) - vec2(1.0, 1.0)) * _e33);
     entryPointParam_vs_main_u002e_half_size = _e33;
     entryPointParam_vs_main_u002e_params = _e50;

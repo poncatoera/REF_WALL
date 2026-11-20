@@ -173,13 +173,13 @@ impl Scene {
                     });
                     label = Some((name.as_str(), crate::theme::group_label(c)));
                 }
-                ItemKind::Media { hash, crop } => {
+                ItemKind::Media { hash, crop, look } => {
                     // Placeholder under the picture, seen until its pixels (or a
                     // video's first frame) arrive.
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [6.0, 1.0] });
                     run.images.push((hash.clone(), ImageInstance {
                         rect,
-                        params: [1.0, 6.0, 0.0, 0.0],
+                        params: [1.0, 6.0, look_bits(look), if look.grayscale { 1.0 } else { 0.0 }],
                         uv_rect: crop.map_or([0.0, 0.0, 1.0, 1.0], |c| [c.x as f32, c.y as f32, c.w as f32, c.h as f32]),
                     }));
                 }
@@ -708,4 +708,10 @@ mod tests {
         assert_eq!(parse_hex(Some("#ff0000")), Some([1.0, 0.0, 0.0]));
         assert_eq!(parse_hex(Some("red")), None);
     }
+}
+
+/// The image shader's turn/mirror code: quarter turns + 4 for mirror + 8
+/// for upside down.
+fn look_bits(look: &wall_format::Look) -> f32 {
+    (look.turns % 4) as f32 + if look.mirror { 4.0 } else { 0.0 } + if look.flip_v { 8.0 } else { 0.0 }
 }

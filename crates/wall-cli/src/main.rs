@@ -232,7 +232,7 @@ fn import(lib: &Library, files: &[String], board: Option<&str>, now: u64) -> Res
             BoardItem {
                 id,
                 frame: Frame { x, y, w: width, h: height, rotation: 0.0, z: top_z + 1.0 + k as f64, text_scale: 1.0 },
-                kind: ItemKind::Media { hash, crop: None },
+                kind: ItemKind::Media { hash, crop: None, look: Default::default() },
                 rev: top_rev + 1,
                 updated_ms: now,
                 updated_by: "wall-cli".into(),
@@ -443,7 +443,7 @@ mod tests {
         assert!(home.live_items().any(|i| i.kind == ItemKind::Board { board_id: walk.id }), "home has a card for the old board");
         assert!(walk.live_items().any(|i| i.kind == ItemKind::Board { board_id: sub.id }), "parent has a card for the sub-board");
 
-        let media = walk.live_items().find_map(|i| match &i.kind { ItemKind::Media { hash, crop } => Some((i, hash, crop)), _ => None }).unwrap();
+        let media = walk.live_items().find_map(|i| match &i.kind { ItemKind::Media { hash, crop, .. } => Some((i, hash, crop)), _ => None }).unwrap();
         assert_eq!((media.0.frame.x, media.0.frame.y, media.0.frame.w, media.0.frame.z), (10.0, 20.0, 400.0, 3.0));
         assert_eq!(media.2.unwrap().x, 0.1);
         let sc = lib.read_sidecar(media.1).unwrap();

@@ -32,6 +32,8 @@ layout(location = 0) out vec4 _fs2p_location0;
 void fs_main_1() {
     vec2 _e14 = i_u002e_uv_1;
     vec4 _e15 = texture(_group_0_binding_1, vec2(_e14));
+    // Hand-edited to match shaders/image.slang (grayscale); rerun tools/build-shaders.ps1.
+    if (i_u002e_params_1.w > 0.5) { _e15.xyz = vec3(dot(_e15.xyz, vec3(0.2126, 0.7152, 0.0722))); }
     vec4 _e16 = i_u002e_params_1;
     vec2 _e18 = i_u002e_half_size_1;
     vec2 _e20 = i_u002e_half_size_1;

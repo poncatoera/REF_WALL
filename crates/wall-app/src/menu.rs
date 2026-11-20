@@ -68,6 +68,11 @@ pub enum Command {
     ToggleTheme,
     ToggleGrid,
     GoUp,
+    RotateRight,
+    RotateLeft,
+    Mirror,
+    FlipVertical,
+    BlackAndWhite,
 }
 
 /// Commands the shell carries out, because they need the system.
@@ -140,6 +145,12 @@ pub const MENUS: &[Menu] = &[
         entries: &[
             ("Bring to front", "Ctrl ]", Some(Command::BringToFront)),
             ("Send to back", "Ctrl [", Some(Command::SendToBack)),
+            SEP,
+            ("Turn right", "R", Some(Command::RotateRight)),
+            ("Turn left", "", Some(Command::RotateLeft)),
+            ("Mirror", "H", Some(Command::Mirror)),
+            ("Flip upside down", "V", Some(Command::FlipVertical)),
+            ("Black and white", "", Some(Command::BlackAndWhite)),
             SEP,
             ("Move without snapping", "Ctrl-drag", None),
             ("Draw an arrow", "Alt-drag", None),

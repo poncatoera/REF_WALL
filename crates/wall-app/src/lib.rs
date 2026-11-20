@@ -766,7 +766,7 @@ impl App {
                 auto_tag(sc, Some(&demo_picture(i, w, h)));
             }
             let (c, r) = (i % 6, i / 6);
-            items.push((f(c as f64 * 340.0, 20.0 + r as f64 * 230.0, w as f64, h as f64), ItemKind::Media { hash, crop: None }));
+            items.push((f(c as f64 * 340.0, 20.0 + r as f64 * 230.0, w as f64, h as f64), ItemKind::Media { hash, crop: None, look: Default::default() }));
         }
 
         let cols = (notes as f64).sqrt().ceil().max(1.0) as u32;
@@ -827,7 +827,7 @@ impl App {
         let at = if inside { self.camera.screen_to_board(c, self.viewport) } else { self.camera.center };
         let (w, h) = (width as f64, height as f64);
         let frame = Frame { x: at[0] as f64 - w / 2.0, y: at[1] as f64 - h / 2.0, w, h, ..Default::default() };
-        let id = self.doc.add(vec![(frame, ItemKind::Media { hash, crop: None })])[0];
+        let id = self.doc.add(vec![(frame, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
         self.selection = [id].into();
         self.needs_redraw = true;
         id
@@ -1289,6 +1289,9 @@ impl App {
             Key::Char('z' | 'Z') => self.run_command(menu::Command::ActualSize),
             Key::Char('l' | 'L') => self.toggle_library(),
             Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
+            Key::Char('r' | 'R') => self.run_command(menu::Command::RotateRight),
+            Key::Char('h' | 'H') => self.run_command(menu::Command::Mirror),
+            Key::Char('v' | 'V') => self.run_command(menu::Command::FlipVertical),
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::Find => {}
@@ -1507,7 +1510,9 @@ impl App {
     /// (item, is left corner, is top corner).
     fn crop_corner_at(&self, board: [f32; 2]) -> Option<(BoardItem, bool, bool)> {
         let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] else { return None };
-        let item = self.doc.item(&id).filter(|i| matches!(i.kind, ItemKind::Media { .. }))?;
+        // Cropping works in the source's own coordinates, so only on pictures
+        // that aren't turned or mirrored.
+        let item = self.doc.item(&id).filter(|i| matches!(&i.kind, ItemKind::Media { look, .. } if look.turns % 4 == 0 && !look.mirror && !look.flip_v))?;
         let r = (HANDLE_PX * 1.5 / self.camera.zoom) as f64;
         let f = item.frame;
         let (x, y) = (board[0] as f64, board[1] as f64);
@@ -1538,6 +1543,29 @@ impl App {
             })
             .collect();
         self.doc.replace(afters);
+    }
+
+    /// Turns, mirrors or greys the selected pictures and videos. A quarter
+    /// turn swaps the item's width and height around its centre. One undo step.
+    fn change_look(&mut self, change: impl Fn(&mut wall_format::Look)) {
+        let afters: Vec<BoardItem> = self
+            .selected_items()
+            .into_iter()
+            .filter_map(|mut i| {
+                let ItemKind::Media { look, .. } = &mut i.kind else { return None };
+                let was = look.sideways();
+                change(look);
+                if look.sideways() != was {
+                    let f = &mut i.frame;
+                    let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
+                    (f.w, f.h) = (f.h, f.w);
+                    (f.x, f.y) = (cx - f.w / 2.0, cy - f.h / 2.0);
+                }
+                Some(i)
+            })
+            .collect();
+        self.doc.replace(afters);
+        self.needs_redraw = true;
     }
 
     /// Selected items, ordered back to front.
@@ -1910,7 +1938,7 @@ impl App {
         let mut ids: HashMap<ContentHash, ImageId> = HashMap::new();
         let mut shown: HashMap<ContentHash, f32> = HashMap::new();
         for i in self.doc.board.live_items() {
-            if let ItemKind::Media { hash, crop } = &i.kind {
+            if let ItemKind::Media { hash, crop, .. } = &i.kind {
                 let px = i.frame.w as f32 * zoom / crop.map_or(1.0, |c| c.w).max(1e-3) as f32;
                 let e = shown.entry(hash.clone()).or_insert(0.0);
                 *e = e.max(px);
@@ -2136,8 +2164,11 @@ impl App {
         let mut info = PanelInfo::default();
         let size_row = |w: f64, h: f64| ("On board".to_owned(), format!("{:.0} × {:.0}", w, h));
         match &item.kind {
-            ItemKind::Media { hash, crop } => {
+            ItemKind::Media { hash, crop, look } => {
                 let sc = self.sidecars.get(hash);
+                if !look.is_plain() {
+                    info.rows.push(("Shown".into(), describe_look(look)));
+                }
                 let video = self.videos.contains_key(hash);
                 info.kind = if video { "Video" } else { "Image" }.into();
                 info.title = Some(sc.and_then(|s| s.title.clone()).unwrap_or_default());
@@ -2539,6 +2570,11 @@ impl App {
             C::ToggleLibrary => self.toggle_library(),
             C::ToggleTheme => self.set_light_mode(!theme::is_light()),
             C::ToggleGrid => self.set_grid(!self.show_grid),
+            C::RotateRight => self.change_look(|l| l.turns = (l.turns + 1) % 4),
+            C::RotateLeft => self.change_look(|l| l.turns = (l.turns + 3) % 4),
+            C::Mirror => self.change_look(|l| l.mirror = !l.mirror),
+            C::FlipVertical => self.change_look(|l| l.flip_v = !l.flip_v),
+            C::BlackAndWhite => self.change_look(|l| l.grayscale = !l.grayscale),
             C::GoUp => self.go_up(),
         }
     }
@@ -2673,6 +2709,26 @@ fn demo_picture(seed: u32, w: u32, h: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// "turned 90°, mirrored, black and white".
+fn describe_look(look: &wall_format::Look) -> String {
+    let mut parts = Vec::new();
+    if !look.turns.is_multiple_of(4) {
+        parts.push(format!("turned {}°", (look.turns % 4) as u32 * 90));
+    }
+    if look.mirror {
+        parts.push("mirrored".into());
+    }
+    if look.flip_v {
+        parts.push("upside down".into());
+    }
+    if look.grayscale {
+        parts.push("black and white".into());
+    }
+    let s = parts.join(", ");
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2849,7 +2905,7 @@ mod tests {
         let mut a = app();
         let f = Frame { x: 100.0, y: 100.0, w: 200.0, h: 100.0, ..Default::default() };
         let hash = a.add_picture(vec![0; 4], 1, 1);
-        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
         a.selection = [id].into();
         a.pointer_down(Button::Primary, [300.0, 200.0], Mods::default());
         a.pointer_move([500.0, 210.0]);
@@ -2904,7 +2960,7 @@ mod tests {
         let mut b = app();
         let hash = b.add_picture(vec![0; 4], 1, 1);
         let f = Frame { x: 100.0, y: 100.0, w: 200.0, h: 100.0, ..Default::default() };
-        let pic = b.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        let pic = b.doc.add(vec![(f, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
         add_note(&mut b, 150.0, 120.0);
         b.selection = [pic].into();
         b.key(Key::BringToFront);
@@ -3004,11 +3060,46 @@ mod tests {
     }
 
     #[test]
+    fn pictures_turn_mirror_and_go_grey_in_one_undo_step_each() {
+        let mut a = app();
+        let f = Frame { x: 100.0, y: 100.0, w: 400.0, h: 200.0, ..Default::default() };
+        let hash = a.add_picture(vec![0; 4], 1, 1);
+        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
+        let look = |a: &App| match &a.doc.item(&id).unwrap().kind {
+            ItemKind::Media { look, .. } => *look,
+            _ => unreachable!(),
+        };
+        a.selection = [id].into();
+        a.key(Key::Char('r'));
+        // A quarter turn swaps width and height around the centre (300, 200).
+        let g = a.doc.item(&id).unwrap().frame;
+        assert_eq!((g.x, g.y, g.w, g.h), (200.0, 0.0, 200.0, 400.0));
+        assert_eq!(look(&a).turns, 1);
+        assert!(a.crop_corner_at([200.0, 0.0]).is_none(), "no cropping while turned");
+        a.key(Key::Char('h'));
+        a.run_command(menu::Command::BlackAndWhite);
+        assert_eq!(look(&a), wall_format::Look { turns: 1, mirror: true, flip_v: false, grayscale: true });
+        a.panel_open = true;
+        assert_eq!(a.panel_info().unwrap().rows[0], ("Shown".into(), "Turned 90°, mirrored, black and white".into()));
+        a.key(Key::Undo);
+        a.key(Key::Undo);
+        a.key(Key::Undo);
+        assert!(look(&a).is_plain());
+        assert_eq!(a.doc.item(&id).unwrap().frame.w, 400.0);
+        // Notes are left alone.
+        let n = add_note(&mut a, 600.0, 100.0);
+        let before = a.doc.item(&n).cloned();
+        a.selection = [n].into();
+        a.key(Key::Char('r'));
+        assert_eq!(a.doc.item(&n).cloned(), before);
+    }
+
+    #[test]
     fn ctrl_drag_corner_crops_without_rescaling() {
         let mut a = app();
         let f = Frame { x: 100.0, y: 100.0, w: 400.0, h: 200.0, ..Default::default() };
         let hash = a.add_picture(vec![0; 4], 1, 1);
-        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
         a.selection = [id].into();
         let cmd = Mods { command: true, ..Default::default() };
         // Top-left corner in by (100, 50): a quarter of the width, a quarter of the height.
