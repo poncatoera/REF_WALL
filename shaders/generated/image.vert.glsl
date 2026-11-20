@@ -22,9 +22,9 @@ vec4 img_u002e_rect_1 = vec4(0.0);
 
 layout(std140) uniform View_std140_block_0 { View_std140_ _group_0_binding_0; };
 
-vec4 img_u002e_params_1 = vec4(0.0);
-
 vec4 img_u002e_uv_rect_1 = vec4(0.0);
+
+vec4 img_u002e_params_1 = vec4(0.0);
 
 vec4 global_1 = vec4(0.0, 0.0, 0.0, 1.0);
 
@@ -44,42 +44,69 @@ smooth out vec2 _vs2fs_location1;
 smooth out vec2 _vs2fs_location2;
 smooth out vec4 _vs2fs_location3;
 
-// Hand-edited to match shaders/image.slang's source_corner (no slangc in
-// the cloud session); rerun tools/build-shaders.ps1 to regenerate.
-vec2 source_corner(vec2 c, uint look) {
-    if ((look & 4u) != 0u) { c.x = 1.0 - c.x; }
-    if ((look & 8u) != 0u) { c.y = 1.0 - c.y; }
-    uint turns = look & 3u;
-    if (turns == 1u) { return vec2(c.y, 1.0 - c.x); }
-    if (turns == 2u) { return vec2(1.0 - c.x, 1.0 - c.y); }
-    if (turns == 3u) { return vec2(1.0 - c.y, c.x); }
-    return c;
-}
-
 void vs_main_1() {
-    uint phi_116_ = 0u;
-    int _e19 = global;
-    uint _e20 = uint(_e19);
-    if ((_e20 < 3u)) {
-        phi_116_ = _e20;
+    vec4 local = vec4(0.0);
+    vec2 local_1 = vec2(0.0);
+    vec2 local_2 = vec2(0.0);
+    uint local_3 = 0u;
+    int _e27 = global;
+    uint _e28 = uint(_e27);
+    if ((_e28 < 3u)) {
+        local_3 = _e28;
     } else {
-        phi_116_ = (_e20 - 2u);
+        local_3 = (_e28 - 2u);
     }
-    uint _e24 = phi_116_;
-    vec2 _e30 = vec2(float((_e24 & 1u)), float((_e24 >> 1u)));
-    vec4 _e31 = img_u002e_rect_1;
-    vec2 _e33 = (_e31.zw * 0.5);
-    vec4 _e34 = img_u002e_rect_1;
-    vec4 _e36 = img_u002e_rect_1;
-    vec2 _e41 = _group_0_binding_0.scale;
-    vec2 _e44 = _group_0_binding_0.offset;
-    vec4 _e50 = img_u002e_params_1;
-    global_1 = vec4((((_e34.xy + (_e30 * _e36.zw)) * _e41) + _e44), 0.0, 1.0);
-    vec4 _e51 = img_u002e_uv_rect_1;
-    entryPointParam_vs_main_u002e_uv = (_e51.xy + (source_corner(_e30, uint(_e50.z + 0.5)) * _e51.zw));
-    entryPointParam_vs_main_u002e_local = (((_e30 * 2.0) - vec2(1.0, 1.0)) * _e33);
-    entryPointParam_vs_main_u002e_half_size = _e33;
-    entryPointParam_vs_main_u002e_params = _e50;
+    uint _e31 = local_3;
+    vec2 _e37 = vec2(float((_e31 & 1u)), float((_e31 >> 1u)));
+    vec4 _e38 = img_u002e_rect_1;
+    vec2 _e40 = (_e38.zw * 0.5);
+    vec4 _e41 = img_u002e_rect_1;
+    vec4 _e43 = img_u002e_rect_1;
+    vec2 _e48 = _group_0_binding_0.scale;
+    vec2 _e51 = _group_0_binding_0.offset;
+    local = vec4((((_e41.xy + (_e37 * _e43.zw)) * _e48) + _e51), 0.0, 1.0);
+    vec4 _e54 = img_u002e_uv_rect_1;
+    vec4 _e56 = img_u002e_params_1;
+    uint _e59 = uint((_e56.z + 0.5));
+    do {
+        local_2 = _e37;
+        if (((_e59 & 4u) != 0u)) {
+            vec2 _e63 = local_2;
+            local_2 = vec2((1.0 - _e63.x), _e63.y);
+        }
+        if (((_e59 & 8u) != 0u)) {
+            vec2 _e71 = local_2;
+            local_2 = vec2(_e71.x, (1.0 - _e71.y));
+        }
+        uint _e77 = (_e59 & 3u);
+        if ((_e77 == 1u)) {
+            vec2 _e79 = local_2;
+            local_1 = vec2(_e79.y, (1.0 - _e79.x));
+            break;
+        }
+        if ((_e77 == 2u)) {
+            vec2 _e85 = local_2;
+            local_1 = vec2((1.0 - _e85.x), (1.0 - _e85.y));
+            break;
+        }
+        if ((_e77 == 3u)) {
+            vec2 _e92 = local_2;
+            local_1 = vec2((1.0 - _e92.y), _e92.x);
+            break;
+        }
+        vec2 _e97 = local_2;
+        local_1 = _e97;
+        break;
+    } while(false);
+    vec2 _e98 = local_1;
+    vec4 _e99 = img_u002e_uv_rect_1;
+    vec4 _e106 = img_u002e_params_1;
+    vec4 _e107 = local;
+    global_1 = _e107;
+    entryPointParam_vs_main_u002e_uv = (_e54.xy + (_e98 * _e99.zw));
+    entryPointParam_vs_main_u002e_local = (((_e37 * 2.0) - vec2(1.0, 1.0)) * _e40);
+    entryPointParam_vs_main_u002e_half_size = _e40;
+    entryPointParam_vs_main_u002e_params = _e106;
     return;
 }
 
@@ -93,14 +120,14 @@ void main() {
     img_u002e_params_1 = img_u002e_params;
     img_u002e_uv_rect_1 = img_u002e_uv_rect;
     vs_main_1();
-    float _e13 = global_1.y;
-    global_1.y = -(_e13);
-    vec4 _e15 = global_1;
-    vec2 _e16 = entryPointParam_vs_main_u002e_uv;
-    vec2 _e17 = entryPointParam_vs_main_u002e_local;
-    vec2 _e18 = entryPointParam_vs_main_u002e_half_size;
-    vec4 _e19 = entryPointParam_vs_main_u002e_params;
-    VertexOutput _tmp_return = VertexOutput(_e15, _e16, _e17, _e18, _e19);
+    float _e15 = global_1.y;
+    global_1.y = -(_e15);
+    vec4 _e17 = global_1;
+    vec2 _e18 = entryPointParam_vs_main_u002e_uv;
+    vec2 _e19 = entryPointParam_vs_main_u002e_local;
+    vec2 _e20 = entryPointParam_vs_main_u002e_half_size;
+    vec4 _e21 = entryPointParam_vs_main_u002e_params;
+    VertexOutput _tmp_return = VertexOutput(_e17, _e18, _e19, _e20, _e21);
     gl_Position = _tmp_return.member;
     _vs2fs_location0 = _tmp_return.member_1;
     _vs2fs_location1 = _tmp_return.member_2;

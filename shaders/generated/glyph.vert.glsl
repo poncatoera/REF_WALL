@@ -48,16 +48,16 @@ smooth out vec4 _vs2fs_location2;
 smooth out vec4 _vs2fs_location3;
 
 void vs_main_1() {
+    uint local = 0u;
     vec2 em_pos = vec2(0.0);
-    uint phi_157_ = 0u;
-    int _e23 = global;
-    uint _e24 = uint(_e23);
-    if ((_e24 < 3u)) {
-        phi_157_ = _e24;
+    int _e24 = global;
+    uint _e25 = uint(_e24);
+    if ((_e25 < 3u)) {
+        local = _e25;
     } else {
-        phi_157_ = (_e24 - 2u);
+        local = (_e25 - 2u);
     }
-    uint _e28 = phi_157_;
+    uint _e28 = local;
     vec4 _e35 = g_u002e_em_1;
     vec4 _e37 = g_u002e_em_1;
     vec4 _e40 = g_u002e_rect_1;

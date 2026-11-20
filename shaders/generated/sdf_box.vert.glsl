@@ -52,15 +52,15 @@ smooth out vec4 _vs2fs_location3;
 smooth out vec2 _vs2fs_location4;
 
 void vs_main_1() {
-    uint phi_130_ = 0u;
-    int _e23 = global;
-    uint _e24 = uint(_e23);
-    if ((_e24 < 3u)) {
-        phi_130_ = _e24;
+    uint local = 0u;
+    int _e24 = global;
+    uint _e25 = uint(_e24);
+    if ((_e25 < 3u)) {
+        local = _e25;
     } else {
-        phi_130_ = (_e24 - 2u);
+        local = (_e25 - 2u);
     }
-    uint _e28 = phi_130_;
+    uint _e28 = local;
     vec4 _e35 = box_u002e_rect_1;
     vec2 _e37 = (_e35.zw * 0.5);
     float _e41 = _group_0_binding_0.pixel;

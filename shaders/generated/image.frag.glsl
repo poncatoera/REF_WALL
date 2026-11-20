@@ -30,22 +30,31 @@ smooth in vec4 _vs2fs_location3;
 layout(location = 0) out vec4 _fs2p_location0;
 
 void fs_main_1() {
-    vec2 _e14 = i_u002e_uv_1;
-    vec4 _e15 = texture(_group_0_binding_1, vec2(_e14));
-    // Hand-edited to match shaders/image.slang (grayscale); rerun tools/build-shaders.ps1.
-    if (i_u002e_params_1.w > 0.5) { _e15.xyz = vec3(dot(_e15.xyz, vec3(0.2126, 0.7152, 0.0722))); }
-    vec4 _e16 = i_u002e_params_1;
-    vec2 _e18 = i_u002e_half_size_1;
-    vec2 _e20 = i_u002e_half_size_1;
-    float _e23 = min(_e16.y, min(_e18.x, _e20.y));
-    vec2 _e24 = i_u002e_local_1;
-    vec2 _e25 = i_u002e_half_size_1;
-    vec2 _e29 = ((abs(_e24) - _e25) + vec2(_e23));
-    float _e39 = _group_0_binding_0.pixel;
-    float _e41 = _group_0_binding_0.pixel;
-    vec4 _e46 = i_u002e_params_1;
-    float _e49 = ((_e15.w * _e46.x) * (1.0 - smoothstep((_e39 * -0.5), (_e41 * 0.5), ((length(max(_e29, vec2(0.0, 0.0))) + min(max(_e29.x, _e29.y), 0.0)) - _e23))));
-    entryPointParam_fs_main = vec4((_e15.xyz * _e49), _e49);
+    vec4 c = vec4(0.0);
+    vec2 _e19 = i_u002e_uv_1;
+    vec4 _e20 = texture(_group_0_binding_1, vec2(_e19));
+    c = _e20;
+    vec4 _e21 = i_u002e_params_1;
+    if ((_e21.w > 0.5)) {
+        vec4 _e24 = c;
+        float _e26 = dot(_e24.xyz, vec3(0.2126, 0.7152, 0.0722));
+        vec4 _e31 = vec4(_e26, _e24.y, _e24.z, _e24.w);
+        vec4 _e36 = vec4(_e31.x, _e26, _e31.z, _e31.w);
+        c = vec4(_e36.x, _e36.y, _e26, _e36.w);
+    }
+    vec4 _e42 = i_u002e_params_1;
+    vec2 _e44 = i_u002e_half_size_1;
+    vec2 _e46 = i_u002e_half_size_1;
+    float _e49 = min(_e42.y, min(_e44.x, _e46.y));
+    vec2 _e50 = i_u002e_local_1;
+    vec2 _e51 = i_u002e_half_size_1;
+    vec2 _e55 = ((abs(_e50) - _e51) + vec2(_e49));
+    float _e65 = _group_0_binding_0.pixel;
+    float _e67 = _group_0_binding_0.pixel;
+    vec4 _e71 = c;
+    vec4 _e73 = i_u002e_params_1;
+    float _e76 = ((_e71.w * _e73.x) * (1.0 - smoothstep((_e65 * -0.5), (_e67 * 0.5), ((length(max(_e55, vec2(0.0, 0.0))) + min(max(_e55.x, _e55.y), 0.0)) - _e49))));
+    entryPointParam_fs_main = vec4((_e71.xyz * _e76), _e76);
     return;
 }
 

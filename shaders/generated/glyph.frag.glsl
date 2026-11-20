@@ -25,234 +25,256 @@ smooth in vec4 _vs2fs_location3;
 layout(location = 0) out vec4 _fs2p_location0;
 
 void fs_main_1() {
+    float local = 0.0;
+    float local_1 = 0.0;
+    uint local_2 = 0u;
+    uint local_3 = 0u;
+    uint local_4 = 0u;
+    vec2 local_5 = vec2(0.0);
+    vec2 local_6 = vec2(0.0);
+    vec2 local_7 = vec2(0.0);
+    float local_8 = 0.0;
+    float local_9 = 0.0;
+    float local_10 = 0.0;
+    uint local_11 = 0u;
+    uint local_12 = 0u;
+    uint local_13 = 0u;
+    vec2 local_14 = vec2(0.0);
+    vec2 local_15 = vec2(0.0);
+    vec2 local_16 = vec2(0.0);
+    float local_17 = 0.0;
     float xcov = 0.0;
     float xwgt = 0.0;
     float ycov = 0.0;
     float ywgt = 0.0;
-    uint phi_429_ = 0u;
-    vec2 phi_472_ = vec2(0.0);
-    vec2 phi_473_ = vec2(0.0);
-    vec2 phi_474_ = vec2(0.0);
-    uint phi_575_ = 0u;
-    uint phi_580_ = 0u;
-    uint phi_586_ = 0u;
-    float phi_617_ = 0.0;
-    float phi_618_ = 0.0;
-    uint phi_664_ = 0u;
-    vec2 phi_707_ = vec2(0.0);
-    vec2 phi_708_ = vec2(0.0);
-    vec2 phi_709_ = vec2(0.0);
-    uint phi_809_ = 0u;
-    uint phi_814_ = 0u;
-    uint phi_820_ = 0u;
-    float phi_851_ = 0.0;
-    float phi_852_ = 0.0;
-    vec2 _e33 = i_u002e_em_pos_1;
-    vec2 _e34 = fwidth(_e33);
-    vec2 _e36 = (vec2(1.0, 1.0) / max(_e34, vec2(1e-7, 1e-7)));
-    vec4 _e37 = i_u002e_data_1;
-    uint _e39 = uint(_e37.x);
-    vec4 _e40 = i_u002e_data_1;
-    uint _e42 = uint(_e40.y);
-    vec4 _e43 = i_u002e_data_1;
-    uint _e45 = uint(_e43.z);
-    vec4 _e46 = i_u002e_data_1;
-    uint _e48 = uint(_e46.w);
-    vec4 _e49 = i_u002e_em_bounds_1;
+    vec2 _e51 = i_u002e_em_pos_1;
+    vec2 _e52 = fwidth(_e51);
+    vec2 _e54 = (vec2(1.0, 1.0) / max(_e52, vec2(1e-7, 1e-7)));
+    vec4 _e55 = i_u002e_data_1;
+    uint _e57 = uint(_e55.x);
+    vec4 _e58 = i_u002e_data_1;
+    uint _e60 = uint(_e58.y);
+    vec4 _e61 = i_u002e_data_1;
+    uint _e63 = uint(_e61.z);
+    vec4 _e64 = i_u002e_data_1;
+    uint _e66 = uint(_e64.w);
+    vec4 _e67 = i_u002e_em_bounds_1;
     xcov = 0.0;
     xwgt = 0.0;
     ycov = 0.0;
     ywgt = 0.0;
-    vec2 _e50 = i_u002e_em_pos_1;
-    vec2 _e52 = i_u002e_em_pos_1;
-    uint _e68 = (_e42 + (2u * uint(min(max(int(floor((((_e52.y - _e49.y) / (_e49.w - _e49.y)) * float(_e45)))), 0), (int(_e45) - 1)))));
-    vec4 _e76 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e68 % 4096u)), int((_e68 / 4096u))), 0).xy, 0);
-    uint _e79 = (_e68 + 1u);
-    vec4 _e87 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e79 % 4096u)), int((_e79 / 4096u))), 0).xy, 0);
-    phi_429_ = 0u;
-    bool loop_init = true;
+    vec2 _e68 = i_u002e_em_pos_1;
+    vec2 _e70 = i_u002e_em_pos_1;
+    uint _e86 = (_e60 + (2u * uint(min(max(int(floor((((_e70.y - _e67.y) / (_e67.w - _e67.y)) * float(_e63)))), 0), (int(_e63) - 1)))));
+    vec4 _e94 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e86 % 4096u)), int((_e86 / 4096u))), 0).xy, 0);
+    uint _e97 = (_e86 + 1u);
+    vec4 _e105 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e97 % 4096u)), int((_e97 / 4096u))), 0).xy, 0);
+    local_13 = 0u;
     while(true) {
-        if (!loop_init) {
-            phi_429_ = (phi_429_ + 1u);
-        }
-        loop_init = false;
-        uint _e91 = phi_429_;
-        if ((_e91 < uint(_e87.x))) {
+        uint _e108 = local_13;
+        if ((_e108 < uint(_e105.x))) {
         } else {
             break;
         }
-        uint _e94 = ((_e42 + uint(_e76.x)) + _e91);
-        vec4 _e102 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e94 % 4096u)), int((_e94 / 4096u))), 0).xy, 0);
-        uint _e106 = ((_e39 + uint(_e102.x)) * 2u);
-        vec4 _e114 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e106 % 4096u)), int((_e106 / 4096u))), 0).xy, 0);
-        uint _e115 = (_e106 + 1u);
-        vec4 _e123 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e115 % 4096u)), int((_e115 / 4096u))), 0).xy, 0);
-        vec2 _e125 = (_e114.xy - _e50);
-        vec2 _e127 = (_e114.zw - _e50);
-        vec2 _e129 = (_e123.xy - _e50);
+        uint _e111 = local_13;
+        uint _e112 = ((_e60 + uint(_e94.x)) + _e111);
+        vec4 _e120 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e112 % 4096u)), int((_e112 / 4096u))), 0).xy, 0);
+        uint _e124 = ((_e57 + uint(_e120.x)) * 2u);
+        vec4 _e132 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e124 % 4096u)), int((_e124 / 4096u))), 0).xy, 0);
+        uint _e133 = (_e124 + 1u);
+        vec4 _e141 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e133 % 4096u)), int((_e133 / 4096u))), 0).xy, 0);
+        vec2 _e143 = (_e132.xy - _e68);
+        vec2 _e145 = (_e132.zw - _e68);
+        vec2 _e147 = (_e141.xy - _e68);
         if (false) {
-            phi_472_ = _e125.yx;
-            phi_473_ = _e127.yx;
-            phi_474_ = _e129.yx;
+            local_14 = _e143.yx;
+            local_15 = _e145.yx;
+            local_16 = _e147.yx;
         } else {
-            phi_472_ = _e125;
-            phi_473_ = _e127;
-            phi_474_ = _e129;
+            local_14 = _e143;
+            local_15 = _e145;
+            local_16 = _e147;
         }
-        vec2 _e134 = phi_472_;
-        vec2 _e136 = phi_473_;
-        vec2 _e138 = phi_474_;
-        if (((max(max(_e134.x, _e136.x), _e138.x) * _e36.x) < -0.5)) {
+        vec2 _e151 = local_14;
+        vec2 _e153 = local_15;
+        vec2 _e156 = local_16;
+        if (((max(max(_e151.x, _e153.x), _e156.x) * _e54.x) < -0.5)) {
             break;
         }
-        if ((_e134.y > 0.0)) {
-            phi_575_ = 2u;
+        vec2 _e161 = local_14;
+        vec2 _e163 = local_15;
+        vec2 _e165 = local_16;
+        if ((_e161.y > 0.0)) {
+            local_11 = 2u;
         } else {
-            phi_575_ = 0u;
+            local_11 = 0u;
         }
-        uint _e151 = phi_575_;
-        if ((_e136.y > 0.0)) {
-            phi_580_ = 4u;
+        if ((_e163.y > 0.0)) {
+            local_12 = 4u;
         } else {
-            phi_580_ = 0u;
+            local_12 = 0u;
         }
-        uint _e154 = phi_580_;
-        if ((_e138.y > 0.0)) {
-            phi_586_ = 8u;
+        uint _e169 = local_11;
+        uint _e170 = local_12;
+        if ((_e165.y > 0.0)) {
+            local_11 = 8u;
         } else {
-            phi_586_ = 0u;
+            local_11 = 0u;
         }
-        uint _e158 = phi_586_;
-        uint _e162 = ((11892u >> ((_e151 + _e154) + _e158)) & 3u);
-        if ((_e162 != 0u)) {
-            vec2 _e166 = ((_e134 - (_e136 * 2.0)) + _e138);
-            vec2 _e167 = (_e134 - _e136);
-            if ((abs(_e166.y) < 1.5258789e-5)) {
-                float _e185 = ((_e134.y * 0.5) / _e167.y);
-                phi_617_ = _e185;
-                phi_618_ = _e185;
+        uint _e173 = local_11;
+        uint _e177 = ((11892u >> ((_e169 + _e170) + _e173)) & 3u);
+        if ((_e177 != 0u)) {
+            vec2 _e179 = local_14;
+            vec2 _e180 = local_15;
+            vec2 _e181 = local_16;
+            vec2 _e184 = ((_e179 - (_e180 * 2.0)) + _e181);
+            vec2 _e185 = (_e179 - _e180);
+            if ((abs(_e184.y) < 1.5258789e-5)) {
+                float _e203 = ((_e179.y * 0.5) / _e185.y);
+                local_9 = _e203;
+                local_10 = _e203;
             } else {
-                float _e177 = sqrt(max(((_e167.y * _e167.y) - (_e166.y * _e134.y)), 0.0));
-                phi_617_ = ((_e167.y - _e177) / _e166.y);
-                phi_618_ = ((_e167.y + _e177) / _e166.y);
+                float _e195 = sqrt(max(((_e185.y * _e185.y) - (_e184.y * _e179.y)), 0.0));
+                local_9 = ((_e185.y - _e195) / _e184.y);
+                local_10 = ((_e185.y + _e195) / _e184.y);
             }
-            float _e187 = phi_617_;
-            float _e189 = phi_618_;
-            float _e193 = (_e167.x * 2.0);
-            vec2 _e203 = (vec2(((((_e166.x * _e187) - _e193) * _e187) + _e134.x), ((((_e166.x * _e189) - _e193) * _e189) + _e134.x)) * _e36.x);
-            if (((_e162 & 1u) != 0u)) {
-                float _e209 = xcov;
-                xcov = (_e209 + clamp((_e203.x + 0.5), 0.0, 1.0));
-                float _e211 = xwgt;
-                xwgt = max(_e211, clamp((1.0 - (abs(_e203.x) * 2.0)), 0.0, 1.0));
+            float _e205 = local_9;
+            float _e208 = (_e185.x * 2.0);
+            float _e213 = local_10;
+            vec2 _e219 = (vec2(((((_e184.x * _e205) - _e208) * _e205) + _e179.x), ((((_e184.x * _e213) - _e208) * _e213) + _e179.x)) * _e54.x);
+            if (false) {
+                local_17 = -1.0;
+            } else {
+                local_17 = 1.0;
             }
-            if ((_e162 > 1u)) {
-                float _e221 = xcov;
-                xcov = (_e221 - clamp((_e203.y + 0.5), 0.0, 1.0));
-                float _e223 = xwgt;
-                xwgt = max(_e223, clamp((1.0 - (abs(_e203.y) * 2.0)), 0.0, 1.0));
+            if (((_e177 & 1u) != 0u)) {
+                float _e225 = local_17;
+                float _e227 = xcov;
+                xcov = (_e227 + (_e225 * clamp((_e219.x + 0.5), 0.0, 1.0)));
+                float _e229 = xwgt;
+                xwgt = max(_e229, clamp((1.0 - (abs(_e219.x) * 2.0)), 0.0, 1.0));
+            }
+            if ((_e177 > 1u)) {
+                float _e239 = local_17;
+                float _e241 = xcov;
+                xcov = (_e241 - (_e239 * clamp((_e219.y + 0.5), 0.0, 1.0)));
+                float _e243 = xwgt;
+                xwgt = max(_e243, clamp((1.0 - (abs(_e219.y) * 2.0)), 0.0, 1.0));
             }
         }
+        uint _e249 = local_13;
+        local_13 = (_e249 + 1u);
         continue;
     }
-    vec2 _e230 = i_u002e_em_pos_1;
-    vec2 _e232 = i_u002e_em_pos_1;
-    uint _e249 = (_e42 + (2u * (_e45 + uint(min(max(int(floor((((_e232.x - _e49.x) / (_e49.z - _e49.x)) * float(_e48)))), 0), (int(_e48) - 1))))));
-    vec4 _e257 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e249 % 4096u)), int((_e249 / 4096u))), 0).xy, 0);
-    uint _e260 = (_e249 + 1u);
-    vec4 _e268 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e260 % 4096u)), int((_e260 / 4096u))), 0).xy, 0);
-    phi_664_ = 0u;
-    bool loop_init_1 = true;
+    vec2 _e251 = i_u002e_em_pos_1;
+    vec2 _e253 = i_u002e_em_pos_1;
+    uint _e270 = (_e60 + (2u * (_e63 + uint(min(max(int(floor((((_e253.x - _e67.x) / (_e67.z - _e67.x)) * float(_e66)))), 0), (int(_e66) - 1))))));
+    vec4 _e278 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e270 % 4096u)), int((_e270 / 4096u))), 0).xy, 0);
+    uint _e281 = (_e270 + 1u);
+    vec4 _e289 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e281 % 4096u)), int((_e281 / 4096u))), 0).xy, 0);
+    local_4 = 0u;
     while(true) {
-        if (!loop_init_1) {
-            phi_664_ = (phi_664_ + 1u);
-        }
-        loop_init_1 = false;
-        uint _e272 = phi_664_;
-        if ((_e272 < uint(_e268.x))) {
+        uint _e292 = local_4;
+        if ((_e292 < uint(_e289.x))) {
         } else {
             break;
         }
-        uint _e275 = ((_e42 + uint(_e257.x)) + _e272);
-        vec4 _e283 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e275 % 4096u)), int((_e275 / 4096u))), 0).xy, 0);
-        uint _e287 = ((_e39 + uint(_e283.x)) * 2u);
-        vec4 _e295 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e287 % 4096u)), int((_e287 / 4096u))), 0).xy, 0);
-        uint _e296 = (_e287 + 1u);
-        vec4 _e304 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e296 % 4096u)), int((_e296 / 4096u))), 0).xy, 0);
-        vec2 _e306 = (_e295.xy - _e230);
-        vec2 _e308 = (_e295.zw - _e230);
-        vec2 _e310 = (_e304.xy - _e230);
+        uint _e295 = local_4;
+        uint _e296 = ((_e60 + uint(_e278.x)) + _e295);
+        vec4 _e304 = texelFetch(_group_0_binding_2, ivec3(ivec2(int((_e296 % 4096u)), int((_e296 / 4096u))), 0).xy, 0);
+        uint _e308 = ((_e57 + uint(_e304.x)) * 2u);
+        vec4 _e316 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e308 % 4096u)), int((_e308 / 4096u))), 0).xy, 0);
+        uint _e317 = (_e308 + 1u);
+        vec4 _e325 = texelFetch(_group_0_binding_1, ivec3(ivec2(int((_e317 % 4096u)), int((_e317 / 4096u))), 0).xy, 0);
+        vec2 _e327 = (_e316.xy - _e251);
+        vec2 _e329 = (_e316.zw - _e251);
+        vec2 _e331 = (_e325.xy - _e251);
         if (true) {
-            phi_707_ = _e306.yx;
-            phi_708_ = _e308.yx;
-            phi_709_ = _e310.yx;
+            local_5 = _e327.yx;
+            local_6 = _e329.yx;
+            local_7 = _e331.yx;
         } else {
-            phi_707_ = _e306;
-            phi_708_ = _e308;
-            phi_709_ = _e310;
+            local_5 = _e327;
+            local_6 = _e329;
+            local_7 = _e331;
         }
-        vec2 _e315 = phi_707_;
-        vec2 _e317 = phi_708_;
-        vec2 _e319 = phi_709_;
-        if (((max(max(_e315.x, _e317.x), _e319.x) * _e36.y) < -0.5)) {
+        vec2 _e335 = local_5;
+        vec2 _e337 = local_6;
+        vec2 _e340 = local_7;
+        if (((max(max(_e335.x, _e337.x), _e340.x) * _e54.y) < -0.5)) {
             break;
         }
-        if ((_e315.y > 0.0)) {
-            phi_809_ = 2u;
+        vec2 _e345 = local_5;
+        vec2 _e347 = local_6;
+        vec2 _e349 = local_7;
+        if ((_e345.y > 0.0)) {
+            local_2 = 2u;
         } else {
-            phi_809_ = 0u;
+            local_2 = 0u;
         }
-        uint _e332 = phi_809_;
-        if ((_e317.y > 0.0)) {
-            phi_814_ = 4u;
+        if ((_e347.y > 0.0)) {
+            local_3 = 4u;
         } else {
-            phi_814_ = 0u;
+            local_3 = 0u;
         }
-        uint _e335 = phi_814_;
-        if ((_e319.y > 0.0)) {
-            phi_820_ = 8u;
+        uint _e353 = local_2;
+        uint _e354 = local_3;
+        if ((_e349.y > 0.0)) {
+            local_2 = 8u;
         } else {
-            phi_820_ = 0u;
+            local_2 = 0u;
         }
-        uint _e339 = phi_820_;
-        uint _e343 = ((11892u >> ((_e332 + _e335) + _e339)) & 3u);
-        if ((_e343 != 0u)) {
-            vec2 _e347 = ((_e315 - (_e317 * 2.0)) + _e319);
-            vec2 _e348 = (_e315 - _e317);
-            if ((abs(_e347.y) < 1.5258789e-5)) {
-                float _e366 = ((_e315.y * 0.5) / _e348.y);
-                phi_851_ = _e366;
-                phi_852_ = _e366;
+        uint _e357 = local_2;
+        uint _e361 = ((11892u >> ((_e353 + _e354) + _e357)) & 3u);
+        if ((_e361 != 0u)) {
+            vec2 _e363 = local_5;
+            vec2 _e364 = local_6;
+            vec2 _e365 = local_7;
+            vec2 _e368 = ((_e363 - (_e364 * 2.0)) + _e365);
+            vec2 _e369 = (_e363 - _e364);
+            if ((abs(_e368.y) < 1.5258789e-5)) {
+                float _e387 = ((_e363.y * 0.5) / _e369.y);
+                local = _e387;
+                local_1 = _e387;
             } else {
-                float _e358 = sqrt(max(((_e348.y * _e348.y) - (_e347.y * _e315.y)), 0.0));
-                phi_851_ = ((_e348.y - _e358) / _e347.y);
-                phi_852_ = ((_e348.y + _e358) / _e347.y);
+                float _e379 = sqrt(max(((_e369.y * _e369.y) - (_e368.y * _e363.y)), 0.0));
+                local = ((_e369.y - _e379) / _e368.y);
+                local_1 = ((_e369.y + _e379) / _e368.y);
             }
-            float _e368 = phi_851_;
-            float _e370 = phi_852_;
-            float _e374 = (_e348.x * 2.0);
-            vec2 _e384 = (vec2(((((_e347.x * _e368) - _e374) * _e368) + _e315.x), ((((_e347.x * _e370) - _e374) * _e370) + _e315.x)) * _e36.y);
-            if (((_e343 & 1u) != 0u)) {
-                float _e391 = ycov;
-                ycov = (_e391 + (-1.0 * clamp((_e384.x + 0.5), 0.0, 1.0)));
-                float _e393 = ywgt;
-                ywgt = max(_e393, clamp((1.0 - (abs(_e384.x) * 2.0)), 0.0, 1.0));
+            float _e389 = local;
+            float _e392 = (_e369.x * 2.0);
+            float _e397 = local_1;
+            vec2 _e403 = (vec2(((((_e368.x * _e389) - _e392) * _e389) + _e363.x), ((((_e368.x * _e397) - _e392) * _e397) + _e363.x)) * _e54.y);
+            if (true) {
+                local_8 = -1.0;
+            } else {
+                local_8 = 1.0;
             }
-            if ((_e343 > 1u)) {
-                float _e404 = ycov;
-                ycov = (_e404 - (-1.0 * clamp((_e384.y + 0.5), 0.0, 1.0)));
-                float _e406 = ywgt;
-                ywgt = max(_e406, clamp((1.0 - (abs(_e384.y) * 2.0)), 0.0, 1.0));
+            if (((_e361 & 1u) != 0u)) {
+                float _e409 = local_8;
+                float _e411 = ycov;
+                ycov = (_e411 + (_e409 * clamp((_e403.x + 0.5), 0.0, 1.0)));
+                float _e413 = ywgt;
+                ywgt = max(_e413, clamp((1.0 - (abs(_e403.x) * 2.0)), 0.0, 1.0));
+            }
+            if ((_e361 > 1u)) {
+                float _e423 = local_8;
+                float _e425 = ycov;
+                ycov = (_e425 - (_e423 * clamp((_e403.y + 0.5), 0.0, 1.0)));
+                float _e427 = ywgt;
+                ywgt = max(_e427, clamp((1.0 - (abs(_e403.y) * 2.0)), 0.0, 1.0));
             }
         }
+        uint _e433 = local_4;
+        local_4 = (_e433 + 1u);
         continue;
     }
-    float _e413 = xcov;
-    float _e414 = xwgt;
-    float _e416 = ycov;
-    float _e417 = ywgt;
-    vec4 _e429 = i_u002e_color_1;
-    entryPointParam_fs_main = (_e429 * clamp(max((abs(((_e413 * _e414) + (_e416 * _e417))) / max((_e414 + _e417), 1.5258789e-5)), min(abs(_e413), abs(_e416))), 0.0, 1.0));
+    float _e435 = xcov;
+    float _e436 = xwgt;
+    float _e438 = ycov;
+    float _e439 = ywgt;
+    vec4 _e451 = i_u002e_color_1;
+    entryPointParam_fs_main = (_e451 * clamp(max((abs(((_e435 * _e436) + (_e438 * _e439))) / max((_e436 + _e439), 1.5258789e-5)), min(abs(_e435), abs(_e438))), 0.0, 1.0));
     return;
 }
 
