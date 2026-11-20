@@ -122,6 +122,8 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
                 }
             });
         }
+        // Libraries are folders on disk; the web menus don't offer them.
+        wall_app::ShellCommand::OpenLibrary { .. } => {}
     }
 }
 

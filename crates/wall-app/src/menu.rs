@@ -21,6 +21,8 @@ const DIM: [f32; 4] = [0.55, 0.57, 0.63, 1.0];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Import,
+    OpenLibrary,
+    NewLibrary,
     NewNote,
     NewBoard,
     NewTodo,
@@ -53,6 +55,15 @@ pub enum ShellCommand {
     Copy { cut: bool },
     /// Paste from the clipboard.
     Paste,
+    /// Pick a library folder and open it, or (`new`) create one.
+    OpenLibrary { new: bool },
+}
+
+impl Command {
+    /// Commands only a desktop shell can carry out; the web menus leave them out.
+    pub fn desktop_only(self) -> bool {
+        matches!(self, Command::OpenLibrary | Command::NewLibrary)
+    }
 }
 
 pub struct Menu {
@@ -68,6 +79,9 @@ pub const MENUS: &[Menu] = &[
         title: "File",
         entries: &[
             ("Import pictures or videos…", "", Some(Command::Import)),
+            SEP,
+            ("Open library…", "", Some(Command::OpenLibrary)),
+            ("New library…", "", Some(Command::NewLibrary)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),
@@ -159,9 +173,29 @@ impl Layout {
     }
 }
 
+/// The entries of menu `i` this shell shows: desktop-only ones are left out
+/// on the web, and so is a separator that would end up doubled or first.
+fn entries(i: usize, desktop: bool) -> Vec<(&'static str, &'static str, Option<Command>)> {
+    let mut out: Vec<(&str, &str, Option<Command>)> = Vec::new();
+    for e in MENUS[i].entries {
+        if !desktop && e.2.is_some_and(Command::desktop_only) {
+            continue;
+        }
+        if e.0.is_empty() && out.last().is_none_or(|l| l.0.is_empty()) {
+            continue;
+        }
+        out.push(*e);
+    }
+    if out.last().is_some_and(|l| l.0.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
 /// The menu bar, with menu `open` dropped down and the entry under `hover`
-/// highlighted. `title` is shown at the right of the bar.
-pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str, viewport: [f32; 2]) -> Layout {
+/// highlighted. `title` is shown at the right of the bar. `desktop` shows
+/// the entries only a desktop shell can carry out.
+pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str, viewport: [f32; 2], desktop: bool) -> Layout {
     let mut l = Layout::default();
     let bar = [0.0, 0.0, viewport[0], BAR];
     l.rect(bar, BAR_BG, [0.0; 4], 0.0);
@@ -185,14 +219,14 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
     l.text(t, [viewport[0] - 12.0 - tw, 19.5], 12.5, DIM);
 
     if let Some(i) = open.filter(|i| *i < MENUS.len()) {
-        let m = &MENUS[i];
-        let h: f32 = m.entries.iter().map(|e| if e.0.is_empty() { 9.0 } else { ENTRY_H }).sum::<f32>() + 8.0;
+        let m = entries(i, desktop);
+        let h: f32 = m.iter().map(|e| if e.0.is_empty() { 9.0 } else { ENTRY_H }).sum::<f32>() + 8.0;
         let x0 = title_x[i].min(viewport[0] - DROP_W - 4.0).max(0.0);
         let drop = [x0, BAR, DROP_W, h];
         l.rect(drop, DROP_BG, LINE, 6.0);
         l.hits.push((drop, Hit::None));
         let mut y = BAR + 4.0;
-        for (label, keys, cmd) in m.entries {
+        for (label, keys, cmd) in &m {
             if label.is_empty() {
                 l.rect([x0 + 8.0, y + 4.0, DROP_W - 16.0, 1.0], LINE, [0.0; 4], 0.0);
                 y += 9.0;
@@ -224,18 +258,31 @@ mod tests {
     #[test]
     fn titles_open_and_entries_click() {
         let mut f = Font::new(wall_text::INTER_REGULAR).unwrap();
-        let closed = layout(&mut f, None, [0.0, 0.0], "Board 1", [1200.0, 800.0]);
+        let closed = layout(&mut f, None, [0.0, 0.0], "Board 1", [1200.0, 800.0], false);
         let edit = closed.hits.iter().find(|(_, h)| *h == Hit::Title(1)).unwrap().0;
         let c = |r: [f32; 4]| [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0];
         assert_eq!(closed.hit_at(c(edit)), Some(Hit::Title(1)));
         assert_eq!(closed.hit_at([600.0, 15.0]), Some(Hit::None), "empty bar");
         assert_eq!(closed.hit_at([600.0, 300.0]), None, "the board");
-        let open = layout(&mut f, Some(1), [0.0, 0.0], "Board 1", [1200.0, 800.0]);
+        let open = layout(&mut f, Some(1), [0.0, 0.0], "Board 1", [1200.0, 800.0], false);
         let undo = open.hits.iter().find(|(_, h)| *h == Hit::Entry(Command::Undo)).unwrap().0;
         assert!(undo[1] >= BAR);
         assert_eq!(open.hit_at(c(undo)), Some(Hit::Entry(Command::Undo)));
         // Hovering highlights the entry.
-        let hovered = layout(&mut f, Some(1), c(undo), "Board 1", [1200.0, 800.0]);
+        let hovered = layout(&mut f, Some(1), c(undo), "Board 1", [1200.0, 800.0], false);
         assert!(hovered.boxes.iter().any(|b| b.fill == HOVER));
+    }
+
+    #[test]
+    fn library_entries_only_on_desktop() {
+        let mut f = Font::new(wall_text::INTER_REGULAR).unwrap();
+        let has = |l: &Layout| l.hits.iter().any(|(_, h)| *h == Hit::Entry(Command::OpenLibrary));
+        let web = layout(&mut f, Some(0), [0.0, 0.0], "B", [1200.0, 800.0], false);
+        let desk = layout(&mut f, Some(0), [0.0, 0.0], "B", [1200.0, 800.0], true);
+        assert!(!has(&web) && has(&desk));
+        // The web File menu doesn't get two separators in a row.
+        let seps = |d: bool| entries(0, d).windows(2).filter(|w| w[0].0.is_empty() && w[1].0.is_empty()).count();
+        assert_eq!((seps(false), seps(true)), (0, 0));
+        assert!(desk.boxes.len() > web.boxes.len());
     }
 }

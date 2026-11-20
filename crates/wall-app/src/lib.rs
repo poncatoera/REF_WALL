@@ -244,6 +244,8 @@ pub struct App {
     menu_open: Option<usize>,
     /// Menu commands waiting for the shell (file picker, clipboard).
     shell_commands: Vec<menu::ShellCommand>,
+    /// Set by the desktop shell: shows the menu entries only it can carry out.
+    pub desktop: bool,
     /// The library drawer, while open (L).
     library_view: Option<library_view::LibraryView>,
 }
@@ -305,6 +307,7 @@ impl App {
             tag_filter: None,
             menu_open: None,
             shell_commands: Vec::new(),
+            desktop: false,
             library_view: None,
         }
     }
@@ -2295,7 +2298,7 @@ impl App {
 
     fn menu_layout(&mut self) -> menu::Layout {
         let title = self.breadcrumb().join("  ›  ");
-        menu::layout(&mut self.font, self.menu_open, self.cursor, &title, self.viewport)
+        menu::layout(&mut self.font, self.menu_open, self.cursor, &title, self.viewport, self.desktop)
     }
 
     /// Handles a click on the menu bar or an open menu. Returns true when
@@ -2330,6 +2333,8 @@ impl App {
         let centre = [self.viewport[0] / 2.0, self.viewport[1] / 2.0];
         match c {
             C::Import => self.shell_commands.push(S::Import),
+            C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
+            C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),
             C::Paste => self.shell_commands.push(S::Paste),

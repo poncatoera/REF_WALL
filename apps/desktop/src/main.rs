@@ -56,6 +56,8 @@ struct Shell {
     screenshot_frame: u32,
     /// Video preview frames for the library drawer, decoded off the UI thread.
     posters: LibraryPosters,
+    /// Window title: the library's name.
+    title: String,
 }
 
 /// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
@@ -178,6 +180,112 @@ fn pick_files() -> Vec<std::path::PathBuf> {
     Vec::new()
 }
 
+/// File > Open library / New library: the system's folder picker. A new
+/// library is a folder whose name ends in `.wall`.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_library(new: bool) -> Option<std::path::PathBuf> {
+    if new {
+        let path = rfd::FileDialog::new().set_title("New Wall library").set_file_name("References.wall").save_file()?;
+        Some(if path.extension().is_some_and(|e| e == "wall") { path } else { path.with_extension("wall") })
+    } else {
+        let path = rfd::FileDialog::new().set_title("Open a Wall library (a folder ending in .wall)").pick_folder()?;
+        if path.join("wall.json").is_file() {
+            Some(path)
+        } else {
+            show_error(&format!("{} is not a Wall library: it has no wall.json.", path.display()));
+            None
+        }
+    }
+}
+
+/// No folder picker on Linux yet: WALL_PICK_LIBRARY names the folder (tests).
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_library(_new: bool) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_PICK_LIBRARY").map(Into::into)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn show_error(text: &str) {
+    eprintln!("wall: {text}");
+    rfd::MessageDialog::new().set_title("Wall").set_description(text).set_level(rfd::MessageLevel::Warning).show();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn show_error(text: &str) {
+    eprintln!("wall: {text}");
+}
+
+/// Opens (or creates) a library for the desktop and remembers it as the
+/// one to open next time.
+fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    println!("wall: library {}", path.display());
+    let mut app = App::open_library(path, &device_name(), now_ms())?;
+    app.desktop = true;
+    settings::remember_library(path);
+    Ok(app)
+}
+
+fn window_title(library: &std::path::Path) -> String {
+    let name = library.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name.is_empty() { "Wall".into() } else { format!("{name} — Wall") }
+}
+
+/// Small per-user settings: the last library opened. Kept in
+/// `%APPDATA%\Wall\settings.json`, `~/Library/Application Support/Wall`
+/// or `~/.config/wall`; `WALL_SETTINGS` overrides the file (tests).
+mod settings {
+    use std::path::{Path, PathBuf};
+
+    fn file() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("WALL_SETTINGS") {
+            return Some(p.into());
+        }
+        let dir = if cfg!(windows) {
+            PathBuf::from(std::env::var_os("APPDATA")?).join("Wall")
+        } else if cfg!(target_os = "macos") {
+            PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/Wall")
+        } else {
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")))?.join("wall")
+        };
+        Some(dir.join("settings.json"))
+    }
+
+    fn read() -> serde_json::Map<String, serde_json::Value> {
+        file()
+            .and_then(|f| std::fs::read(f).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&b)).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    }
+
+    /// The library opened last, if it still exists.
+    pub fn last_library() -> Option<PathBuf> {
+        let p = PathBuf::from(read().get("last_library")?.as_str()?);
+        p.join("wall.json").is_file().then_some(p)
+    }
+
+    pub fn remember_library(path: &Path) {
+        let Some(f) = file() else { return };
+        let mut s = read();
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        // canonicalize gives \\?\C:\… on Windows; keep the plain form.
+        let abs = abs.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
+        s.insert("last_library".into(), abs.into());
+        let write = || -> std::io::Result<()> {
+            if let Some(d) = f.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            std::fs::write(&f, serde_json::to_vec_pretty(&s).unwrap_or_default())
+        };
+        if let Err(e) = write() {
+            eprintln!("wall: could not save settings {}: {e}", f.display());
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -196,7 +304,7 @@ impl ApplicationHandler for Shell {
         if self.gfx.is_some() {
             return;
         }
-        match create_gfx(event_loop) {
+        match create_gfx(event_loop, &self.title) {
             Ok(gfx) => {
                 let gl = gfx.renderer.gl();
                 use glow::HasContext;
@@ -319,6 +427,23 @@ impl ApplicationHandler for Shell {
                                 import_file(&mut self.app, &mut self.videos, path);
                             }
                         }
+                        wall_app::ShellCommand::OpenLibrary { new } => {
+                            if let Some(path) = pick_library(new) {
+                                match open_library(&path) {
+                                    Ok(app) => {
+                                        if let Err(e) = self.app.save_if_dirty() {
+                                            eprintln!("wall: could not save: {e}");
+                                        }
+                                        self.app = app;
+                                        self.app.resize([size.width as f32, size.height as f32]);
+                                        self.videos = video::Videos::default();
+                                        self.posters = LibraryPosters::default();
+                                        gfx.window.set_title(&window_title(&path));
+                                    }
+                                    Err(e) => show_error(&format!("Could not open {}: {e}", path.display())),
+                                }
+                            }
+                        }
                     }
                 }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
@@ -378,9 +503,9 @@ fn want_angle() -> bool {
     }
 }
 
-fn create_gfx(event_loop: &ActiveEventLoop) -> Result<Gfx, Box<dyn std::error::Error>> {
+fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
-        .with_title("Wall")
+        .with_title(title)
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
@@ -457,6 +582,7 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
+    let mut title = "Wall".to_owned();
     let mut app = match std::env::var("WALL_DEMO").ok() {
         Some(n) => App::demo(n.parse().unwrap_or(2000)),
         None => {
@@ -465,14 +591,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .skip(1)
                 .find(|a| !a.to_string_lossy().starts_with("-psn"))
                 .map(std::path::PathBuf::from)
+                .or_else(settings::last_library)
                 .unwrap_or_else(default_library);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            println!("wall: library {}", path.display());
-            App::open_library(&path, &device_name(), now_ms())?
+            title = window_title(&path);
+            open_library(&path)?
         }
     };
+    app.desktop = true;
     // WALL_OPEN_LIBRARY=1 starts with the library drawer open (screenshots).
     if std::env::var_os("WALL_OPEN_LIBRARY").is_some() {
         app.toggle_library();
@@ -495,7 +620,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         videos: video::Videos::default(),
         screenshot_frame: std::env::var("WALL_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
         posters: LibraryPosters::default(),
+        title,
     };
     event_loop.run_app(&mut shell)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remembers_the_last_library() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WALL_SETTINGS", dir.path().join("cfg").join("settings.json"));
+        assert_eq!(settings::last_library(), None);
+        let lib = dir.path().join("Moods.wall");
+        let app = open_library(&lib).unwrap();
+        assert!(app.desktop);
+        let last = settings::last_library().unwrap();
+        assert_eq!(std::fs::canonicalize(last).unwrap(), std::fs::canonicalize(&lib).unwrap());
+        assert_eq!(window_title(&lib), "Moods — Wall");
+        // A library that was moved away isn't offered again.
+        std::fs::rename(&lib, dir.path().join("gone.wall")).unwrap();
+        assert_eq!(settings::last_library(), None);
+    }
 }
