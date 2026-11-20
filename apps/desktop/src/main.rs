@@ -128,6 +128,8 @@ impl ApplicationHandler for Shell {
                     let _ = gfx.surface.set_swap_interval(&gfx.context, SwapInterval::DontWait);
                 }
                 gfx.window.request_redraw();
+                let size = gfx.window.inner_size();
+                self.app.resize([size.width as f32, size.height as f32]);
                 self.gfx = Some(gfx);
                 // WALL_IMPORT="a.png;b.mp4" imports files at start, like a drop (for tests).
                 for path in std::env::var("WALL_IMPORT").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {

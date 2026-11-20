@@ -141,6 +141,8 @@ fn item_text_mut(kind: &mut ItemKind) -> Option<&mut String> {
 }
 
 const DOUBLE_CLICK_MS: u64 = 450;
+/// Videos narrower than this on screen show a still frame instead of playing.
+pub const MIN_PLAY_PX: f32 = 120.0;
 /// Height of a group's name strip, in board units.
 const GROUP_HEADER: f64 = 44.0;
 
@@ -192,6 +194,8 @@ pub struct App {
     videos: HashMap<ContentHash, (String, u32, u32)>,
     video_status: HashMap<ContentHash, VideoStatus>,
     video_commands: Vec<(ContentHash, VideoCommand)>,
+    /// Fit the view to the board once the real window size is known.
+    fit_on_resize: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -230,6 +234,7 @@ impl App {
             videos: HashMap::new(),
             video_status: HashMap::new(),
             video_commands: Vec::new(),
+            fit_on_resize: false,
         }
     }
 
@@ -257,7 +262,7 @@ impl App {
         let mut app = Self::new(board, device);
         app.load_pictures(&library);
         app.library = Some(library);
-        app.fit_view();
+        app.fit_on_resize = true;
         Ok(app)
     }
 
@@ -463,6 +468,29 @@ impl App {
         }
     }
 
+    /// Videos worth decoding now: on screen and at least `MIN_PLAY_PX` wide.
+    /// Shells pause or stop the others and keep their last frame.
+    pub fn playable_videos(&self) -> BTreeSet<ContentHash> {
+        let tl = self.camera.screen_to_board([0.0, 0.0], self.viewport);
+        let br = self.camera.screen_to_board(self.viewport, self.viewport);
+        self.doc
+            .board
+            .live_items()
+            .filter(|i| {
+                let f = i.frame;
+                (f.w as f32) * self.camera.zoom >= MIN_PLAY_PX
+                    && (f.x as f32) < br[0]
+                    && ((f.x + f.w) as f32) > tl[0]
+                    && (f.y as f32) < br[1]
+                    && ((f.y + f.h) as f32) > tl[1]
+            })
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media { hash, .. } if self.videos.contains_key(hash) => Some(hash.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Commands for the shell's players, oldest first.
     pub fn take_video_commands(&mut self) -> Vec<(ContentHash, VideoCommand)> {
         std::mem::take(&mut self.video_commands)
@@ -572,7 +600,11 @@ impl App {
     }
 
     fn place_media(&mut self, hash: ContentHash, width: u32, height: u32) -> Uuid {
-        let at = self.camera.screen_to_board(self.cursor, self.viewport);
+        // At the cursor, or the middle of the view if the pointer was never
+        // over the window (e.g. files imported at start-up).
+        let c = self.cursor;
+        let inside = c != [0.0, 0.0] && c[0] >= 0.0 && c[1] >= 0.0 && c[0] <= self.viewport[0] && c[1] <= self.viewport[1];
+        let at = if inside { self.camera.screen_to_board(c, self.viewport) } else { self.camera.center };
         let (w, h) = (width as f64, height as f64);
         let frame = Frame { x: at[0] as f64 - w / 2.0, y: at[1] as f64 - h / 2.0, w, h, ..Default::default() };
         let id = self.doc.add(vec![(frame, ItemKind::Media { hash, crop: None })])[0];
@@ -594,6 +626,9 @@ impl App {
     pub fn resize(&mut self, size_px: [f32; 2]) {
         self.viewport = size_px;
         self.needs_redraw = true;
+        if std::mem::take(&mut self.fit_on_resize) {
+            self.fit_view();
+        }
     }
 
     /// Topmost live item under a board point.
@@ -1173,6 +1208,21 @@ mod tests {
         click(&mut a, 20_000, [500.0, 350.0]);
         click(&mut a, 20_100, [500.0, 350.0]);
         assert_eq!(a.take_video_commands().last().map(|(_, c)| *c), Some(VideoCommand::Play));
+    }
+
+    #[test]
+    fn only_videos_on_screen_and_big_enough_play() {
+        let mut a = app();
+        let meta = VideoMeta { width: 400, height: 200, duration_ms: 1000, fps: None };
+        a.pointer_move([500.0, 400.0]);
+        let on = a.import_video(b"a", "mp4", meta, None, 1).unwrap();
+        a.pointer_move([5000.0, 400.0]);
+        let off = a.import_video(b"b", "mp4", meta, None, 1).unwrap();
+        let (on, off) = (a.media_hash(&on).unwrap(), a.media_hash(&off).unwrap());
+        assert_eq!(a.playable_videos(), [on.clone()].into());
+        assert!(!a.playable_videos().contains(&off));
+        a.camera.zoom = 0.2; // 400 units -> 80 px: too small to play
+        assert!(a.playable_videos().is_empty());
     }
 
     #[test]

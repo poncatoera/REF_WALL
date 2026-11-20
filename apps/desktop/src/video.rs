@@ -373,12 +373,27 @@ mod tests {
     }
 }
 
-/// Imports running in the background and players for videos on the board.
+/// One video on the board: its file, its texture once a frame arrived, and
+/// a player while it is on screen. Off screen the player is dropped (its
+/// ffmpeg stops) and the texture keeps the last frame.
+struct Slot {
+    hash: wall_app::ContentHash,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    duration: f64,
+    fps: f64,
+    tex: Option<wall_render::ImageId>,
+    player: Option<Player>,
+    /// Where to resume when it comes back on screen.
+    saved: wall_app::VideoStatus,
+}
+
+/// Imports running in the background and the videos on the board.
 #[derive(Default)]
 pub struct Videos {
     jobs: Vec<Receiver<(String, Result<Prepared, String>)>>,
-    players: Vec<(wall_app::ContentHash, Player, wall_render::ImageId)>,
-    started: std::collections::HashSet<wall_app::ContentHash>,
+    slots: Vec<Slot>,
     /// Files for videos imported without a library open.
     paths: std::collections::HashMap<wall_app::ContentHash, PathBuf>,
     /// When the last import finished.
@@ -404,10 +419,11 @@ impl Videos {
 
     /// True while anything needs frames drawn: imports or playing videos.
     pub fn busy(&self) -> bool {
-        !self.jobs.is_empty() || !self.players.is_empty()
+        !self.jobs.is_empty() || self.slots.iter().any(|s| s.player.is_some())
     }
 
-    /// Finishes imports, starts players, uploads new frames. Call once per frame.
+    /// Finishes imports, starts and stops players as videos come on and go
+    /// off screen, applies controls, uploads new frames. Call once per frame.
     pub fn pump(&mut self, app: &mut wall_app::App, renderer: &mut wall_render::Renderer) {
         let mut still = Vec::new();
         for rx in self.jobs.drain(..) {
@@ -431,32 +447,74 @@ impl Videos {
         self.jobs = still;
 
         for src in app.video_sources() {
-            if !self.started.insert(src.hash.clone()) {
+            if self.slots.iter().any(|s| s.hash == src.hash) {
                 continue;
             }
             let Some(path) = src.path.clone().filter(|p| p.is_file()).or_else(|| self.paths.get(&src.hash).cloned()) else { continue };
             let (duration, fps) = probe(&path).map_or((0.0, 30.0), |p| (p.probe.duration_ms as f64 / 1000.0, p.fps.unwrap_or(30.0) as f64));
-            let Some(player) = Player::start(path, src.width, src.height, duration, fps) else { continue };
-            match renderer.create_video_texture(player.width, player.height) {
-                Ok(tex) => {
-                    app.attach_texture(src.hash.clone(), tex);
-                    self.players.push((src.hash, player, tex));
+            let saved = wall_app::VideoStatus { time: 0.0, duration, playing: true, speed: 1.0 };
+            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, player: None, saved });
+        }
+
+        let playable = app.playable_videos();
+        for slot in &mut self.slots {
+            let want = playable.contains(&slot.hash);
+            match (&slot.player, want) {
+                (None, true) => {
+                    if let Some(mut p) = Player::start(slot.path.clone(), slot.width, slot.height, slot.duration, slot.fps) {
+                        if slot.saved.time > 0.0 {
+                            p.command(wall_app::VideoCommand::Seek(slot.saved.time));
+                        }
+                        p.command(wall_app::VideoCommand::Speed(slot.saved.speed));
+                        if !slot.saved.playing {
+                            p.command(wall_app::VideoCommand::Pause);
+                        }
+                        slot.player = Some(p);
+                    }
                 }
-                Err(e) => eprintln!("wall: video texture failed: {e}"),
+                (Some(p), false) => {
+                    slot.saved = p.status();
+                    slot.player = None;
+                }
+                _ => {}
             }
         }
 
         for (hash, cmd) in app.take_video_commands() {
-            if let Some((_, p, _)) = self.players.iter_mut().find(|(h, ..)| *h == hash) {
-                p.command(cmd);
+            let Some(slot) = self.slots.iter_mut().find(|s| s.hash == hash) else { continue };
+            match &mut slot.player {
+                Some(p) => p.command(cmd),
+                None => match cmd {
+                    wall_app::VideoCommand::Play => slot.saved.playing = true,
+                    wall_app::VideoCommand::Pause => slot.saved.playing = false,
+                    wall_app::VideoCommand::Speed(s) => slot.saved.speed = s,
+                    wall_app::VideoCommand::Seek(t) => slot.saved.time = t,
+                    wall_app::VideoCommand::Step(_) => {}
+                },
             }
         }
-        for (hash, player, tex) in &mut self.players {
+
+        for slot in &mut self.slots {
+            let Some(player) = &mut slot.player else {
+                app.set_video_status(slot.hash.clone(), slot.saved);
+                continue;
+            };
             if let Some(frame) = player.tick() {
-                renderer.update_image(*tex, &frame, player.width, player.height);
-                app.needs_redraw = true;
+                if slot.tex.is_none() {
+                    match renderer.create_video_texture(player.width, player.height) {
+                        Ok(tex) => {
+                            app.attach_texture(slot.hash.clone(), tex);
+                            slot.tex = Some(tex);
+                        }
+                        Err(e) => eprintln!("wall: video texture failed: {e}"),
+                    }
+                }
+                if let Some(tex) = slot.tex {
+                    renderer.update_image(tex, &frame, player.width, player.height);
+                    app.needs_redraw = true;
+                }
             }
-            app.set_video_status(hash.clone(), player.status());
+            app.set_video_status(slot.hash.clone(), player.status());
         }
     }
 }

@@ -14,6 +14,8 @@ use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingCon
 struct State {
     /// Playing `<video>` elements and the textures their frames go to.
     videos: Vec<(web_sys::HtmlVideoElement, wall_app::ContentHash, wall_render::ImageId)>,
+    /// Videos the person paused (others pause only while off screen).
+    user_paused: std::collections::HashSet<wall_app::ContentHash>,
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
@@ -56,7 +58,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
     let app = App::demo(2000);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { videos: Vec::new(), app, renderer, canvas: canvas.clone() }));
+    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone() }));
 
     fn pos(e: &PointerEvent) -> [f32; 2] {
         [e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]
@@ -214,15 +216,22 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             let mut s = state.borrow_mut();
             let size = s.sync_size();
             if !s.videos.is_empty() {
-                let State { videos, renderer, app, .. } = &mut *s;
+                let State { videos, renderer, app, user_paused, .. } = &mut *s;
                 use glow::HasContext;
                 for (hash, cmd) in app.take_video_commands() {
                     let Some((v, _, _)) = videos.iter().find(|(_, h, _)| *h == hash) else { continue };
                     match cmd {
-                        wall_app::VideoCommand::Play => drop(v.play()),
-                        wall_app::VideoCommand::Pause => v.pause().unwrap_or(()),
+                        wall_app::VideoCommand::Play => {
+                            user_paused.remove(&hash);
+                            drop(v.play());
+                        }
+                        wall_app::VideoCommand::Pause => {
+                            user_paused.insert(hash.clone());
+                            v.pause().unwrap_or(());
+                        }
                         wall_app::VideoCommand::Seek(t) => v.set_current_time(t),
                         wall_app::VideoCommand::Step(n) => {
+                            user_paused.insert(hash.clone());
                             v.pause().unwrap_or(());
                             // The browser doesn't expose the frame rate; assume 30.
                             v.set_current_time((v.current_time() + n as f64 / 30.0).max(0.0));
@@ -230,8 +239,16 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
                         wall_app::VideoCommand::Speed(r) => v.set_playback_rate(r as f64),
                     }
                 }
+                // Only videos on screen (and big enough) play; the rest keep their last frame.
+                let playable = app.playable_videos();
                 for (v, hash, _) in videos.iter() {
-                    let status = wall_app::VideoStatus { time: v.current_time(), duration: v.duration(), playing: !v.paused(), speed: v.playback_rate() as f32 };
+                    let want = playable.contains(hash) && !user_paused.contains(hash);
+                    if want && v.paused() {
+                        drop(v.play());
+                    } else if !want && !v.paused() {
+                        v.pause().unwrap_or(());
+                    }
+                    let status = wall_app::VideoStatus { time: v.current_time(), duration: v.duration(), playing: !user_paused.contains(hash), speed: v.playback_rate() as f32 };
                     app.set_video_status(hash.clone(), status);
                 }
                 for (v, _, tex) in videos.iter() {
