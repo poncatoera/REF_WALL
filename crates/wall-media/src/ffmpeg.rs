@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use crate::{plan_video, Limits, VideoPlan, VideoProbe};
+use crate::{plan_video, H264Encoder, Limits, VideoPlan, VideoProbe};
 
 /// File extensions treated as video on drop.
 pub fn is_video(path: &Path) -> bool {
@@ -101,6 +101,28 @@ pub fn probe(path: &Path) -> Result<Probed, String> {
     })
 }
 
+/// H.264 encoders this ffmpeg has, best first: libx264 (GPL builds), then
+/// the system's (VideoToolbox on macOS, Media Foundation on Windows), then
+/// NVIDIA's. `WALL_H264_ENCODER=h264_mf` (etc.) puts one first.
+pub fn h264_encoders() -> &'static [H264Encoder] {
+    static FOUND: OnceLock<Vec<H264Encoder>> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        let listed = ffmpeg()
+            .and_then(|f| command(f).args(["-hide_banner", "-encoders"]).stderr(Stdio::null()).output().ok())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let has = |e: &H264Encoder| listed.split_whitespace().any(|w| w == e.ffmpeg_name());
+        let mut found: Vec<H264Encoder> = H264Encoder::ALL.into_iter().filter(has).collect();
+        if let Ok(want) = std::env::var("WALL_H264_ENCODER") {
+            if let Some(i) = found.iter().position(|e| e.ffmpeg_name() == want) {
+                let e = found.remove(i);
+                found.insert(0, e);
+            }
+        }
+        found
+    })
+}
+
 /// A video ready to import: bytes under the limit, as H.264 MP4 unless the
 /// original already qualified.
 pub struct PreparedVideo {
@@ -125,10 +147,19 @@ pub fn prepare_video(path: &Path) -> Result<PreparedVideo, String> {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             let out = std::env::temp_dir().join(format!("wall-{}-{nanos}.mp4", std::process::id()));
             println!("wall: converting {} ({:?})", path.display(), settings.reasons);
-            let args = settings.ffmpeg_args(&path.to_string_lossy(), &out.to_string_lossy(), p.fps.unwrap_or(30.0));
-            let status = command(ffmpeg).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("ffmpeg could not convert {}", path.display()));
+            let mut converted = false;
+            for enc in h264_encoders() {
+                let args = settings.ffmpeg_args_with(&path.to_string_lossy(), &out.to_string_lossy(), p.fps.unwrap_or(30.0), *enc);
+                let status = command(ffmpeg).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| e.to_string())?;
+                if status.success() {
+                    converted = true;
+                    break;
+                }
+                // A GPU encoder can be listed but have no GPU behind it: try the next.
+                eprintln!("wall: {} could not convert {}; trying the next encoder", enc.ffmpeg_name(), path.display());
+            }
+            if !converted {
+                return Err(format!("ffmpeg could not convert {} (no working H.264 encoder)", path.display()));
             }
             let again = probe(&out)?;
             (out, again)

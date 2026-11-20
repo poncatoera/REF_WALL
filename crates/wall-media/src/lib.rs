@@ -13,7 +13,7 @@ pub mod image_rules;
 pub mod video_rules;
 
 pub use image_rules::{prepare_image, PreparedImage};
-pub use video_rules::{plan_video, VideoPlan, VideoProbe};
+pub use video_rules::{plan_video, H264Encoder, VideoPlan, VideoProbe};
 
 /// Limits applied on import. `Default` gives the values agreed for v1.
 #[derive(Debug, Clone, Copy, PartialEq)]

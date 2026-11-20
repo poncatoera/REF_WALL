@@ -35,6 +35,33 @@ pub struct EncodeSettings {
     pub reasons: Vec<Reason>,
 }
 
+/// H.264 encoders Wall can convert with. libx264 gives the best files but
+/// only ships in GPL ffmpeg builds; the others are in LGPL builds and use
+/// the system's or the GPU's encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264Encoder {
+    X264,
+    /// macOS.
+    VideoToolbox,
+    /// Windows Media Foundation (built into Windows).
+    MediaFoundation,
+    /// NVIDIA GPUs.
+    Nvenc,
+}
+
+impl H264Encoder {
+    pub const ALL: [H264Encoder; 4] = [H264Encoder::X264, H264Encoder::VideoToolbox, H264Encoder::MediaFoundation, H264Encoder::Nvenc];
+
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            H264Encoder::X264 => "libx264",
+            H264Encoder::VideoToolbox => "h264_videotoolbox",
+            H264Encoder::MediaFoundation => "h264_mf",
+            H264Encoder::Nvenc => "h264_nvenc",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     TooLarge,
@@ -104,15 +131,23 @@ fn even(v: u32) -> u32 {
 impl EncodeSettings {
     /// Arguments for the desktop's bundled ffmpeg. `fps` sets the keyframe interval.
     pub fn ffmpeg_args(&self, input: &str, output: &str, fps: f32) -> Vec<String> {
+        self.ffmpeg_args_with(input, output, fps, H264Encoder::X264)
+    }
+
+    /// The same conversion with a chosen H.264 encoder.
+    pub fn ffmpeg_args_with(&self, input: &str, output: &str, fps: f32, encoder: H264Encoder) -> Vec<String> {
         let gop = ((fps as f64) * self.keyframe_interval_ms as f64 / 1000.0).round().max(1.0) as u32;
-        let mut a: Vec<String> = [
-            "-hide_banner", "-y", "-i", input,
-            "-map", "0:v:0", "-map", "0:a:0?",
-            "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let mut a: Vec<String> = ["-hide_banner", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", encoder.ffmpeg_name()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let extra: &[&str] = match encoder {
+            H264Encoder::X264 => &["-preset", "medium", "-pix_fmt", "yuv420p"],
+            H264Encoder::VideoToolbox => &["-allow_sw", "1", "-pix_fmt", "yuv420p"],
+            H264Encoder::MediaFoundation => &["-hw_encoding", "1", "-pix_fmt", "nv12"],
+            H264Encoder::Nvenc => &["-preset", "p5", "-pix_fmt", "yuv420p"],
+        };
+        a.extend(extra.iter().map(|s| s.to_string()));
         a.extend([
             "-vf".into(), format!("scale={}:{}", self.width, self.height),
             "-b:v".into(), format!("{}k", self.video_kbps),
@@ -198,6 +233,19 @@ mod tests {
     fn odd_sizes_become_even() {
         let s = settings(&VideoProbe { width: 1281, height: 721, codec: "hevc".into(), ..probe() });
         assert_eq!((s.width % 2, s.height % 2), (0, 0));
+    }
+
+    #[test]
+    fn other_encoders_keep_the_size_rules() {
+        let s = EncodeSettings { width: 1280, height: 720, video_kbps: 4000, audio_kbps: 128, keyframe_interval_ms: 1000, reasons: vec![] };
+        for e in H264Encoder::ALL {
+            let a = s.ffmpeg_args_with("in.mov", "out.mp4", 25.0, e);
+            let after = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
+            assert_eq!(after("-c:v").as_deref(), Some(e.ffmpeg_name()));
+            assert_eq!(after("-b:v").as_deref(), Some("4000k"));
+            assert_eq!(after("-g").as_deref(), Some("25"));
+            assert_eq!(a.last().map(String::as_str), Some("out.mp4"));
+        }
     }
 
     #[test]
