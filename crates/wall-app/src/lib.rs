@@ -89,6 +89,12 @@ pub enum Key {
     Right,
     Home,
     End,
+    /// Ctrl/Cmd+D: duplicate the selection.
+    Duplicate,
+    /// Ctrl/Cmd+]: bring the selection to the front.
+    BringToFront,
+    /// Ctrl/Cmd+[: send the selection to the back.
+    SendToBack,
     /// A plain character key with no Ctrl/Cmd, while not typing. Video
     /// shortcuts: K play/pause, `,` `.` frame step, `[` `]` speed.
     Char(char),
@@ -106,6 +112,8 @@ enum Gesture {
     Pan,
     Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2] },
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
+    /// Dragging an item's bottom-right handle.
+    Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64> },
     /// Dragging along a video's scrub strip.
     Scrub { hash: ContentHash, x: f32, w: f32, duration: f64 },
 }
@@ -141,6 +149,10 @@ fn item_text_mut(kind: &mut ItemKind) -> Option<&mut String> {
 }
 
 const DOUBLE_CLICK_MS: u64 = 450;
+/// Half the size of the resize handle, in screen pixels.
+const HANDLE_PX: f32 = 8.0;
+/// Prefix of Wall items on the system clipboard.
+const CLIPBOARD_TAG: &str = "wall-items:";
 /// Videos narrower than this on screen show a still frame instead of playing.
 pub const MIN_PLAY_PX: f32 = 120.0;
 /// Height of a group's name strip, in board units.
@@ -666,6 +678,12 @@ impl App {
             }
             self.end_edit();
         }
+        if let Some(item) = self.resize_handle_at(board) {
+            // Pictures and videos keep their shape unless Shift is held.
+            let aspect = matches!(item.kind, ItemKind::Media { .. }).then(|| item.frame.w / item.frame.h.max(1e-6)).filter(|_| !mods.shift);
+            self.gesture = Gesture::Resize { original: item, start: board, aspect };
+            return;
+        }
         if let Some((hash, x, w, duration)) = hit.and_then(|id| self.scrub_target(id, board)) {
             self.selection = [hit.unwrap()].into();
             self.video_commands.push((hash.clone(), VideoCommand::Seek(video::time_at(board[0], x, w, duration))));
@@ -732,6 +750,21 @@ impl App {
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
             Gesture::Idle => return,
+            Gesture::Resize { original, start, aspect } => {
+                let mut item = original.clone();
+                let min = 20.0;
+                item.frame.w = (original.frame.w + (board[0] - start[0]) as f64).max(min);
+                item.frame.h = (original.frame.h + (board[1] - start[1]) as f64).max(min);
+                if let Some(a) = *aspect {
+                    // Follow whichever side moved more, keeping the shape.
+                    if item.frame.w / a > item.frame.h {
+                        item.frame.h = item.frame.w / a;
+                    } else {
+                        item.frame.w = item.frame.h * a;
+                    }
+                }
+                self.doc.preview(item);
+            }
             Gesture::Scrub { hash, x, w, duration } => {
                 let cmd = VideoCommand::Seek(video::time_at(board[0], *x, *w, *duration));
                 // Only the newest seek per frame matters.
@@ -757,8 +790,16 @@ impl App {
 
     pub fn pointer_up(&mut self, _button: Button, pos: [f32; 2]) {
         self.cursor = pos;
-        if let Gesture::Move { originals, delta, .. } = std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            self.doc.commit_drag(&originals, delta[0], delta[1]);
+        match std::mem::replace(&mut self.gesture, Gesture::Idle) {
+            Gesture::Move { originals, delta, .. } => {
+                self.doc.commit_drag(&originals, delta[0], delta[1]);
+            }
+            Gesture::Resize { original, .. } => {
+                if let Some(after) = self.doc.board.items.get(&original.id).cloned() {
+                    self.doc.commit_edit(Some(&original), after);
+                }
+            }
+            _ => {}
         }
         self.gesture = Gesture::Idle;
         self.needs_redraw = true;
@@ -812,7 +853,7 @@ impl App {
                     self.end_edit();
                     self.key(key);
                 }
-                Key::SelectAll | Key::Space { .. } => {}
+                Key::SelectAll | Key::Space { .. } | Key::Duplicate | Key::BringToFront | Key::SendToBack => {}
                 Key::Char(c) => {
                     self.text_input(&c.to_string());
                 }
@@ -844,7 +885,83 @@ impl App {
             Key::Space { pressed } => self.space_held = pressed,
             Key::Left | Key::Right | Key::Home | Key::End => {}
             Key::Char(c) => self.video_key(c),
+            Key::Duplicate => self.duplicate(),
+            Key::BringToFront => self.restack(true),
+            Key::SendToBack => self.restack(false),
         }
+    }
+
+    // ---- arranging ---------------------------------------------------------
+
+    /// The single selected item, if its resize handle is under a board point.
+    fn resize_handle_at(&self, board: [f32; 2]) -> Option<BoardItem> {
+        let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] else { return None };
+        let item = self.doc.item(&id)?;
+        let r = HANDLE_PX / self.camera.zoom;
+        let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
+        ((board[0] - hx).abs() <= r && (board[1] - hy).abs() <= r).then(|| item.clone())
+    }
+
+    /// Selected items, ordered back to front.
+    fn selected_items(&self) -> Vec<BoardItem> {
+        let mut items: Vec<BoardItem> = self.selection.iter().filter_map(|id| self.doc.item(id).cloned()).collect();
+        items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
+        items
+    }
+
+    /// Moves the selection above (or below) everything else, keeping its
+    /// own stacking order. One undo step.
+    fn restack(&mut self, front: bool) {
+        let items = self.selected_items();
+        let n = items.len() as f64;
+        let base = if front {
+            self.doc.top_z() + 1.0
+        } else {
+            self.doc.board.live_items().map(|i| i.frame.z).fold(f64::MAX, f64::min).min(0.0) - n
+        };
+        let afters: Vec<BoardItem> = items
+            .into_iter()
+            .enumerate()
+            .map(|(k, mut i)| {
+                i.frame.z = base + k as f64;
+                i
+            })
+            .collect();
+        self.doc.replace(afters);
+    }
+
+    /// Copies of the selection (with group contents), offset a little, selected.
+    fn duplicate(&mut self) {
+        let items = self.drag_set();
+        let ids = self.paste_items(items, [24.0, 24.0]);
+        self.selection = ids.into_iter().collect();
+    }
+
+    /// Adds copies of `items` with new ids, moved by `offset`, on top.
+    fn paste_items(&mut self, mut items: Vec<BoardItem>, offset: [f64; 2]) -> Vec<Uuid> {
+        items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
+        let kinds = items
+            .into_iter()
+            .map(|i| {
+                let mut f = i.frame;
+                f.x += offset[0];
+                f.y += offset[1];
+                (f, i.kind)
+            })
+            .collect();
+        self.needs_redraw = true;
+        self.doc.add(kinds)
+    }
+
+    /// The selection as text for the system clipboard. Other apps see JSON;
+    /// pasting it back into Wall recreates the items.
+    pub fn copy_selection(&self) -> Option<String> {
+        let items = self.drag_set();
+        if items.is_empty() {
+            return None;
+        }
+        let json = serde_json::to_string(&items).ok()?;
+        Some(format!("{CLIPBOARD_TAG}{json}"))
     }
 
     // ---- text editing ------------------------------------------------------
@@ -924,6 +1041,21 @@ impl App {
 
     /// Pasted text: typed at the caret, or a new note at the cursor.
     pub fn paste_text(&mut self, s: &str) {
+        if let Some(json) = s.strip_prefix(CLIPBOARD_TAG).filter(|_| self.editing.is_none()) {
+            if let Ok(items) = serde_json::from_str::<Vec<BoardItem>>(json) {
+                // Centre the pasted items on the cursor.
+                let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for i in &items {
+                    (x0, y0) = (x0.min(i.frame.x), y0.min(i.frame.y));
+                    (x1, y1) = (x1.max(i.frame.x + i.frame.w), y1.max(i.frame.y + i.frame.h));
+                }
+                let at = self.camera.screen_to_board(self.cursor, self.viewport);
+                let offset = [at[0] as f64 - (x0 + x1) / 2.0, at[1] as f64 - (y0 + y1) / 2.0];
+                let ids = self.paste_items(items, offset);
+                self.selection = ids.into_iter().collect();
+                return;
+            }
+        }
         if self.text_input(s) {
             return;
         }
@@ -1035,6 +1167,18 @@ impl App {
         };
         let mut overlays = scene::overlays(&self.doc, &self.selection, marquee, self.camera.zoom);
         overlays.extend(self.scrub_bars());
+        if let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] {
+            if let (Some(item), None) = (self.doc.item(&id), &self.editing) {
+                let px = 1.0 / self.camera.zoom;
+                let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
+                overlays.push(wall_render::BoxInstance {
+                    rect: [hx - 5.0 * px, hy - 5.0 * px, 10.0 * px, 10.0 * px],
+                    fill: [1.0; 4],
+                    stroke: [0.36, 0.62, 1.0, 1.0],
+                    shape: [2.0 * px, 1.5 * px],
+                });
+            }
+        }
         if let Some(r) = caret {
             overlays.push(wall_render::BoxInstance { rect: r, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
         }
@@ -1223,6 +1367,56 @@ mod tests {
         assert!(!a.playable_videos().contains(&off));
         a.camera.zoom = 0.2; // 400 units -> 80 px: too small to play
         assert!(a.playable_videos().is_empty());
+    }
+
+    #[test]
+    fn resize_handle_keeps_picture_shape_and_undoes() {
+        let mut a = app();
+        let f = Frame { x: 100.0, y: 100.0, w: 200.0, h: 100.0, ..Default::default() };
+        let hash = a.add_picture(vec![0; 4], 1, 1);
+        let id = a.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        a.selection = [id].into();
+        a.pointer_down(Button::Primary, [300.0, 200.0], Mods::default());
+        a.pointer_move([500.0, 210.0]);
+        a.pointer_up(Button::Primary, [500.0, 210.0]);
+        let fr = a.doc.item(&id).unwrap().frame;
+        assert_eq!((fr.x, fr.w, fr.h), (100.0, 400.0, 200.0));
+        a.key(Key::Undo);
+        assert_eq!(a.doc.item(&id).unwrap().frame.w, 200.0);
+        // Notes resize freely.
+        let n = add_note(&mut a, 600.0, 100.0);
+        a.selection = [n].into();
+        a.pointer_down(Button::Primary, [700.0, 200.0], Mods::default());
+        a.pointer_move([760.0, 400.0]);
+        a.pointer_up(Button::Primary, [760.0, 400.0]);
+        let fr = a.doc.item(&n).unwrap().frame;
+        assert_eq!((fr.w, fr.h), (160.0, 300.0));
+    }
+
+    #[test]
+    fn restack_duplicate_and_copy_paste() {
+        let mut a = app();
+        let n1 = add_note(&mut a, 100.0, 100.0);
+        let n2 = add_note(&mut a, 120.0, 120.0);
+        a.selection = [n1].into();
+        a.key(Key::BringToFront);
+        assert!(a.doc.item(&n1).unwrap().frame.z > a.doc.item(&n2).unwrap().frame.z);
+        a.key(Key::SendToBack);
+        assert!(a.doc.item(&n1).unwrap().frame.z < a.doc.item(&n2).unwrap().frame.z);
+        a.key(Key::Duplicate);
+        assert_eq!(a.item_count(), 3);
+        let dup = *a.selection.iter().next().unwrap();
+        assert_ne!(dup, n1);
+        assert_eq!(a.doc.item(&dup).unwrap().frame.x, 124.0);
+        let clip = a.copy_selection().unwrap();
+        assert!(clip.starts_with("wall-items:"));
+        a.pointer_move([700.0, 600.0]);
+        a.paste_text(&clip);
+        assert_eq!(a.item_count(), 4);
+        let pasted = a.doc.item(a.selection.iter().next().unwrap()).unwrap().frame;
+        assert_eq!((pasted.x + pasted.w / 2.0, pasted.y + pasted.h / 2.0), (700.0, 600.0));
+        a.key(Key::Undo);
+        assert_eq!(a.item_count(), 3);
     }
 
     #[test]

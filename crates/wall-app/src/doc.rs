@@ -141,6 +141,11 @@ impl Document {
         self.version += 1;
     }
 
+    /// Writes new versions of existing items as one undoable step.
+    pub fn replace(&mut self, afters: Vec<BoardItem>) -> bool {
+        self.commit(afters)
+    }
+
     /// Shows an item edit in progress (typing) without recording it.
     pub fn preview(&mut self, item: BoardItem) {
         self.board.items.insert(item.id, item);

@@ -141,6 +141,9 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
                 "z" | "Z" if cmd => Some(if e.shift_key() { Key::Redo } else { Key::Undo }),
                 "y" | "Y" if cmd => Some(Key::Redo),
                 "a" | "A" if cmd => Some(Key::SelectAll),
+                "d" | "D" if cmd => Some(Key::Duplicate),
+                "]" if cmd => Some(Key::BringToFront),
+                "[" if cmd => Some(Key::SendToBack),
                 _ => None,
             };
             if let Some(key) = key {
@@ -183,6 +186,27 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             }
         });
         document.add_event_listener_with_callback("paste", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
+    // Copy and cut: the selection goes to the clipboard as Wall items.
+    for kind in ["copy", "cut"] {
+        let s = state.clone();
+        let cut = kind == "cut";
+        let cb = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |e: web_sys::ClipboardEvent| {
+            let mut s = s.borrow_mut();
+            if s.app.is_editing() {
+                return;
+            }
+            let (Some(text), Some(data)) = (s.app.copy_selection(), e.clipboard_data()) else { return };
+            if data.set_data("text/plain", &text).is_ok() {
+                e.prevent_default();
+                if cut {
+                    s.app.key(Key::Delete);
+                }
+            }
+        });
+        document.add_event_listener_with_callback(kind, cb.as_ref().unchecked_ref())?;
         cb.forget();
     }
 
