@@ -1861,37 +1861,41 @@ impl App {
         let (size, zoom) = self.export_size(max_side).ok_or_else(|| AppError::Other("the board is empty".into()))?;
         let b = self.board_bounds().unwrap_or_default();
         self.pump_pictures(renderer);
-        // Every picture on the board at full size: ones not loaded yet (or
-        // only as previews) are decoded now and dropped after the export.
+        // Every picture at the size it has in the export: the preview when
+        // that's enough (most pictures on a big board), full size otherwise.
+        // Ones not loaded at that size are decoded now (previews from the
+        // cache) and dropped after the export, one at a time, so a big
+        // board doesn't need all its full-size pictures in memory at once.
         let mut temporary = Vec::new();
         let mut ids: HashMap<ContentHash, ImageId> = HashMap::new();
-        let hashes: Vec<ContentHash> = self
-            .doc
-            .board
-            .live_items()
-            .filter_map(|i| match &i.kind {
-                ItemKind::Media { hash, .. } => Some(hash.clone()),
-                _ => None,
-            })
-            .collect();
-        for hash in hashes {
-            if ids.contains_key(&hash) {
-                continue;
+        let mut shown: HashMap<ContentHash, f32> = HashMap::new();
+        for i in self.doc.board.live_items() {
+            if let ItemKind::Media { hash, crop } = &i.kind {
+                let px = i.frame.w as f32 * zoom / crop.map_or(1.0, |c| c.w).max(1e-3) as f32;
+                let e = shown.entry(hash.clone()).or_insert(0.0);
+                *e = e.max(px);
             }
+        }
+        for (hash, px) in shown {
+            let Some(sc) = self.sidecars.get(&hash) else { continue };
+            let need_full = px > picture_loader::PREVIEW_PX as f32 * 1.1 && sc.width.max(sc.height) > picture_loader::PREVIEW_PX;
             let loaded = match self.pictures.get(&hash) {
                 Some(Picture::Ready(id)) => Some(*id),
+                Some(Picture::Preview(id)) if !need_full => Some(*id),
                 Some(Picture::Preview(_) | Picture::Unloaded) => {
-                    let full = self.library.as_ref().zip(self.sidecars.get(&hash)).and_then(|(lib, sc)| {
+                    let tier = if need_full { picture_loader::Tier::Full } else { picture_loader::Tier::Preview };
+                    let decoded = self.library.as_ref().and_then(|lib| {
                         let job = picture_loader::Job {
                             hash: hash.clone(),
                             media: lib.media_path(&hash, &sc.ext),
                             cache_dir: lib.root().join("cache").join("previews"),
-                            tier: picture_loader::Tier::Full,
+                            tier,
                             want_tiny: false,
                         };
-                        picture_loader::run_job(&job).full
+                        let done = picture_loader::run_job(&job);
+                        done.full.or(done.preview)
                     });
-                    match full.and_then(|(rgba, w, h)| renderer.create_image(&rgba, w, h).ok()) {
+                    match decoded.and_then(|(rgba, w, h)| renderer.create_image(&rgba, w, h).ok()) {
                         Some(id) => {
                             temporary.push(id);
                             Some(id)
