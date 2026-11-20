@@ -159,7 +159,7 @@ pub const MENUS: &[Menu] = &[
             ("Move without snapping", "Ctrl-drag", None),
             ("Draw an arrow", "Alt-drag", None),
             ("Crop a picture", "Ctrl-drag corner", None),
-            ("Colour a note or group", "1 – 7, 0 clears", None),
+            ("Colour a note, group or drawing", "1 – 7, 0 clears", None),
         ],
     },
     Menu {

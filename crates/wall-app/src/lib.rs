@@ -1670,7 +1670,7 @@ impl App {
             .into_iter()
             .filter_map(|mut i| {
                 match &mut i.kind {
-                    ItemKind::Note { color: c, .. } | ItemKind::Group { color: c, .. } => *c = color.clone(),
+                    ItemKind::Note { color: c, .. } | ItemKind::Group { color: c, .. } | ItemKind::Stroke { color: c, .. } => *c = color.clone(),
                     _ => return None,
                 }
                 Some(i)
@@ -2288,9 +2288,9 @@ impl App {
             });
         }
         let items = self.selected_items();
-        let colorable = |k: &ItemKind| matches!(k, ItemKind::Note { .. } | ItemKind::Group { .. });
+        let colorable = |k: &ItemKind| matches!(k, ItemKind::Note { .. } | ItemKind::Group { .. } | ItemKind::Stroke { .. });
         let color_of = |k: &ItemKind| match k {
-            ItemKind::Note { color, .. } | ItemKind::Group { color, .. } => color.clone(),
+            ItemKind::Note { color, .. } | ItemKind::Group { color, .. } | ItemKind::Stroke { color, .. } => color.clone(),
             _ => None,
         };
         if items.len() > 1 {
@@ -2384,8 +2384,9 @@ impl App {
                 info.rows.push(("Colours".into(), colors.iter().map(|c| c.to_uppercase()).collect::<Vec<_>>().join("  ")));
                 info.rows.push(("Copy".into(), "Click a colour on the card".into()));
             }
-            ItemKind::Stroke { points, .. } => {
+            ItemKind::Stroke { points, color, .. } => {
                 info.kind = "Drawing".into();
+                info.color = Some(color.clone());
                 info.rows.push(("Points".into(), points.len().to_string()));
                 info.rows.push(size_row(item.frame.w, item.frame.h));
             }
@@ -4056,6 +4057,10 @@ mod tests {
         assert_eq!(a.tool, toolbar::Tool::Select);
         assert_eq!(a.hit([101.0, 250.0]), Some(stroke.id), "on the line");
         assert_eq!(a.hit([250.0, 150.0]), None, "inside the box but far from the line");
+        a.selection = [stroke.id].into();
+        a.key(Key::Char('5'));
+        assert!(matches!(&a.doc.item(&stroke.id).unwrap().kind, ItemKind::Stroke { color: Some(_), .. }), "number keys colour drawings");
+        a.key(Key::Undo);
         // Moving it keeps the shape; undo takes it away.
         a.key(Key::Undo);
         assert!(a.doc.item(&stroke.id).is_none());
