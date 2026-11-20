@@ -1,7 +1,10 @@
 //! Wall desktop shell (macOS, Windows). Opens a window with an OpenGL context,
 //! hands input to `wall-app`, and draws with `wall-render`.
 //!
-//! Spike: uses desktop OpenGL 3.3 core. ANGLE (GLES on Metal / Direct3D) comes next.
+//! Graphics: ANGLE (EGL + OpenGL ES 3.0 on Direct3D 11 / Metal) when
+//! libEGL and libGLESv2 sit next to the executable, else desktop OpenGL 3.3
+//! core. `WALL_GL=angle|gl` forces one. ANGLE runs the same GLSL ES 3.00 as
+//! the web build.
 //! Test hooks:
 //! - `WALL_SCREENSHOT=path.png` renders a few frames, saves the window and exits.
 //! - `WALL_CAMERA="x,y,zoom"` sets the start view.
@@ -123,7 +126,9 @@ impl ApplicationHandler for Shell {
                 use glow::HasContext;
                 let version = unsafe { gl.get_parameter_string(glow::VERSION) };
                 let gpu = unsafe { gl.get_parameter_string(glow::RENDERER) };
-                println!("wall: OpenGL {version} on {gpu}; {} items", self.app.item_count());
+                // Desktop GL reports "3.3.0 ...", GLES (ANGLE) "OpenGL ES 3.0.0 ...".
+                let api = if version.starts_with("OpenGL") { "" } else { "OpenGL " };
+                println!("wall: {api}{version} on {gpu}; {} items", self.app.item_count());
                 if self.bench {
                     let _ = gfx.surface.set_swap_interval(&gfx.context, SwapInterval::DontWait);
                 }
@@ -278,22 +283,59 @@ impl ApplicationHandler for Shell {
     }
 }
 
+/// Use ANGLE (EGL + OpenGL ES 3.0 on Direct3D / Metal) when its libraries
+/// sit next to the executable, else native desktop OpenGL 3.3.
+/// `WALL_GL=angle` or `WALL_GL=gl` forces one.
+fn want_angle() -> bool {
+    match std::env::var("WALL_GL").ok().as_deref() {
+        Some("angle") => true,
+        Some("gl") => false,
+        _ => {
+            let (egl, gles) = if cfg!(windows) {
+                ("libEGL.dll", "libGLESv2.dll")
+            } else if cfg!(target_os = "macos") {
+                ("libEGL.dylib", "libGLESv2.dylib")
+            } else {
+                return false;
+            };
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|d| d.join(egl).is_file() && d.join(gles).is_file()))
+                .unwrap_or(false)
+        }
+    }
+}
+
 fn create_gfx(event_loop: &ActiveEventLoop) -> Result<Gfx, Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
         .with_title("Wall")
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
-    let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_transparency(false);
+    let angle = want_angle();
+    let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
+    let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_transparency(false).with_api(api);
+    let preference = if angle { glutin_winit::ApiPreference::PreferEgl } else { glutin_winit::ApiPreference::FallbackEgl };
     let (window, config) = DisplayBuilder::new()
+        .with_preference(preference)
         .with_window_attributes(Some(attrs))
         .build(event_loop, template, pick_config)?;
     let window = window.ok_or("no window")?;
     let raw = window.window_handle()?.as_raw();
     let display = config.display();
+    // ANGLE is only in use if EGL actually loaded; otherwise glutin fell back.
+    #[allow(irrefutable_let_patterns)]
+    let gles = angle && matches!(display, glutin::display::Display::Egl(_));
+    if angle && !gles {
+        eprintln!("wall: ANGLE requested but EGL did not load; using desktop OpenGL");
+    }
 
-    let ctx_attrs = ContextAttributesBuilder::new()
-        .with_profile(GlProfile::Core)
-        .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
-        .build(Some(raw));
+    let ctx_attrs = if gles {
+        ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(Some(Version::new(3, 0)))).build(Some(raw))
+    } else {
+        ContextAttributesBuilder::new()
+            .with_profile(GlProfile::Core)
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
+            .build(Some(raw))
+    };
     let not_current = unsafe { display.create_context(&config, &ctx_attrs)? };
 
     let surface_attrs = window.build_surface_attributes(Default::default())?;
@@ -304,7 +346,8 @@ fn create_gfx(event_loop: &ActiveEventLoop) -> Result<Gfx, Box<dyn std::error::E
     let gl = unsafe {
         glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s) as *const _)
     };
-    let renderer = unsafe { Renderer::new(gl, GlslTarget::Core330)? };
+    let target = if gles { GlslTarget::Es300 } else { GlslTarget::Core330 };
+    let renderer = unsafe { Renderer::new(gl, target)? };
     Ok(Gfx { window, surface, context, renderer })
 }
 
