@@ -201,43 +201,11 @@ fn import_files(app: &mut App, videos: &mut video::Videos, batch: &mut Option<Im
             b.ids.push(id);
         }
     }
-    if b.ids.len() > 1 {
-        let sizes: Vec<_> = b.ids.iter().filter_map(|id| app.doc.item(id)).map(|i| (i.frame.w, i.frame.h)).collect();
-        if sizes.len() == b.ids.len() {
-            // Centred where the first one landed (the drop point).
-            let c = *b.centre.get_or_insert_with(|| app.doc.item(&b.ids[0]).map(|i| (i.frame.x + i.frame.w / 2.0, i.frame.y + i.frame.h / 2.0)).unwrap_or_default());
-            let unplaced = grid_layout(&sizes, (0.0, 0.0));
-            let (w, h) = unplaced.iter().fold((0.0f64, 0.0f64), |(w, h), r| (w.max(r[0] + r[2]), h.max(r[1] + r[3])));
-            for (id, r) in b.ids.iter().zip(grid_layout(&sizes, (c.0 - w / 2.0, c.1 - h / 2.0))) {
-                app.set_item_frame(*id, r);
-            }
-        }
-        app.selection = b.ids.iter().copied().collect();
-    }
-    app.doc.join_undo_since(b.undo_from);
+    b.centre = app.arrange_imported(&b.ids, b.undo_from, b.centre);
     b.at = Instant::now();
     *batch = Some(b);
 }
 
-/// Rows of about square-root-of-n items, each row as tall as its tallest,
-/// 24 board units apart, from `origin` (top-left).
-fn grid_layout(sizes: &[(f64, f64)], origin: (f64, f64)) -> Vec<[f64; 4]> {
-    const GAP: f64 = 24.0;
-    let per_row = (sizes.len() as f64).sqrt().ceil().max(1.0) as usize;
-    let mut out = Vec::with_capacity(sizes.len());
-    let mut y = origin.1;
-    for row in sizes.chunks(per_row) {
-        let mut x = origin.0;
-        let mut tallest: f64 = 0.0;
-        for &(w, h) in row {
-            out.push([x, y, w, h]);
-            x += w + GAP;
-            tallest = tallest.max(h);
-        }
-        y += tallest + GAP;
-    }
-    out
-}
 
 /// File > Import: the system's file picker.
 #[cfg(any(windows, target_os = "macos"))]
@@ -885,22 +853,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dropped_pictures_go_in_rows_without_overlapping() {
-        let sizes = [(400.0, 300.0), (200.0, 500.0), (300.0, 300.0), (100.0, 100.0), (640.0, 360.0)];
-        let r = grid_layout(&sizes, (10.0, 20.0));
-        assert_eq!(r[0], [10.0, 20.0, 400.0, 300.0]);
-        assert_eq!(r[1][0], 10.0 + 400.0 + 24.0);
-        // Three to a row; the second row starts under the tallest of the first.
-        assert_eq!(r[3][..2], [10.0, 20.0 + 500.0 + 24.0]);
-        for (i, a) in r.iter().enumerate() {
-            for b in &r[i + 1..] {
-                let apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
-                assert!(apart, "{a:?} overlaps {b:?}");
-            }
-        }
-    }
 
     #[test]
     fn remembers_the_last_library() {

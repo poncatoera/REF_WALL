@@ -24,6 +24,8 @@ use wall_text::Font;
 
 pub use doc::Document;
 mod snapshot;
+mod batch;
+pub use batch::grid_layout;
 pub use snapshot::NewMedia;
 pub use menu::ShellCommand;
 pub use video::{VideoCommand, VideoStatus};

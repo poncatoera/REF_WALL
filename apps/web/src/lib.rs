@@ -224,11 +224,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
             let picked = input.clone();
             let cb = Closure::<dyn FnMut()>::new(move || {
                 let Some(files) = picked.files() else { return };
-                for i in 0..files.length() {
-                    if let Some(f) = files.get(i) {
-                        import_any(s.clone(), f);
-                    }
-                }
+                import_many(s.clone(), (0..files.length()).filter_map(|i| files.get(i)).collect());
             });
             input.set_onchange(Some(cb.as_ref().unchecked_ref()));
             cb.forget();
@@ -544,11 +540,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             e.prevent_default();
             s.borrow_mut().app.pointer_move([e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]);
             let Some(files) = e.data_transfer().and_then(|d| d.files()) else { return };
-            for i in 0..files.length() {
-                if let Some(file) = files.get(i) {
-                    import_any(s.clone(), file);
-                }
-            }
+            import_many(s.clone(), (0..files.length()).filter_map(|i| files.get(i)).collect());
         });
         canvas.add_event_listener_with_callback("drop", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -669,6 +661,32 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     }));
     request_frame(frame2.borrow().as_ref().unwrap());
     Ok(ret)
+}
+
+/// Files dropped or picked together. Pictures become one undo step, laid
+/// out in rows where they landed; videos and a backup file go their own way.
+fn import_many(s: Rc<RefCell<State>>, files: Vec<web_sys::File>) {
+    let (pictures, others): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| !f.type_().starts_with("video/") && !f.name().to_lowercase().ends_with(".json"));
+    for f in others {
+        import_any(s.clone(), f);
+    }
+    match pictures.len() {
+        0 => {}
+        1 => import_file(s, pictures.into_iter().next().unwrap()),
+        _ => wasm_bindgen_futures::spawn_local(async move {
+            let from = s.borrow().app.doc.undo_depth();
+            let mut ids = Vec::new();
+            for file in pictures {
+                let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { continue };
+                let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                match s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), js_sys::Date::now() as u64) {
+                    Ok(id) => ids.push(id),
+                    Err(err) => web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into()),
+                }
+            }
+            s.borrow_mut().app.arrange_imported(&ids, from, None);
+        }),
+    }
 }
 
 fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
