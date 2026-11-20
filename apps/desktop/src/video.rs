@@ -17,12 +17,18 @@ pub fn is_video(path: &Path) -> bool {
     matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi")
 }
 
-/// `WALL_FFMPEG` or `ffmpeg` on PATH, if it runs.
+/// `WALL_FFMPEG`, else an ffmpeg next to the Wall executable (the packaged
+/// app ships one), else `ffmpeg` on PATH, if it runs.
 pub fn ffmpeg() -> Option<&'static str> {
     static FOUND: OnceLock<Option<String>> = OnceLock::new();
     FOUND
         .get_or_init(|| {
-            let exe = std::env::var("WALL_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+            let bundled = std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })))
+                .filter(|p| p.is_file())
+                .map(|p| p.to_string_lossy().into_owned());
+            let exe = std::env::var("WALL_FFMPEG").ok().or(bundled).unwrap_or_else(|| "ffmpeg".into());
             let ok = command(&exe).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
             if !ok {
                 eprintln!("wall: ffmpeg not found (set WALL_FFMPEG); videos will not play");

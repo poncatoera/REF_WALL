@@ -1,3 +1,4 @@
 /target
 *.wall/cache/
 /apps/web/www/pkg
+/dist
