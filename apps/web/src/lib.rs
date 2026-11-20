@@ -13,7 +13,7 @@ use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingCon
 
 struct State {
     /// Playing `<video>` elements and the textures their frames go to.
-    videos: Vec<(web_sys::HtmlVideoElement, wall_render::ImageId)>,
+    videos: Vec<(web_sys::HtmlVideoElement, wall_app::ContentHash, wall_render::ImageId)>,
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
@@ -144,10 +144,14 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             if let Some(key) = key {
                 e.prevent_default();
                 s.app.key(key);
-            } else if down && editing && !cmd && k.chars().count() == 1 {
+            } else if down && !cmd && k.chars().count() == 1 {
                 // A printable key (the browser gives its character in `key`).
-                e.prevent_default();
-                s.app.text_input(&k);
+                if editing {
+                    e.prevent_default();
+                    s.app.text_input(&k);
+                } else if let Some(c) = k.chars().next() {
+                    s.app.key(Key::Char(c));
+                }
             }
         });
         document.add_event_listener_with_callback(kind, cb.as_ref().unchecked_ref())?;
@@ -212,7 +216,25 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             if !s.videos.is_empty() {
                 let State { videos, renderer, app, .. } = &mut *s;
                 use glow::HasContext;
-                for (v, tex) in videos.iter() {
+                for (hash, cmd) in app.take_video_commands() {
+                    let Some((v, _, _)) = videos.iter().find(|(_, h, _)| *h == hash) else { continue };
+                    match cmd {
+                        wall_app::VideoCommand::Play => drop(v.play()),
+                        wall_app::VideoCommand::Pause => v.pause().unwrap_or(()),
+                        wall_app::VideoCommand::Seek(t) => v.set_current_time(t),
+                        wall_app::VideoCommand::Step(n) => {
+                            v.pause().unwrap_or(());
+                            // The browser doesn't expose the frame rate; assume 30.
+                            v.set_current_time((v.current_time() + n as f64 / 30.0).max(0.0));
+                        }
+                        wall_app::VideoCommand::Speed(r) => v.set_playback_rate(r as f64),
+                    }
+                }
+                for (v, hash, _) in videos.iter() {
+                    let status = wall_app::VideoStatus { time: v.current_time(), duration: v.duration(), playing: !v.paused(), speed: v.playback_rate() as f32 };
+                    app.set_video_status(hash.clone(), status);
+                }
+                for (v, _, tex) in videos.iter() {
                     if v.ready_state() >= 2 {
                         unsafe {
                             let gl = renderer.gl();
@@ -285,9 +307,9 @@ async fn import_video(s: Rc<RefCell<State>>, file: &web_sys::File) -> Result<(),
     let id = st.app.import_video(&bytes, ext, meta, Some(&file.name()), js_sys::Date::now() as u64).map_err(|e| e.to_string())?;
     let hash = st.app.media_hash(&id).ok_or("video item missing")?;
     let tex = st.renderer.create_video_texture(meta.width, meta.height).map_err(|e| e.to_string())?;
-    st.app.attach_texture(hash, tex);
+    st.app.attach_texture(hash.clone(), tex);
     let _ = video.play();
-    st.videos.push((video, tex));
+    st.videos.push((video, hash, tex));
     Ok(())
 }
 

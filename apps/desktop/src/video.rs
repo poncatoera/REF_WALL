@@ -140,61 +140,170 @@ pub fn playback_size(w: u32, h: u32) -> (u32, u32) {
     (even(w as f32 * scale), even(h as f32 * scale))
 }
 
-/// Plays a file on a loop at its own frame rate, sending RGBA frames.
+/// A decoded frame: generation (bumped on every seek), time in seconds, RGBA.
+type Frame = (u64, f64, Vec<u8>);
+
+/// Plays a file on a loop. A decoder thread runs ffmpeg as fast as the
+/// channel lets it; this side paces frames by the clock, which gives pause,
+/// speed and frame steps without restarting ffmpeg. Seeks restart it at the
+/// new time.
 pub struct Player {
     pub width: u32,
     pub height: u32,
-    frames: Receiver<Vec<u8>>,
+    frames: Receiver<Frame>,
+    seek_tx: mpsc::Sender<(u64, f64)>,
+    gen: u64,
+    /// Media time shown, in seconds.
+    clock: f64,
+    duration: f64,
+    fps: f64,
+    playing: bool,
+    speed: f32,
+    pending: Option<Frame>,
+    last_tick: std::time::Instant,
 }
 
 impl Player {
-    pub fn start(path: PathBuf, width: u32, height: u32) -> Option<Self> {
+    pub fn start(path: PathBuf, width: u32, height: u32, duration: f64, fps: f64) -> Option<Self> {
         let ffmpeg = ffmpeg()?.to_owned();
         let (w, h) = playback_size(width, height);
-        let (tx, rx) = mpsc::sync_channel(2);
-        std::thread::spawn(move || play(&ffmpeg, &path, w, h, tx));
-        Some(Self { width: w, height: h, frames: rx })
+        let (tx, rx) = mpsc::sync_channel(3);
+        let (seek_tx, seek_rx) = mpsc::channel();
+        std::thread::spawn(move || decode(&ffmpeg, &path, w, h, fps, tx, seek_rx));
+        Some(Self {
+            width: w,
+            height: h,
+            frames: rx,
+            seek_tx,
+            gen: 0,
+            clock: 0.0,
+            duration,
+            fps,
+            playing: true,
+            speed: 1.0,
+            pending: None,
+            last_tick: std::time::Instant::now(),
+        })
     }
 
-    /// The newest decoded frame, if one arrived since the last call.
-    pub fn latest(&self) -> Option<Vec<u8>> {
-        let mut last = None;
-        while let Ok(f) = self.frames.try_recv() {
-            last = Some(f);
+    pub fn command(&mut self, cmd: wall_app::VideoCommand) {
+        use wall_app::VideoCommand as C;
+        match cmd {
+            C::Play => self.playing = true,
+            C::Pause => self.playing = false,
+            C::Speed(s) => self.speed = s,
+            C::Seek(t) => self.seek(t),
+            C::Step(n) => {
+                self.playing = false;
+                let t = self.clock + n as f64 / self.fps;
+                if n < 0 { self.seek(t) } else { self.clock = t.min(self.duration) }
+            }
         }
-        last
+    }
+
+    fn seek(&mut self, t: f64) {
+        let t = t.clamp(0.0, self.duration.max(0.0));
+        self.gen += 1;
+        self.clock = t;
+        self.pending = None;
+        let _ = self.seek_tx.send((self.gen, t));
+    }
+
+    pub fn status(&self) -> wall_app::VideoStatus {
+        wall_app::VideoStatus { time: self.clock, duration: self.duration, playing: self.playing, speed: self.speed }
+    }
+
+    /// Advances the clock and returns the frame to show now, if it changed.
+    pub fn tick(&mut self) -> Option<Vec<u8>> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_tick).as_secs_f64();
+        self.last_tick = now;
+        if self.playing {
+            self.clock += dt * self.speed as f64;
+            if self.duration > 0.0 && self.clock >= self.duration {
+                self.clock %= self.duration;
+            }
+        }
+        let half = 0.5 / self.fps;
+        let mut show = None;
+        loop {
+            let Some(frame) = self.pending.take().or_else(|| self.frames.try_recv().ok()) else { break };
+            if frame.0 != self.gen {
+                continue; // from before a seek
+            }
+            if frame.1 > self.clock + 0.5 {
+                continue; // from before the loop wrapped
+            }
+            if frame.1 > self.clock + half {
+                self.pending = Some(frame);
+                break;
+            }
+            show = Some(frame.2);
+        }
+        show
     }
 }
 
-fn play(ffmpeg: &str, path: &Path, w: u32, h: u32, tx: SyncSender<Vec<u8>>) {
-    let child = command(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i"])
-        .arg(path)
-        .args(["-an", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("wall: could not play {}: {e}", path.display());
-            return;
+fn decode(ffmpeg: &str, path: &Path, w: u32, h: u32, fps: f64, tx: SyncSender<Frame>, seeks: Receiver<(u64, f64)>) {
+    let (mut gen, mut start) = (0u64, 0.0f64);
+    'outer: loop {
+        let child = command(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"])
+            .arg(path)
+            .args(["-an", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("wall: could not play {}: {e}", path.display());
+                return;
+            }
+        };
+        let Some(mut out) = child.stdout.take() else { return };
+        let size = (w * h * 4) as usize;
+        let mut n = 0u64;
+        let mut restart = None;
+        loop {
+            if let Some(s) = seeks.try_iter().last() {
+                restart = Some(s);
+                break;
+            }
+            let mut frame = vec![0u8; size];
+            if out.read_exact(&mut frame).is_err() {
+                break; // end of clip: loop from the start
+            }
+            let t = start + n as f64 / fps;
+            n += 1;
+            // Blocks while the player is paused or ahead; wake up for seeks.
+            let mut item = (gen, t, frame);
+            loop {
+                match tx.try_send(item) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(back)) => {
+                        if let Some(s) = seeks.try_iter().last() {
+                            restart = Some(s);
+                            break;
+                        }
+                        item = back;
+                        std::thread::sleep(std::time::Duration::from_millis(4));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break 'outer;
+                    }
+                }
+            }
+            if restart.is_some() {
+                break;
+            }
         }
-    };
-    let Some(mut out) = child.stdout.take() else { return };
-    let size = (w * h * 4) as usize;
-    loop {
-        let mut frame = vec![0u8; size];
-        if out.read_exact(&mut frame).is_err() {
-            break;
-        }
-        match tx.try_send(frame) {
-            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
-        }
+        let _ = child.kill();
+        let _ = child.wait();
+        (gen, start) = restart.unwrap_or((gen, 0.0));
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -205,6 +314,57 @@ mod tests {
     fn playback_size_caps_width_and_keeps_even() {
         assert_eq!(playback_size(1920, 1080), (1280, 720));
         assert_eq!(playback_size(641, 361), (640, 360));
+    }
+
+    /// Needs ffmpeg; skipped without it.
+    #[test]
+    fn player_paces_pauses_steps_and_seeks() {
+        if ffmpeg().is_none() {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("c.mp4");
+        let ok = command(ffmpeg().unwrap())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-t", "4", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let p = probe(&clip).unwrap();
+        assert_eq!((p.probe.width, p.probe.height, p.probe.duration_ms), (160, 90, 4000));
+        let mut player = Player::start(clip, 160, 90, 4.0, 25.0).unwrap();
+        let wait = |player: &mut Player, ms: u64| {
+            let mut frames = 0;
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                if player.tick().is_some() {
+                    frames += 1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames
+        };
+        let shown = wait(&mut player, 600);
+        assert!(shown > 5, "frames shown while playing: {shown}");
+        let t = player.status().time;
+        assert!((0.4..1.0).contains(&t), "clock {t}");
+        player.command(wall_app::VideoCommand::Pause);
+        let paused_at = player.status().time;
+        wait(&mut player, 200);
+        assert_eq!(player.status().time, paused_at);
+        player.command(wall_app::VideoCommand::Step(1));
+        assert!((player.status().time - paused_at - 0.04).abs() < 1e-6);
+        player.command(wall_app::VideoCommand::Seek(3.0));
+        let after_seek = wait(&mut player, 800);
+        assert!(after_seek >= 1, "a frame after seeking");
+        assert_eq!(player.status().time, 3.0);
+        player.command(wall_app::VideoCommand::Speed(2.0));
+        player.command(wall_app::VideoCommand::Play);
+        wait(&mut player, 600);
+        // 3.0 + ~1.2 s at 2x wraps past 4.0 back near 0.2.
+        let t = player.status().time;
+        assert!(t < 1.0, "wrapped clock {t}");
     }
 
     #[test]
@@ -218,7 +378,7 @@ mod tests {
 #[derive(Default)]
 pub struct Videos {
     jobs: Vec<Receiver<(String, Result<Prepared, String>)>>,
-    players: Vec<(Player, wall_render::ImageId)>,
+    players: Vec<(wall_app::ContentHash, Player, wall_render::ImageId)>,
     started: std::collections::HashSet<wall_app::ContentHash>,
     /// Files for videos imported without a library open.
     paths: std::collections::HashMap<wall_app::ContentHash, PathBuf>,
@@ -276,21 +436,28 @@ impl Videos {
                 continue;
             }
             let Some(path) = src.path.clone().filter(|p| p.is_file()).or_else(|| self.paths.get(&src.hash).cloned()) else { continue };
-            let Some(player) = Player::start(path, src.width, src.height) else { continue };
+            let (duration, fps) = probe(&path).map_or((0.0, 30.0), |p| (p.probe.duration_ms as f64 / 1000.0, p.fps.unwrap_or(30.0) as f64));
+            let Some(player) = Player::start(path, src.width, src.height, duration, fps) else { continue };
             match renderer.create_video_texture(player.width, player.height) {
                 Ok(tex) => {
-                    app.attach_texture(src.hash, tex);
-                    self.players.push((player, tex));
+                    app.attach_texture(src.hash.clone(), tex);
+                    self.players.push((src.hash, player, tex));
                 }
                 Err(e) => eprintln!("wall: video texture failed: {e}"),
             }
         }
 
-        for (player, tex) in &self.players {
-            if let Some(frame) = player.latest() {
+        for (hash, cmd) in app.take_video_commands() {
+            if let Some((_, p, _)) = self.players.iter_mut().find(|(h, ..)| *h == hash) {
+                p.command(cmd);
+            }
+        }
+        for (hash, player, tex) in &mut self.players {
+            if let Some(frame) = player.tick() {
                 renderer.update_image(*tex, &frame, player.width, player.height);
                 app.needs_redraw = true;
             }
+            app.set_video_status(hash.clone(), player.status());
         }
     }
 }

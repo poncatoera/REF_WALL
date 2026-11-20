@@ -210,6 +210,11 @@ impl ApplicationHandler for Shell {
                     if let Some(text) = event.text.as_deref() {
                         self.app.text_input(text);
                     }
+                } else if pressed && !m.command {
+                    let mut chars = event.text.as_deref().unwrap_or("").chars();
+                    if let (Some(c), None) = (chars.next(), chars.next()) {
+                        self.app.key(Key::Char(c));
+                    }
                 }
             }
             WindowEvent::DroppedFile(path) if video::is_video(&path) => self.videos.import(path),

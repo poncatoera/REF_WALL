@@ -5,6 +5,7 @@
 
 pub mod doc;
 mod scene;
+pub mod video;
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -14,6 +15,7 @@ use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
 pub use doc::Document;
+pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
 use scene::Scene;
 
@@ -87,6 +89,9 @@ pub enum Key {
     Right,
     Home,
     End,
+    /// A plain character key with no Ctrl/Cmd, while not typing. Video
+    /// shortcuts: K play/pause, `,` `.` frame step, `[` `]` speed.
+    Char(char),
     Undo,
     Redo,
     SelectAll,
@@ -101,6 +106,8 @@ enum Gesture {
     Pan,
     Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2] },
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
+    /// Dragging along a video's scrub strip.
+    Scrub { hash: ContentHash, x: f32, w: f32, duration: f64 },
 }
 
 /// Text being typed into an item. The item shows the live text through
@@ -183,6 +190,8 @@ pub struct App {
     now_ms: u64,
     /// Video hashes and their file extension and size.
     videos: HashMap<ContentHash, (String, u32, u32)>,
+    video_status: HashMap<ContentHash, VideoStatus>,
+    video_commands: Vec<(ContentHash, VideoCommand)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -219,6 +228,8 @@ impl App {
             last_click: None,
             now_ms: 0,
             videos: HashMap::new(),
+            video_status: HashMap::new(),
+            video_commands: Vec::new(),
         }
     }
 
@@ -402,6 +413,99 @@ impl App {
         }
     }
 
+    // ---- video controls ----------------------------------------------------
+
+    /// The video hash of an item, if it is a video.
+    fn video_of(&self, id: &Uuid) -> Option<ContentHash> {
+        self.media_hash(id).filter(|h| self.videos.contains_key(h))
+    }
+
+    /// Selected videos.
+    fn selected_videos(&self) -> Vec<ContentHash> {
+        self.selection.iter().filter_map(|id| self.video_of(id)).collect()
+    }
+
+    /// If a board point is on the scrub strip of a selected video: its hash,
+    /// frame x, frame width and duration.
+    fn scrub_target(&self, id: Uuid, board: [f32; 2]) -> Option<(ContentHash, f32, f32, f64)> {
+        if !self.selection.contains(&id) {
+            return None;
+        }
+        let hash = self.video_of(&id)?;
+        let status = self.video_status.get(&hash)?;
+        let f = self.doc.item(&id)?.frame;
+        let strip = video::SCRUB_PX / self.camera.zoom;
+        let bottom = (f.y + f.h) as f32;
+        (board[1] >= bottom - strip && status.duration > 0.0).then_some((hash, f.x as f32, f.w as f32, status.duration))
+    }
+
+    fn toggle_play(&mut self, hash: ContentHash) {
+        let playing = self.video_status.get(&hash).is_none_or(|s| s.playing);
+        self.video_commands.push((hash, if playing { VideoCommand::Pause } else { VideoCommand::Play }));
+        self.needs_redraw = true;
+    }
+
+    fn video_key(&mut self, c: char) {
+        for hash in self.selected_videos() {
+            let speed = self.video_status.get(&hash).map_or(1.0, |s| s.speed);
+            let cmd = match c.to_ascii_lowercase() {
+                'k' => {
+                    self.toggle_play(hash);
+                    continue;
+                }
+                ',' => VideoCommand::Step(-1),
+                '.' => VideoCommand::Step(1),
+                '[' => VideoCommand::Speed(video::next_speed(speed, false)),
+                ']' => VideoCommand::Speed(video::next_speed(speed, true)),
+                _ => continue,
+            };
+            self.video_commands.push((hash, cmd));
+        }
+    }
+
+    /// Commands for the shell's players, oldest first.
+    pub fn take_video_commands(&mut self) -> Vec<(ContentHash, VideoCommand)> {
+        std::mem::take(&mut self.video_commands)
+    }
+
+    /// A player's state, reported by the shell each frame.
+    pub fn set_video_status(&mut self, hash: ContentHash, status: VideoStatus) {
+        if self.video_status.get(&hash) != Some(&status) {
+            self.video_status.insert(hash, status);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Scrub bars for selected videos: track, played part and playhead.
+    fn scrub_bars(&self) -> Vec<wall_render::BoxInstance> {
+        let px = 1.0 / self.camera.zoom;
+        let mut out = Vec::new();
+        for id in &self.selection {
+            let (Some(hash), Some(item)) = (self.video_of(id), self.doc.item(id)) else { continue };
+            let Some(st) = self.video_status.get(&hash) else { continue };
+            let f = item.frame;
+            let (x, w) = (f.x as f32 + 8.0 * px, f.w as f32 - 16.0 * px);
+            let y = (f.y + f.h) as f32 - 12.0 * px;
+            let t = if st.duration > 0.0 { (st.time / st.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+            let h = 4.0 * px;
+            out.push(wall_render::BoxInstance { rect: [x, y, w, h], fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
+            out.push(wall_render::BoxInstance { rect: [x, y, w * t, h], fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
+            out.push(wall_render::BoxInstance { rect: [x + w * t - 5.0 * px, y - 3.0 * px, 10.0 * px, 10.0 * px], fill: [1.0; 4], stroke: [0.0; 4], shape: [5.0 * px, 0.0] });
+            if !st.playing {
+                // Pause sign at the top-left corner.
+                for dx in [0.0, 9.0] {
+                    out.push(wall_render::BoxInstance {
+                        rect: [f.x as f32 + (12.0 + dx) * px, f.y as f32 + 12.0 * px, 5.0 * px, 18.0 * px],
+                        fill: [1.0, 1.0, 1.0, 0.9],
+                        stroke: [0.0, 0.0, 0.0, 0.5],
+                        shape: [1.5 * px, px],
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// Gives a picture or video a texture the shell created and fills.
     pub fn attach_texture(&mut self, hash: ContentHash, id: ImageId) {
         self.pictures.insert(hash, Picture::Ready(id));
@@ -527,7 +631,18 @@ impl App {
             }
             self.end_edit();
         }
+        if let Some((hash, x, w, duration)) = hit.and_then(|id| self.scrub_target(id, board)) {
+            self.selection = [hit.unwrap()].into();
+            self.video_commands.push((hash.clone(), VideoCommand::Seek(video::time_at(board[0], x, w, duration))));
+            self.gesture = Gesture::Scrub { hash, x, w, duration };
+            return;
+        }
         if double && !mods.shift {
+            if let Some(hash) = hit.and_then(|id| self.video_of(&id)) {
+                self.toggle_play(hash);
+                self.last_click = None;
+                return;
+            }
             // Inside a group, only the header edits its name; the rest of
             // the group is space for new notes.
             let in_group_body = hit
@@ -582,6 +697,12 @@ impl App {
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
             Gesture::Idle => return,
+            Gesture::Scrub { hash, x, w, duration } => {
+                let cmd = VideoCommand::Seek(video::time_at(board[0], *x, *w, *duration));
+                // Only the newest seek per frame matters.
+                self.video_commands.retain(|(h, c)| !(h == hash && matches!(c, VideoCommand::Seek(_))));
+                self.video_commands.push((hash.clone(), cmd));
+            }
             Gesture::Pan => self.camera.pan(pos[0] - last[0], pos[1] - last[1]),
             Gesture::Move { start, originals, delta } => {
                 *delta = [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64];
@@ -657,6 +778,9 @@ impl App {
                     self.key(key);
                 }
                 Key::SelectAll | Key::Space { .. } => {}
+                Key::Char(c) => {
+                    self.text_input(&c.to_string());
+                }
             }
             return;
         }
@@ -684,6 +808,7 @@ impl App {
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
             Key::Left | Key::Right | Key::Home | Key::End => {}
+            Key::Char(c) => self.video_key(c),
         }
     }
 
@@ -874,6 +999,7 @@ impl App {
             _ => None,
         };
         let mut overlays = scene::overlays(&self.doc, &self.selection, marquee, self.camera.zoom);
+        overlays.extend(self.scrub_bars());
         if let Some(r) = caret {
             overlays.push(wall_render::BoxInstance { rect: r, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
         }
@@ -1017,6 +1143,36 @@ mod tests {
         assert_eq!(b.video_sources(), src);
         let big = vec![0u8; 20_000_001];
         assert!(matches!(a.import_video(&big, "mp4", meta, None, 6), Err(AppError::VideoTooLarge(_))));
+    }
+
+    #[test]
+    fn video_shortcuts_and_scrubbing_queue_commands() {
+        let mut a = app();
+        let meta = VideoMeta { width: 400, height: 200, duration_ms: 8000, fps: Some(25.0) };
+        a.pointer_move([500.0, 400.0]);
+        let id = a.import_video(b"clip", "mp4", meta, None, 1).unwrap();
+        let hash = a.media_hash(&id).unwrap();
+        a.set_video_status(hash.clone(), VideoStatus { time: 1.0, duration: 8.0, playing: true, speed: 1.0 });
+        a.key(Key::Char('k'));
+        a.key(Key::Char(']'));
+        a.key(Key::Char('.'));
+        let cmds: Vec<VideoCommand> = a.take_video_commands().into_iter().map(|(_, c)| c).collect();
+        assert_eq!(cmds, vec![VideoCommand::Pause, VideoCommand::Speed(1.5), VideoCommand::Step(1)]);
+        // The video spans x 300..700, y 300..500. Drag along its bottom strip.
+        a.set_time(10_000);
+        a.pointer_down(Button::Primary, [400.0, 495.0], Mods::default());
+        a.pointer_move([450.0, 495.0]);
+        a.pointer_move([500.0, 495.0]);
+        a.pointer_up(Button::Primary, [500.0, 495.0]);
+        let cmds: Vec<VideoCommand> = a.take_video_commands().into_iter().map(|(_, c)| c).collect();
+        // Seeks not yet taken by the player collapse into the newest.
+        assert_eq!(cmds, vec![VideoCommand::Seek(4.0)]);
+        assert_eq!(a.doc.item(&id).unwrap().frame.x, 300.0, "scrubbing must not move the video");
+        // Double-click in the middle toggles playback.
+        a.set_video_status(hash, VideoStatus { time: 4.0, duration: 8.0, playing: false, speed: 1.5 });
+        click(&mut a, 20_000, [500.0, 350.0]);
+        click(&mut a, 20_100, [500.0, 350.0]);
+        assert_eq!(a.take_video_commands().last().map(|(_, c)| *c), Some(VideoCommand::Play));
     }
 
     #[test]
