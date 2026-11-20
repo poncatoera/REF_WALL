@@ -9,7 +9,7 @@ mod scene;
 use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
-use wall_format::{Board, BoardItem, ContentHash, Frame, ItemKind};
+use wall_format::{Board, BoardItem, ContentHash, Frame, ItemKind, ItemSidecar, Library, MediaKind};
 use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
@@ -112,6 +112,18 @@ pub struct App {
     space_held: bool,
     /// Set when the next frame must be drawn.
     pub needs_redraw: bool,
+    library: Option<Library>,
+    saved_version: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Format(#[from] wall_format::Error),
+    #[error(transparent)]
+    Media(#[from] wall_media::MediaError),
+    #[error("could not decode image: {0}")]
+    Decode(#[from] image::ImageError),
 }
 
 const BACKGROUND: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
@@ -130,7 +142,127 @@ impl App {
             viewport: [1.0, 1.0],
             space_held: false,
             needs_redraw: true,
+            library: None,
+            saved_version: 0,
         }
+    }
+
+    /// Opens (or creates) a `.wall` library and shows its first board,
+    /// creating "Board 1" in an empty library.
+    pub fn open_library(root: &std::path::Path, device: &str, now_ms: u64) -> Result<Self, AppError> {
+        let library = if root.join("wall.json").is_file() {
+            Library::open(root)?
+        } else {
+            Library::create(root, root.file_stem().and_then(|s| s.to_str()).unwrap_or("Wall"), now_ms)?
+        };
+        let mut boards = Vec::new();
+        for id in library.board_ids()? {
+            boards.push(library.read_board(id)?);
+        }
+        boards.sort_by_key(|b| b.created_ms);
+        let board = match boards.into_iter().next() {
+            Some(b) => b,
+            None => {
+                let b = Board::new("Board 1", now_ms);
+                library.write_board(&b)?;
+                b
+            }
+        };
+        let mut app = Self::new(board, device);
+        app.load_pictures(&library);
+        app.library = Some(library);
+        app.fit_view();
+        Ok(app)
+    }
+
+    /// Decodes every picture the board uses that isn't loaded yet.
+    fn load_pictures(&mut self, library: &Library) {
+        let hashes: Vec<ContentHash> = self
+            .doc
+            .board
+            .live_items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media { hash, .. } => Some(hash.clone()),
+                _ => None,
+            })
+            .filter(|h| !self.pictures.contains_key(h))
+            .collect();
+        for hash in hashes {
+            let loaded = library.read_sidecar(&hash).ok().and_then(|sc| {
+                let bytes = std::fs::read(library.media_path(&hash, &sc.ext)).ok()?;
+                image::load_from_memory(&bytes).ok()
+            });
+            match loaded {
+                Some(img) => {
+                    let img = img.to_rgba8();
+                    let (w, h) = img.dimensions();
+                    self.pictures.insert(hash, Picture::Pending { rgba: img.into_raw(), width: w, height: h });
+                }
+                None => eprintln!("wall: picture {hash} is missing from the library"),
+            }
+        }
+    }
+
+    /// Centres the view on everything on the board.
+    pub fn fit_view(&mut self) {
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for i in self.doc.board.live_items() {
+            b = [b[0].min(i.frame.x), b[1].min(i.frame.y), b[2].max(i.frame.x + i.frame.w), b[3].max(i.frame.y + i.frame.h)];
+        }
+        if b[0] > b[2] {
+            self.camera = Camera { center: [0.0, 0.0], zoom: 1.0 };
+            return;
+        }
+        let (w, h) = ((b[2] - b[0]) as f32, (b[3] - b[1]) as f32);
+        let zoom = (self.viewport[0] / (w + 80.0)).min(self.viewport[1] / (h + 80.0)).clamp(MIN_ZOOM, 1.0);
+        self.camera = Camera { center: [((b[0] + b[2]) / 2.0) as f32, ((b[1] + b[3]) / 2.0) as f32], zoom };
+        self.needs_redraw = true;
+    }
+
+    /// Imports an image file's bytes: applies the 2048 px rule, stores it in
+    /// the library (if one is open), and drops it at the cursor.
+    pub fn import_image_bytes(&mut self, bytes: &[u8], source: Option<&str>, now_ms: u64) -> Result<Uuid, AppError> {
+        let prepared = wall_media::prepare_image(bytes, &wall_media::Limits::default())?;
+        let rgba = image::load_from_memory(&prepared.bytes)?.to_rgba8();
+        let hash = ContentHash::of(&prepared.bytes);
+        if let Some(lib) = &self.library {
+            lib.import_bytes(&prepared.bytes, prepared.ext)?;
+            if !lib.has_media(&hash) {
+                lib.write_sidecar(&ItemSidecar {
+                    hash: hash.clone(),
+                    kind: MediaKind::Image,
+                    ext: prepared.ext.into(),
+                    width: prepared.width,
+                    height: prepared.height,
+                    bytes: prepared.bytes.len() as u64,
+                    duration_ms: None,
+                    fps: None,
+                    added_ms: now_ms,
+                    title: source.map(|s| s.to_owned()),
+                    source_url: None,
+                    tags: Vec::new(),
+                    auto_tags: Vec::new(),
+                    colors: Vec::new(),
+                    original: prepared.original.clone(),
+                    extra: Default::default(),
+                })?;
+            }
+        }
+        let (w, h) = rgba.dimensions();
+        self.pictures.entry(hash.clone()).or_insert(Picture::Pending { rgba: rgba.into_raw(), width: w, height: h });
+        Ok(self.place_media(hash, w, h))
+    }
+
+    /// Writes the board to the library if it changed and no drag is in
+    /// progress. Returns true when it saved.
+    pub fn save_if_dirty(&mut self) -> Result<bool, AppError> {
+        let Some(lib) = &self.library else { return Ok(false) };
+        if self.saved_version == self.doc.version || !matches!(self.gesture, Gesture::Idle) {
+            return Ok(false);
+        }
+        lib.write_board(&self.doc.board)?;
+        self.saved_version = self.doc.version;
+        Ok(true)
     }
 
     /// A demo board: a group of pictures, a group of `notes` notes, a title.
@@ -177,6 +309,10 @@ impl App {
     /// Drops an image on the board, centred at the cursor, selected.
     pub fn place_picture(&mut self, rgba: Vec<u8>, width: u32, height: u32) -> Uuid {
         let hash = self.add_picture(rgba, width, height);
+        self.place_media(hash, width, height)
+    }
+
+    fn place_media(&mut self, hash: ContentHash, width: u32, height: u32) -> Uuid {
         let at = self.camera.screen_to_board(self.cursor, self.viewport);
         let (w, h) = (width as f64, height as f64);
         let frame = Frame { x: at[0] as f64 - w / 2.0, y: at[1] as f64 - h / 2.0, w, h, ..Default::default() };
@@ -371,6 +507,20 @@ impl App {
         let view = ViewUniform::new(self.camera.center, self.camera.zoom, self.viewport);
         self.scene.draw(renderer, &view, &textures);
         renderer.draw_boxes(&view, &overlays);
+        if self.doc.board.live_items().next().is_none() {
+            // Empty board: a hint in the middle of the screen, constant size.
+            let mut hint = Vec::new();
+            let size = 18.0 / self.camera.zoom;
+            let text = "Drop images here";
+            let width = self.font.layout_line(text).width * size;
+            let c = self.camera.center;
+            scene::add_text(&mut self.font, &mut hint, text, [c[0] - width / 2.0, c[1]], size, [0.45, 0.46, 0.5, 1.0]);
+            if self.font.atlas.dirty {
+                renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+                self.font.atlas.dirty = false;
+            }
+            renderer.draw_glyphs(&view, &hint);
+        }
         self.needs_redraw = false;
     }
 }
@@ -508,6 +658,36 @@ mod tests {
         let f = a.doc.item(&id).unwrap().frame;
         assert_eq!((f.x, f.y, f.w, f.h), (280.0, 190.0, 40.0, 20.0));
         assert_eq!(a.selection, [id].into());
+    }
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 90, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn library_round_trip_import_save_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Refs.wall");
+        let mut a = App::open_library(&root, "dev", 1).unwrap();
+        a.resize([1000.0, 800.0]);
+        assert_eq!(a.doc.board.name, "Board 1");
+        let id = a.import_image_bytes(&png(3000, 1000), Some("big.png"), 5).unwrap();
+        let f = a.doc.item(&id).unwrap().frame;
+        assert_eq!((f.w, f.h), (2048.0, 683.0), "wide image scaled to 2048 on import");
+        assert!(a.save_if_dirty().unwrap());
+        assert!(!a.save_if_dirty().unwrap(), "nothing new to save");
+
+        let b = App::open_library(&root, "dev", 9).unwrap();
+        assert_eq!(b.doc.board.id, a.doc.board.id);
+        let item = b.doc.item(&id).expect("item persisted");
+        let ItemKind::Media { hash, .. } = &item.kind else { panic!("not media") };
+        assert!(b.pictures.contains_key(hash), "picture reloaded from the library");
+        let lib = Library::open(&root).unwrap();
+        let sc = lib.read_sidecar(hash).unwrap();
+        assert_eq!((sc.width, sc.original.as_ref().unwrap().width), (2048, 3000));
     }
 
     #[test]

@@ -138,6 +138,35 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
         cb.forget();
     }
 
+    // Drag and drop image files onto the canvas.
+    {
+        let cb = Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |e: web_sys::DragEvent| e.prevent_default());
+        canvas.add_event_listener_with_callback("dragover", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    {
+        let s = state.clone();
+        let cb = Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |e: web_sys::DragEvent| {
+            e.prevent_default();
+            s.borrow_mut().app.pointer_move([e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]);
+            let Some(files) = e.data_transfer().and_then(|d| d.files()) else { return };
+            for i in 0..files.length() {
+                let Some(file) = files.get(i) else { continue };
+                let s = s.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { return };
+                    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                    let now = js_sys::Date::now() as u64;
+                    if let Err(err) = s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), now) {
+                        web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into());
+                    }
+                });
+            }
+        });
+        canvas.add_event_listener_with_callback("drop", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
     // requestAnimationFrame loop; only redraws when something changed.
     let frame: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let frame2 = frame.clone();

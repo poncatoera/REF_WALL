@@ -6,7 +6,10 @@
 //! - `WALL_SCREENSHOT=path.png` renders a few frames, saves the window and exits.
 //! - `WALL_CAMERA="x,y,zoom"` sets the start view.
 //! - `WALL_BENCH=1` redraws continuously and prints fps (vsync off).
-//! - `WALL_NOTES=n` sets how many notes the demo board has (default 2000).
+//! - `WALL_DEMO=n` opens a generated demo board with n notes instead of a library.
+//!
+//! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
+//! `Wall/Library.wall` in the home folder. Boards save automatically.
 
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -58,13 +61,17 @@ fn button(b: MouseButton) -> Option<Button> {
     }
 }
 
-/// Reads an image file, applies the import rules, and decodes it to RGBA.
-fn load_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)?;
-    let prepared = wall_media::prepare_image(&bytes, &wall_media::Limits::default())?;
-    let img = image::load_from_memory(&prepared.bytes)?.to_rgba8();
-    let (w, h) = img.dimensions();
-    Ok((img.into_raw(), w, h))
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+fn default_library() -> std::path::PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_else(|| ".".into());
+    std::path::PathBuf::from(home).join("Wall").join("Library.wall")
+}
+
+fn device_name() -> String {
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "desktop".into())
 }
 
 impl ApplicationHandler for Shell {
@@ -142,12 +149,15 @@ impl ApplicationHandler for Shell {
                     self.app.key(k);
                 }
             }
-            WindowEvent::DroppedFile(path) => match load_picture(&path) {
-                Ok((rgba, w, h)) => {
-                    self.app.place_picture(rgba, w, h);
+            WindowEvent::DroppedFile(path) => {
+                let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+                let result = std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| self.app.import_image_bytes(&bytes, name.as_deref(), now_ms()).map_err(|e| e.to_string()));
+                if let Err(e) = result {
+                    eprintln!("wall: could not import {}: {e}", path.display());
                 }
-                Err(e) => eprintln!("wall: could not import {}: {e}", path.display()),
-            },
+            }
             WindowEvent::RedrawRequested => {
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames == 3) {
@@ -175,6 +185,9 @@ impl ApplicationHandler for Shell {
         }
         if self.app.needs_redraw {
             gfx.window.request_redraw();
+        }
+        if let Err(e) = self.app.save_if_dirty() {
+            eprintln!("wall: could not save: {e}");
         }
     }
 }
@@ -230,8 +243,17 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
-    let notes = std::env::var("WALL_NOTES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    let mut app = App::demo(notes);
+    let mut app = match std::env::var("WALL_DEMO").ok() {
+        Some(n) => App::demo(n.parse().unwrap_or(2000)),
+        None => {
+            let path = std::env::args_os().nth(1).map(std::path::PathBuf::from).unwrap_or_else(default_library);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            println!("wall: library {}", path.display());
+            App::open_library(&path, &device_name(), now_ms())?
+        }
+    };
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
         if let [x, y, z] = v[..] {

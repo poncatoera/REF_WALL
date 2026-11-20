@@ -1733,8 +1733,12 @@ dependencies = [
 name = "wall-app"
 version = "0.1.0"
 dependencies = [
+ "image",
+ "tempfile",
+ "thiserror 2.0.21",
  "uuid",
  "wall-format",
+ "wall-media",
  "wall-render",
  "wall-text",
 ]
@@ -1797,9 +1801,11 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "glow",
+ "js-sys",
  "wall-app",
  "wall-render",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

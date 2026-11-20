@@ -10,3 +10,9 @@ wall-render.workspace = true
 wall-text.workspace = true
 wall-format.workspace = true
 uuid.workspace = true
+wall-media.workspace = true
+image.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
