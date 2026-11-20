@@ -226,8 +226,7 @@ impl Player {
         }
         let half = 0.5 / self.fps;
         let mut show = None;
-        loop {
-            let Some(frame) = self.pending.take().or_else(|| self.frames.try_recv().ok()) else { break };
+        while let Some(frame) = self.pending.take().or_else(|| self.frames.try_recv().ok()) {
             if frame.0 != self.gen {
                 continue; // from before a seek
             }
