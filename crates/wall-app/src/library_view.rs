@@ -525,7 +525,7 @@ impl App {
         let (Some(v), Some(lib)) = (self.library_view.as_mut(), self.library.as_ref()) else { return Vec::new() };
         let mut out = Vec::new();
         for hash in &l.visible {
-            if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_))) {
+            if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_) | Picture::Preview(_))) {
                 continue;
             }
             let Some(sc) = v.items.iter().find(|s| &s.hash == hash && s.kind == MediaKind::Video) else { continue };
@@ -568,7 +568,7 @@ impl App {
         // a small one from the library file (a few per frame).
         let mut budget = 3;
         for hash in &l.visible {
-            if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_))) {
+            if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_) | Picture::Preview(_))) {
                 continue;
             }
             let Some(sc) = v.items.iter().chain(&v.trashed).find(|s| &s.hash == hash) else { continue };
@@ -615,7 +615,7 @@ impl App {
             .iter()
             .filter_map(|(hash, rect)| {
                 let id = match (v.thumbs.get(hash), self.pictures.get(hash)) {
-                    (Some(Thumb::Ready(id)), _) | (_, Some(Picture::Ready(id))) => *id,
+                    (Some(Thumb::Ready(id)), _) | (_, Some(Picture::Ready(id) | Picture::Preview(id))) => *id,
                     _ => return None,
                 };
                 Some((id, wall_render::ImageInstance { rect: *rect, params: [1.0, 4.0, 0.0, 0.0], uv_rect: [0.0, 0.0, 1.0, 1.0] }))

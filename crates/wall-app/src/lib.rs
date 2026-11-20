@@ -7,6 +7,7 @@ pub mod doc;
 pub mod menu;
 pub mod panel;
 mod library_view;
+mod picture_loader;
 mod scene;
 mod snap;
 pub mod video;
@@ -174,9 +175,16 @@ pub const MIN_PLAY_PX: f32 = 120.0;
 /// Height of a group's name strip, in board units.
 const GROUP_HEADER: f64 = 44.0;
 
-/// Decoded pixels for a media hash, waiting for upload or already on the GPU.
+/// A media hash's pixels: not loaded yet, decoded and waiting for upload, a
+/// small preview on the GPU, or full size on the GPU (also video textures).
+/// See `picture_loader` for when each loads.
 enum Picture {
+    /// In the library; loads when it comes on screen.
+    Unloaded,
     Pending { rgba: Vec<u8>, width: u32, height: u32 },
+    /// A preview (at most `picture_loader::PREVIEW_PX`); full size loads
+    /// when the picture is shown larger.
+    Preview(ImageId),
     Ready(ImageId),
 }
 
@@ -248,6 +256,8 @@ pub struct App {
     pub desktop: bool,
     /// The library drawer, while open (L).
     library_view: Option<library_view::LibraryView>,
+    /// Loads pictures as they come on screen (previews, then full size).
+    loader: picture_loader::Loader,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -309,6 +319,7 @@ impl App {
             shell_commands: Vec::new(),
             desktop: false,
             library_view: None,
+            loader: Default::default(),
         }
     }
 
@@ -362,24 +373,12 @@ impl App {
                     continue;
                 }
             }
-            let loaded = library.read_sidecar(&hash).ok().and_then(|sc| {
-                let bytes = std::fs::read(library.media_path(&hash, &sc.ext)).ok()?;
-                image::load_from_memory(&bytes).ok()
-            });
-            match loaded {
-                Some(img) => {
-                    let img = img.to_rgba8();
-                    let (w, h) = img.dimensions();
-                    // Libraries from before auto-tags get them on first open.
-                    if let Some(sc) = self.sidecars.get_mut(&hash).filter(|s| s.colors.is_empty() && s.auto_tags.is_empty()) {
-                        auto_tag(sc, Some(img.as_raw()));
-                        if let Err(e) = library.write_sidecar(sc) {
-                            eprintln!("wall: could not save auto-tags: {e}");
-                        }
-                    }
-                    self.pictures.insert(hash, Picture::Pending { rgba: img.into_raw(), width: w, height: h });
-                }
-                None => eprintln!("wall: picture {hash} is missing from the library"),
+            // Decoded later, when on screen, at the size it's shown
+            // (picture_loader); opening a big board stays instant.
+            if self.sidecars.contains_key(&hash) {
+                self.pictures.insert(hash, Picture::Unloaded);
+            } else {
+                eprintln!("wall: picture {hash} is missing from the library");
             }
         }
     }
@@ -1800,21 +1799,14 @@ impl App {
 
     pub fn render(&mut self, renderer: &mut Renderer, size_px: [u32; 2]) {
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
-        for pic in self.pictures.values_mut() {
-            if let Picture::Pending { rgba, width, height } = pic {
-                match renderer.create_image(rgba, *width, *height) {
-                    Ok(id) => *pic = Picture::Ready(id),
-                    Err(e) => eprintln!("wall: image upload failed: {e}"),
-                }
-            }
-        }
+        self.pump_pictures(renderer);
         let caret = self.caret_rect();
         let textures: HashMap<&ContentHash, ImageId> = self
             .pictures
             .iter()
             .filter_map(|(h, p)| match p {
-                Picture::Ready(id) => Some((h, *id)),
-                Picture::Pending { .. } => None,
+                Picture::Ready(id) | Picture::Preview(id) => Some((h, *id)),
+                Picture::Pending { .. } | Picture::Unloaded => None,
             })
             .collect();
 

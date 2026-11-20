@@ -449,7 +449,7 @@ impl ApplicationHandler for Shell {
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
                 self.posters.pump(&mut self.app);
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
-                let settled = self.videos.settled(1500) && !self.app.library_waiting();
+                let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
                         Ok(()) => println!("wall: saved {path}"),
@@ -605,7 +605,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
         if let [x, y, z] = v[..] {
-            app.camera = wall_app::Camera { center: [x, y], zoom: z };
+            app.set_camera(wall_app::Camera { center: [x, y], zoom: z });
         }
     }
     let mut shell = Shell {
