@@ -327,6 +327,36 @@ fn device_name() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "desktop".into())
 }
 
+/// Saves the open board and opens another library in its place.
+fn switch_library(app: &mut App, videos: &mut video::Videos, posters: &mut LibraryPosters, window: &Window, path: &std::path::Path) {
+    match open_library(path) {
+        Ok(new) => {
+            if let Err(e) = app.save_if_dirty() {
+                eprintln!("wall: could not save: {e}");
+            }
+            *app = new;
+            *videos = video::Videos::default();
+            *posters = LibraryPosters::default();
+            let size = window.inner_size();
+            app.resize([size.width as f32, size.height as f32]);
+            window.set_title(&window_title(path));
+            window.request_redraw();
+        }
+        Err(e) => show_error(&format!("Could not open {}: {e}", path.display())),
+    }
+}
+
+/// Pictures and videos directly inside a folder, by name.
+fn media_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    const EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "mp4", "mov", "webm", "m4v", "mkv", "avi"];
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p: &std::path::PathBuf| p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str())));
+    files.sort();
+    files
+}
+
 impl ApplicationHandler for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
@@ -444,7 +474,19 @@ impl ApplicationHandler for Shell {
                     }
                 }
             }
-            WindowEvent::DroppedFile(path) => import_file(&mut self.app, &mut self.videos, path),
+            WindowEvent::DroppedFile(path) => {
+                if path.join("wall.json").is_file() {
+                    // A library folder: open it.
+                    switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
+                } else if path.is_dir() {
+                    // Any other folder: import the pictures and videos in it.
+                    for file in media_in(&path) {
+                        import_file(&mut self.app, &mut self.videos, file);
+                    }
+                } else {
+                    import_file(&mut self.app, &mut self.videos, path);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 for cmd in self.app.take_shell_commands() {
                     match cmd {
@@ -457,19 +499,7 @@ impl ApplicationHandler for Shell {
                         }
                         wall_app::ShellCommand::OpenLibrary { new } => {
                             if let Some(path) = pick_library(new) {
-                                match open_library(&path) {
-                                    Ok(app) => {
-                                        if let Err(e) = self.app.save_if_dirty() {
-                                            eprintln!("wall: could not save: {e}");
-                                        }
-                                        self.app = app;
-                                        self.app.resize([size.width as f32, size.height as f32]);
-                                        self.videos = video::Videos::default();
-                                        self.posters = LibraryPosters::default();
-                                        gfx.window.set_title(&window_title(&path));
-                                    }
-                                    Err(e) => show_error(&format!("Could not open {}: {e}", path.display())),
-                                }
+                                switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
                             }
                         }
                         wall_app::ShellCommand::ExportImage => {
