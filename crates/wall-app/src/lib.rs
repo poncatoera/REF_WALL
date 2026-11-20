@@ -6,6 +6,7 @@
 pub mod doc;
 pub mod panel;
 mod scene;
+mod snap;
 pub mod video;
 
 use std::collections::{BTreeSet, HashMap};
@@ -113,7 +114,9 @@ pub enum Key {
 enum Gesture {
     Idle,
     Pan,
-    Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2] },
+    /// `snap` is None while Ctrl/Cmd was held at the start (snapping off);
+    /// `guides` are the alignment lines currently shown.
+    Move { start: [f32; 2], originals: Vec<BoardItem>, delta: [f64; 2], snap: Option<snap::Snap>, guides: Vec<snap::Guide> },
     Marquee { start: [f32; 2], now: [f32; 2], base: BTreeSet<Uuid> },
     /// Alt-dragging out a new arrow.
     Connect { from: ArrowEnd, start: [f32; 2], now: [f32; 2] },
@@ -873,7 +876,8 @@ impl App {
                     self.selection = [id].into();
                 }
                 let originals = self.drag_set();
-                self.gesture = Gesture::Move { start: board, originals, delta: [0.0, 0.0] };
+                let snap = (!mods.command).then(|| self.snap_targets(&originals)).flatten();
+                self.gesture = Gesture::Move { start: board, originals, delta: [0.0, 0.0], snap, guides: Vec::new() };
             }
             None => {
                 let base = if mods.shift { self.selection.clone() } else { BTreeSet::new() };
@@ -885,6 +889,32 @@ impl App {
 
     /// Selected items plus everything inside selected groups (groups carry
     /// their contents, as in Milanote).
+    /// What a drag of `moving` can snap to: other items (not arrows) on or
+    /// near the screen. None if nothing is being moved.
+    fn snap_targets(&self, moving: &[BoardItem]) -> Option<snap::Snap> {
+        let frames: Vec<_> = moving.iter().filter(|i| !matches!(i.kind, ItemKind::Arrow { .. })).map(|i| i.frame).collect();
+        let first = frames.first()?;
+        let mut b = [first.x, first.y, first.x + first.w, first.y + first.h];
+        for f in &frames {
+            b = [b[0].min(f.x), b[1].min(f.y), b[2].max(f.x + f.w), b[3].max(f.y + f.h)];
+        }
+        // The visible board area, grown by a screen in every direction.
+        let tl = self.camera.screen_to_board([0.0, 0.0], self.viewport);
+        let br = self.camera.screen_to_board(self.viewport, self.viewport);
+        let (w, h) = ((br[0] - tl[0]) as f64, (br[1] - tl[1]) as f64);
+        let area = [tl[0] as f64 - w, tl[1] as f64 - h, br[0] as f64 + w, br[1] as f64 + h];
+        let ids: BTreeSet<Uuid> = moving.iter().map(|i| i.id).collect();
+        let targets = self
+            .doc
+            .board
+            .live_items()
+            .filter(|i| !ids.contains(&i.id) && !matches!(i.kind, ItemKind::Arrow { .. }))
+            .map(|i| [i.frame.x, i.frame.y, i.frame.w, i.frame.h])
+            .filter(|t| t[0] < area[2] && t[0] + t[2] > area[0] && t[1] < area[3] && t[1] + t[3] > area[1])
+            .collect();
+        Some(snap::Snap { bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], targets })
+    }
+
     fn drag_set(&self) -> Vec<BoardItem> {
         let mut ids = self.selection.clone();
         for id in &self.selection {
@@ -929,8 +959,14 @@ impl App {
                 self.video_commands.push((hash.clone(), cmd));
             }
             Gesture::Pan => self.camera.pan(pos[0] - last[0], pos[1] - last[1]),
-            Gesture::Move { start, originals, delta } => {
+            Gesture::Move { start, originals, delta, snap, guides } => {
                 *delta = [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64];
+                if let Some(s) = snap {
+                    // 6 screen pixels, whatever the zoom.
+                    let (d, g) = s.apply(*delta, 6.0 / self.camera.zoom as f64);
+                    *delta = d;
+                    *guides = g;
+                }
                 let (originals, d) = (originals.clone(), *delta);
                 self.doc.preview_offset(&originals, d[0], d[1]);
             }
@@ -1632,6 +1668,16 @@ impl App {
         };
         let mut overlays = scene::overlays(&self.doc, &self.selection, marquee, self.camera.zoom);
         overlays.extend(self.scrub_bars());
+        if let Gesture::Move { guides, .. } = &self.gesture {
+            // Snap guides: 1 screen pixel wide, pink so they read over any card.
+            let px = 1.0 / self.camera.zoom;
+            overlays.extend(guides.iter().map(|g| wall_render::BoxInstance {
+                rect: [g[0] as f32 - px / 2.0, g[1] as f32 - px / 2.0, (g[2] - g[0]) as f32 + px, (g[3] - g[1]) as f32 + px],
+                fill: [1.0, 0.33, 0.6, 1.0],
+                stroke: [0.0; 4],
+                shape: [0.0, 0.0],
+            }));
+        }
         if let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] {
             if let (Some(item), None) = (self.doc.item(&id), &self.editing) {
                 let px = 1.0 / self.camera.zoom;
@@ -2374,6 +2420,26 @@ mod tests {
         assert!(a.doc.item(&low).unwrap().frame.z > a.doc.item(&high).unwrap().frame.z);
         a.key(Key::Undo);
         assert!(a.doc.item(&low).unwrap().frame.z < a.doc.item(&high).unwrap().frame.z);
+    }
+
+    #[test]
+    fn moving_snaps_to_nearby_edges_unless_ctrl_is_held() {
+        let mut a = app();
+        let moved = add_note(&mut a, 100.0, 100.0);
+        add_note(&mut a, 400.0, 300.0);
+        // Left edge ends 3 px short of the other note's left edge: snaps.
+        a.pointer_down(Button::Primary, [150.0, 150.0], Mods::default());
+        a.pointer_move([447.0, 200.0]);
+        assert!(matches!(&a.gesture, Gesture::Move { guides, .. } if guides.len() == 1));
+        a.pointer_up(Button::Primary, [447.0, 200.0]);
+        assert_eq!(a.doc.item(&moved).unwrap().frame.x, 400.0);
+        // The same drag with Ctrl/Cmd held lands exactly where the pointer says.
+        a.key(Key::Undo);
+        a.set_time(10_000); // not a double-click
+        a.pointer_down(Button::Primary, [150.0, 150.0], Mods { command: true, ..Mods::default() });
+        a.pointer_move([447.0, 200.0]);
+        a.pointer_up(Button::Primary, [447.0, 200.0]);
+        assert_eq!(a.doc.item(&moved).unwrap().frame.x, 397.0);
     }
 
     #[test]
