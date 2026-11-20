@@ -1834,21 +1834,54 @@ impl App {
         let max_side = max_side.min(renderer.max_picture_size());
         let (size, zoom) = self.export_size(max_side).ok_or_else(|| AppError::Other("the board is empty".into()))?;
         let b = self.board_bounds().unwrap_or_default();
-        for pic in self.pictures.values_mut() {
-            if let Picture::Pending { rgba, width, height } = pic {
-                if let Ok(id) = renderer.create_image(rgba, *width, *height) {
-                    *pic = Picture::Ready(id);
-                }
-            }
-        }
-        let textures: HashMap<&ContentHash, ImageId> = self
-            .pictures
-            .iter()
-            .filter_map(|(h, p)| match p {
-                Picture::Ready(id) => Some((h, *id)),
-                Picture::Pending { .. } => None,
+        self.pump_pictures(renderer);
+        // Every picture on the board at full size: ones not loaded yet (or
+        // only as previews) are decoded now and dropped after the export.
+        let mut temporary = Vec::new();
+        let mut ids: HashMap<ContentHash, ImageId> = HashMap::new();
+        let hashes: Vec<ContentHash> = self
+            .doc
+            .board
+            .live_items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media { hash, .. } => Some(hash.clone()),
+                _ => None,
             })
             .collect();
+        for hash in hashes {
+            if ids.contains_key(&hash) {
+                continue;
+            }
+            let loaded = match self.pictures.get(&hash) {
+                Some(Picture::Ready(id)) => Some(*id),
+                Some(Picture::Preview(_) | Picture::Unloaded) => {
+                    let full = self.library.as_ref().zip(self.sidecars.get(&hash)).and_then(|(lib, sc)| {
+                        let job = picture_loader::Job {
+                            hash: hash.clone(),
+                            media: lib.media_path(&hash, &sc.ext),
+                            cache_dir: lib.root().join("cache").join("previews"),
+                            full: true,
+                        };
+                        picture_loader::run_job(&job).full
+                    });
+                    match full.and_then(|(rgba, w, h)| renderer.create_image(&rgba, w, h).ok()) {
+                        Some(id) => {
+                            temporary.push(id);
+                            Some(id)
+                        }
+                        None => match self.pictures.get(&hash) {
+                            Some(Picture::Preview(id)) => Some(*id),
+                            _ => None,
+                        },
+                    }
+                }
+                _ => None,
+            };
+            if let Some(id) = loaded {
+                ids.insert(hash, id);
+            }
+        }
+        let textures: HashMap<&ContentHash, ImageId> = ids.iter().map(|(h, id)| (h, *id)).collect();
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
         if self.font.atlas.dirty {
             renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
@@ -1861,9 +1894,12 @@ impl App {
                 r.begin_frame(size, BACKGROUND);
                 scene.draw(r, &view, &textures);
             })
-            .map_err(|e| AppError::Other(e.to_string()))?;
+            .map_err(|e| AppError::Other(e.to_string()));
+        for id in temporary {
+            renderer.delete_image(id);
+        }
         self.needs_redraw = true;
-        Ok((pixels, size))
+        Ok((pixels?, size))
     }
 
     pub fn render(&mut self, renderer: &mut Renderer, size_px: [u32; 2]) {
