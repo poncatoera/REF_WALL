@@ -21,19 +21,61 @@ struct CachedText {
     glyphs: Vec<GlyphInstance>,
 }
 
+/// Items drawn together: boxes, then pictures, then text. Items in one run
+/// never overlap each other, so drawing a run layer by layer looks the same
+/// as drawing its items one by one in z order, with three draw calls.
+#[derive(Default)]
+struct Run {
+    boxes: Vec<BoxInstance>,
+    images: Vec<(ContentHash, ImageInstance)>,
+    glyphs: Vec<GlyphInstance>,
+    /// Spatial hash of the run's item rects, for the overlap test.
+    cells: HashMap<(i32, i32), Vec<[f32; 4]>>,
+}
+
+const CELL: f32 = 512.0;
+
+impl Run {
+    fn cell_range(r: [f32; 4]) -> impl Iterator<Item = (i32, i32)> {
+        let (x0, y0) = ((r[0] / CELL).floor() as i32, (r[1] / CELL).floor() as i32);
+        let (x1, y1) = (((r[0] + r[2]) / CELL).floor() as i32, ((r[1] + r[3]) / CELL).floor() as i32);
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+    }
+
+    fn overlaps(&self, r: [f32; 4]) -> bool {
+        Self::cell_range(r).any(|c| {
+            self.cells.get(&c).is_some_and(|rs| {
+                rs.iter().any(|o| r[0] < o[0] + o[2] && o[0] < r[0] + r[2] && r[1] < o[1] + o[3] && o[1] < r[1] + r[3])
+            })
+        })
+    }
+
+    fn claim(&mut self, r: [f32; 4]) {
+        for c in Self::cell_range(r) {
+            self.cells.entry(c).or_default().push(r);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Scene {
     version: Option<u64>,
-    groups: Vec<BoxInstance>,
-    images: Vec<(ContentHash, ImageInstance)>,
-    cards: Vec<BoxInstance>,
-    glyphs: Vec<GlyphInstance>,
+    /// Groups: always behind everything else.
+    back: Run,
+    /// Everything else, back to front.
+    runs: Vec<Run>,
     text_cache: HashMap<Uuid, CachedText>,
 }
 
 impl Scene {
     pub fn glyph_count(&self) -> usize {
-        self.glyphs.len()
+        self.back.glyphs.len() + self.runs.iter().map(|r| r.glyphs.len()).sum::<usize>()
+    }
+
+    /// Draw-order batches.
+    #[cfg(test)]
+    pub fn run_count(&self) -> usize {
+        self.runs.len()
     }
 
     /// Rebuilds instances if the document changed since the last call.
@@ -42,10 +84,8 @@ impl Scene {
             return;
         }
         self.version = Some(doc.version);
-        self.groups.clear();
-        self.images.clear();
-        self.cards.clear();
-        self.glyphs.clear();
+        self.back = Run::default();
+        self.runs.clear();
 
         let mut items: Vec<_> = doc.board.live_items().collect();
         items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
@@ -54,49 +94,75 @@ impl Scene {
             seen.insert(item.id);
             let f = item.frame;
             let rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
+            let is_group = matches!(item.kind, ItemKind::Group { .. });
+            if !is_group {
+                // Start a new run if this item overlaps one already in the current run.
+                if self.runs.last().is_none_or(|r| r.overlaps(rect)) {
+                    self.runs.push(Run::default());
+                }
+                self.runs.last_mut().unwrap().claim(rect);
+            }
+            let mut label = None;
+            let run = if is_group { &mut self.back } else { self.runs.last_mut().unwrap() };
             match &item.kind {
                 ItemKind::Group { name, color } => {
                     let c = parse_hex(color.as_deref()).unwrap_or([0.6, 0.6, 0.65]);
-                    self.groups.push(BoxInstance {
+                    run.boxes.push(BoxInstance {
                         rect,
                         fill: [c[0] * 0.06, c[1] * 0.06, c[2] * 0.06, 0.6],
                         stroke: [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 0.9],
                         shape: [10.0, 1.5],
                     });
-                    self.text(font, item.id, name, &item.kind, [c[0], c[1], c[2], 1.0], rect);
+                    label = Some((name.as_str(), [c[0], c[1], c[2], 1.0]));
                 }
                 ItemKind::Media { hash, .. } => {
                     // Placeholder under the picture, seen until its pixels (or a
                     // video's first frame) arrive.
-                    self.groups.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [6.0, 1.0] });
-                    self.images.push((hash.clone(), ImageInstance { rect, params: [1.0, 6.0, 0.0, 0.0] }));
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [6.0, 1.0] });
+                    run.images.push((hash.clone(), ImageInstance { rect, params: [1.0, 6.0, 0.0, 0.0] }));
                 }
                 ItemKind::Note { text, color } => {
                     let fill = parse_hex(color.as_deref()).map(|c| [c[0] * 0.25, c[1] * 0.25, c[2] * 0.25, 1.0]).unwrap_or(NOTE_FILL);
-                    self.cards.push(BoxInstance { rect, fill, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
-                    self.text(font, item.id, text, &item.kind, TEXT, rect);
+                    run.boxes.push(BoxInstance { rect, fill, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
+                    label = Some((text.as_str(), TEXT));
                 }
                 ItemKind::Label { text } => {
-                    self.text(font, item.id, text, &item.kind, [1.0; 4], rect);
+                    label = Some((text.as_str(), [1.0; 4]));
                 }
                 ItemKind::Todo { title, .. } => {
-                    self.cards.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
-                    self.text(font, item.id, title, &item.kind, TEXT, rect);
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
+                    label = Some((title.as_str(), TEXT));
                 }
                 ItemKind::Board { .. } => {
-                    self.cards.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
                 }
                 ItemKind::Arrow { .. } => {} // arrows come with the vector pass
+            }
+            if let Some((t, color)) = label {
+                item_text(&mut self.text_cache, font, &mut run.glyphs, item.id, t, &item.kind, color, rect);
             }
         }
         self.text_cache.retain(|id, _| seen.contains(id));
     }
 
-    /// Appends an item's text, from cache when text, style and width are unchanged.
-    fn text(&mut self, font: &mut Font, id: Uuid, text: &str, kind: &ItemKind, color: [f32; 4], rect: [f32; 4]) {
+
+    pub fn draw(&self, renderer: &mut Renderer, view: &ViewUniform, textures: &HashMap<&ContentHash, ImageId>) {
+        for run in std::iter::once(&self.back).chain(&self.runs) {
+            renderer.draw_boxes(view, &run.boxes);
+            let images: Vec<(ImageId, ImageInstance)> =
+                run.images.iter().filter_map(|(h, inst)| textures.get(h).map(|id| (*id, *inst))).collect();
+            renderer.draw_images(view, &images);
+            renderer.draw_glyphs(view, &run.glyphs);
+        }
+    }
+}
+
+/// Appends an item's text, from cache when text, style and width are unchanged.
+#[allow(clippy::too_many_arguments)]
+fn item_text(cache: &mut HashMap<Uuid, CachedText>, font: &mut Font, out: &mut Vec<GlyphInstance>, id: Uuid, text: &str, kind: &ItemKind, color: [f32; 4], rect: [f32; 4]) {
         let Some(style) = TextStyle::of(kind, rect[2]) else { return };
         let key = (text.to_owned(), style.size.to_bits(), rect[2].to_bits(), rect[3].to_bits());
-        let entry = self.text_cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0, 0, 0), glyphs: Vec::new() });
+        let entry = cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0, 0, 0), glyphs: Vec::new() });
         if entry.key != key {
             entry.glyphs.clear();
             let max_lines = style.max_lines(rect[3]);
@@ -106,22 +172,12 @@ impl Scene {
             }
             entry.key = key;
         }
-        self.glyphs.extend(entry.glyphs.iter().map(|g| {
-            let mut g = *g;
-            g.rect[0] += rect[0];
-            g.rect[1] += rect[1];
-            g
-        }));
-    }
-
-    pub fn draw(&self, renderer: &mut Renderer, view: &ViewUniform, textures: &HashMap<&ContentHash, ImageId>) {
-        renderer.draw_boxes(view, &self.groups);
-        let images: Vec<(ImageId, ImageInstance)> =
-            self.images.iter().filter_map(|(h, inst)| textures.get(h).map(|id| (*id, *inst))).collect();
-        renderer.draw_images(view, &images);
-        renderer.draw_boxes(view, &self.cards);
-        renderer.draw_glyphs(view, &self.glyphs);
-    }
+        out.extend(entry.glyphs.iter().map(|g| {
+        let mut g = *g;
+        g.rect[0] += rect[0];
+        g.rect[1] += rect[1];
+        g
+    }));
 }
 
 /// Selection outlines and the marquee, sized in screen pixels.

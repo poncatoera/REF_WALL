@@ -116,18 +116,35 @@ impl Document {
     }
 
     /// Records a move that was already shown live during a drag: `originals`
-    /// are the items as they were before the drag started.
+    /// are the items as they were before the drag started. Moved items come
+    /// to the front (keeping their order among themselves), so whatever you
+    /// drag onto something sits on top of it.
     pub fn commit_drag(&mut self, originals: &[BoardItem], dx: f64, dy: f64) -> bool {
         // Put the originals back first so the change records the true "before".
         for o in originals {
             self.board.items.insert(o.id, o.clone());
         }
-        let ids = originals.iter().map(|o| o.id).collect();
-        let moved = self.translate(&ids, dx, dy);
-        if !moved {
+        if dx == 0.0 && dy == 0.0 {
             self.version += 1;
+            return false;
         }
-        moved
+        let mut moved: Vec<BoardItem> = originals.to_vec();
+        moved.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
+        let ids: BTreeSet<Uuid> = moved.iter().map(|o| o.id).collect();
+        let mut z = self.board.live_items().filter(|i| !ids.contains(&i.id)).map(|i| i.frame.z).fold(0.0, f64::max);
+        let afters = moved
+            .into_iter()
+            .map(|mut i| {
+                i.frame.x += dx;
+                i.frame.y += dy;
+                if !matches!(i.kind, ItemKind::Group { .. }) {
+                    z += 1.0;
+                    i.frame.z = z;
+                }
+                i
+            })
+            .collect();
+        self.commit(afters)
     }
 
     /// Shows a drag in progress without recording it.

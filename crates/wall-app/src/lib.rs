@@ -1420,6 +1420,37 @@ mod tests {
     }
 
     #[test]
+    fn draw_order_follows_z_with_few_batches() {
+        let mut a = App::demo(400);
+        a.scene.update(&a.doc, &mut a.font);
+        assert_eq!(a.scene.run_count(), 1, "nothing overlaps in the demo grid: one batch");
+        // A note dragged over a picture, then the picture brought forward:
+        // the picture must draw after (above) the note.
+        let mut b = app();
+        let hash = b.add_picture(vec![0; 4], 1, 1);
+        let f = Frame { x: 100.0, y: 100.0, w: 200.0, h: 100.0, ..Default::default() };
+        let pic = b.doc.add(vec![(f, ItemKind::Media { hash, crop: None })])[0];
+        add_note(&mut b, 150.0, 120.0);
+        b.selection = [pic].into();
+        b.key(Key::BringToFront);
+        b.scene.update(&b.doc, &mut b.font);
+        assert_eq!(b.scene.run_count(), 2);
+    }
+
+    #[test]
+    fn dragged_items_come_to_the_front() {
+        let mut a = app();
+        let low = add_note(&mut a, 100.0, 100.0);
+        let high = add_note(&mut a, 400.0, 100.0);
+        a.pointer_down(Button::Primary, [150.0, 150.0], Mods::default());
+        a.pointer_move([420.0, 150.0]);
+        a.pointer_up(Button::Primary, [420.0, 150.0]);
+        assert!(a.doc.item(&low).unwrap().frame.z > a.doc.item(&high).unwrap().frame.z);
+        a.key(Key::Undo);
+        assert!(a.doc.item(&low).unwrap().frame.z < a.doc.item(&high).unwrap().frame.z);
+    }
+
+    #[test]
     fn empty_new_note_disappears_and_slow_clicks_do_not_edit() {
         let mut a = app();
         click(&mut a, 1000, [300.0, 300.0]);
