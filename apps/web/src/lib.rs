@@ -37,6 +37,12 @@ extern "C" {
     fn store_get(key: &str) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_name = storePut, catch)]
     fn store_put(key: &str, value: &JsValue) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = storeExport, catch)]
+    fn store_export() -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = storeImport, catch)]
+    fn store_import(text: &str) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = isBackup)]
+    fn is_backup(text: &str) -> bool;
 }
 
 async fn get(key: &str) -> Result<JsValue, JsValue> {
@@ -277,15 +283,55 @@ fn export_png(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&png[..]));
     let bag = web_sys::BlobPropertyBag::new();
     bag.set_type("image/png");
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    download(&web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?, &name)
+}
+
+/// Hands a blob to the browser as a download.
+fn download(blob: &web_sys::Blob, name: &str) -> Result<(), JsValue> {
+    let url = web_sys::Url::create_object_url_with_blob(blob)?;
     let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let a: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
     a.set_href(&url);
-    a.set_download(&name);
+    a.set_download(name);
     a.click();
     // The URL is not revoked right away: some browsers start the download
-    // after this returns. One picture per export is a small, bounded cost.
+    // after this returns. One file per export is a small, bounded cost.
+    Ok(())
+}
+
+/// Ctrl+S: saves now, then downloads everything saved in this browser as
+/// one file. Dropping that file on the board brings it all back.
+async fn backup(s: Rc<RefCell<State>>) {
+    let result = async {
+        if s.borrow().store {
+            save(s.clone()).await;
+        }
+        let text = wasm_bindgen_futures::JsFuture::from(store_export()?).await?.as_string().ok_or("empty backup")?;
+        let parts = js_sys::Array::of1(&JsValue::from_str(&text));
+        let bag = web_sys::BlobPropertyBag::new();
+        bag.set_type("application/json");
+        let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &bag)?;
+        let day: String = String::from(js_sys::Date::new_0().to_iso_string()).chars().take(10).collect();
+        download(&blob, &format!("Wall backup {day}.json"))
+    }
+    .await;
+    if let Err(e) = result {
+        web_sys::console::warn_1(&format!("wall: backup failed: {}", err_text(&e)).into());
+    }
+}
+
+/// A dropped backup file: after asking, replaces what's saved and reloads.
+async fn restore_backup(file: web_sys::File) -> Result<(), JsValue> {
+    let text = wasm_bindgen_futures::JsFuture::from(file.text()).await?.as_string().unwrap_or_default();
+    if !is_backup(&text) {
+        return Err(JsValue::from_str("not a Wall backup"));
+    }
+    let window = web_sys::window().ok_or("no window")?;
+    let ok = window.confirm_with_message(&format!("Replace the boards saved in this browser with \"{}\"?", file.name()))?;
+    if ok {
+        wasm_bindgen_futures::JsFuture::from(store_import(&text)?).await?;
+        window.location().reload()?;
+    }
     Ok(())
 }
 
@@ -390,6 +436,12 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         let cb = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
             let cmd = e.ctrl_key() || e.meta_key();
             let k = e.key();
+            if down && cmd && (k == "s" || k == "S") {
+                // Instead of the browser's "save page": a backup file.
+                e.prevent_default();
+                wasm_bindgen_futures::spawn_local(backup(s.clone()));
+                return;
+            }
             let mut s = s.borrow_mut();
             s.app.set_time(js_sys::Date::now() as u64);
             let editing = s.app.is_editing();
@@ -602,7 +654,13 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
 }
 
 fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
-    if file.type_().starts_with("video/") {
+    if file.name().to_lowercase().ends_with(".json") {
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = restore_backup(file).await {
+                web_sys::console::warn_1(&format!("wall: could not restore the backup: {}", err_text(&e)).into());
+            }
+        });
+    } else if file.type_().starts_with("video/") {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = import_video(s, &file).await {
                 web_sys::console::warn_1(&format!("wall: could not import {}: {}", file.name(), e.as_string().unwrap_or_else(|| format!("{e:?}"))).into());
