@@ -55,10 +55,18 @@ if ($FfmpegDir) {
         if (-not (Test-Path $p)) { throw "missing $f in $FfmpegDir" }
         Copy-Item $p $pkg
     }
+    # "Shared" builds (the LGPL-friendly kind) keep the codecs in DLLs.
+    Get-ChildItem $FfmpegDir -Filter "*.dll" -File | ForEach-Object { Copy-Item $_.FullName $pkg }
     $lic = Get-ChildItem (Split-Path -Parent $FfmpegDir), $FfmpegDir -Filter "LICENSE*" -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($lic) { Copy-Item $lic.FullName (Join-Path $pkg "LICENSE.ffmpeg.txt") }
-    $version = (& (Join-Path $FfmpegDir "ffmpeg.exe") -hide_banner -version 2>$null | Select-Object -First 1)
-    $videoNote = "Videos: bundled $version"
+    $info = & (Join-Path $FfmpegDir "ffmpeg.exe") -hide_banner -version 2>$null
+    $version = $info | Select-Object -First 1
+    $licence = if ($info -match "--enable-gpl") {
+        "GPL build: fine for your own use; use an LGPL build before sharing Wall."
+    } else {
+        "LGPL build (no libx264): Wall encodes H.264 with the Windows or GPU encoder. Shareable under the LGPL; see LICENSE.ffmpeg.txt."
+    }
+    $videoNote = "Videos: bundled $version`r`n$licence"
 }
 
 $commit = (& git -C $root rev-parse --short HEAD).Trim()
