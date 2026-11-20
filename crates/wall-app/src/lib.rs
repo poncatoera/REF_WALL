@@ -4,6 +4,7 @@
 //! input here and call [`App::render`].
 
 pub mod doc;
+pub mod panel;
 mod scene;
 pub mod video;
 
@@ -222,8 +223,12 @@ pub struct App {
     nav: Vec<Uuid>,
     /// The search box, while open.
     search: Option<Search>,
-    /// Titles and tags of pictures and videos, for search.
-    media_text: HashMap<ContentHash, String>,
+    /// What Wall knows about each picture and video: title, tags, size.
+    sidecars: HashMap<ContentHash, ItemSidecar>,
+    /// The side panel shows the selection's details (I toggles it).
+    panel_open: bool,
+    /// Typing into a side panel field.
+    panel_edit: Option<panel::FieldEdit>,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -277,7 +282,9 @@ impl App {
             board_names: [(board_id, board_name)].into(),
             nav: Vec::new(),
             search: None,
-            media_text: HashMap::new(),
+            sidecars: HashMap::new(),
+            panel_open: true,
+            panel_edit: None,
         }
     }
 
@@ -325,8 +332,7 @@ impl App {
             .collect();
         for hash in hashes {
             if let Ok(sc) = library.read_sidecar(&hash) {
-                let words: Vec<&str> = sc.title.iter().map(|t| t.as_str()).chain(sc.tags.iter().map(|t| t.as_str())).collect();
-                self.media_text.insert(hash.clone(), words.join(" "));
+                self.sidecars.insert(hash.clone(), sc.clone());
                 if sc.kind == MediaKind::Video {
                     self.videos.insert(hash, (sc.ext, sc.width, sc.height));
                     continue;
@@ -369,32 +375,33 @@ impl App {
         let prepared = wall_media::prepare_image(bytes, &wall_media::Limits::default())?;
         let rgba = image::load_from_memory(&prepared.bytes)?.to_rgba8();
         let hash = ContentHash::of(&prepared.bytes);
+        let mut sidecar = ItemSidecar {
+            hash: hash.clone(),
+            kind: MediaKind::Image,
+            ext: prepared.ext.into(),
+            width: prepared.width,
+            height: prepared.height,
+            bytes: prepared.bytes.len() as u64,
+            duration_ms: None,
+            fps: None,
+            added_ms: now_ms,
+            title: source.map(|s| s.to_owned()),
+            source_url: None,
+            tags: Vec::new(),
+            auto_tags: Vec::new(),
+            colors: Vec::new(),
+            original: prepared.original.clone(),
+            extra: Default::default(),
+        };
         if let Some(lib) = &self.library {
+            let known = lib.has_media(&hash);
             lib.import_bytes(&prepared.bytes, prepared.ext)?;
-            if !lib.has_media(&hash) {
-                lib.write_sidecar(&ItemSidecar {
-                    hash: hash.clone(),
-                    kind: MediaKind::Image,
-                    ext: prepared.ext.into(),
-                    width: prepared.width,
-                    height: prepared.height,
-                    bytes: prepared.bytes.len() as u64,
-                    duration_ms: None,
-                    fps: None,
-                    added_ms: now_ms,
-                    title: source.map(|s| s.to_owned()),
-                    source_url: None,
-                    tags: Vec::new(),
-                    auto_tags: Vec::new(),
-                    colors: Vec::new(),
-                    original: prepared.original.clone(),
-                    extra: Default::default(),
-                })?;
+            match known.then(|| lib.read_sidecar(&hash).ok()).flatten() {
+                Some(existing) => sidecar = existing,
+                None => lib.write_sidecar(&sidecar)?,
             }
         }
-        if let Some(t) = source {
-            self.media_text.insert(hash.clone(), t.to_owned());
-        }
+        self.sidecars.entry(hash.clone()).or_insert(sidecar);
         let (w, h) = rgba.dimensions();
         self.pictures.entry(hash.clone()).or_insert(Picture::Pending { rgba: rgba.into_raw(), width: w, height: h });
         Ok(self.place_media(hash, w, h))
@@ -409,34 +416,34 @@ impl App {
             return Err(AppError::VideoTooLarge(bytes.len() as u64));
         }
         let hash = ContentHash::of(bytes);
+        let mut sidecar = ItemSidecar {
+            hash: hash.clone(),
+            kind: MediaKind::Video,
+            ext: ext.into(),
+            width: meta.width,
+            height: meta.height,
+            bytes: bytes.len() as u64,
+            duration_ms: Some(meta.duration_ms),
+            fps: meta.fps,
+            added_ms: now_ms,
+            title: source.map(|s| s.to_owned()),
+            source_url: None,
+            tags: Vec::new(),
+            auto_tags: Vec::new(),
+            colors: Vec::new(),
+            original: None,
+            extra: Default::default(),
+        };
         if let Some(lib) = &self.library {
             let known = lib.has_media(&hash);
             lib.import_bytes(bytes, ext)?;
-            if !known {
-                lib.write_sidecar(&ItemSidecar {
-                    hash: hash.clone(),
-                    kind: MediaKind::Video,
-                    ext: ext.into(),
-                    width: meta.width,
-                    height: meta.height,
-                    bytes: bytes.len() as u64,
-                    duration_ms: Some(meta.duration_ms),
-                    fps: meta.fps,
-                    added_ms: now_ms,
-                    title: source.map(|s| s.to_owned()),
-                    source_url: None,
-                    tags: Vec::new(),
-                    auto_tags: Vec::new(),
-                    colors: Vec::new(),
-                    original: None,
-                    extra: Default::default(),
-                })?;
+            match known.then(|| lib.read_sidecar(&hash).ok()).flatten() {
+                Some(existing) => sidecar = existing,
+                None => lib.write_sidecar(&sidecar)?,
             }
         }
         self.videos.insert(hash.clone(), (ext.to_owned(), meta.width, meta.height));
-        if let Some(t) = source {
-            self.media_text.insert(hash.clone(), t.to_owned());
-        }
+        self.sidecars.entry(hash.clone()).or_insert(sidecar);
         Ok(self.place_media(hash, meta.width, meta.height))
     }
 
@@ -617,6 +624,28 @@ impl App {
             let (w, h) = (320u32, 200u32);
             let rgba = demo_picture(i, w, h);
             let hash = app.add_picture(rgba, w, h);
+            let moods = ["warm", "cool", "dusk", "soft", "bold", "hazy"];
+            app.sidecars.insert(
+                hash.clone(),
+                ItemSidecar {
+                    hash: hash.clone(),
+                    kind: MediaKind::Image,
+                    ext: "png".into(),
+                    width: w,
+                    height: h,
+                    bytes: (w * h * 4) as u64,
+                    duration_ms: None,
+                    fps: None,
+                    added_ms: 1_795_132_800_000,
+                    title: Some(format!("demo-frame-{:02}.png", i + 1)),
+                    source_url: None,
+                    tags: vec![moods[i as usize % moods.len()].into(), "demo".into()],
+                    auto_tags: Vec::new(),
+                    colors: Vec::new(),
+                    original: None,
+                    extra: Default::default(),
+                },
+            );
             let (c, r) = (i % 6, i / 6);
             items.push((f(c as f64 * 340.0, 20.0 + r as f64 * 230.0, w as f64, h as f64), ItemKind::Media { hash, crop: None }));
         }
@@ -727,6 +756,13 @@ impl App {
         }
         if button != Button::Primary {
             return;
+        }
+        if let Some(action) = self.panel_layout().and_then(|l| l.action_at(pos)) {
+            self.panel_action(action);
+            return;
+        }
+        if self.panel_edit.is_some() {
+            self.commit_panel_edit();
         }
         let hit = self.hit(board);
         let double = self
@@ -924,6 +960,9 @@ impl App {
     }
 
     pub fn wheel(&mut self, w: Wheel) {
+        if self.panel_layout().is_some_and(|l| panel::inside(l.rect, self.cursor)) {
+            return;
+        }
         let steps = match w {
             Wheel::Lines(l) => l,
             Wheel::Pixels(p) => p / 100.0,
@@ -934,6 +973,20 @@ impl App {
 
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
+        if let Some(e) = &mut self.panel_edit {
+            match key {
+                Key::Escape => self.panel_edit = None,
+                Key::Enter => self.commit_panel_edit(),
+                Key::Backspace => {
+                    e.text.pop();
+                }
+                Key::Char(c) => {
+                    e.text.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some(search) = &mut self.search {
             match key {
                 Key::Escape | Key::Find => self.search = None,
@@ -1029,6 +1082,7 @@ impl App {
             Key::Char('b' | 'B') => {
                 self.new_board();
             }
+            Key::Char('i' | 'I') => self.panel_open = !self.panel_open,
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::Find => {}
@@ -1063,7 +1117,7 @@ impl App {
     /// Everything searchable about an item, lowercase.
     fn item_search_text(&self, item: &BoardItem) -> String {
         let text = match &item.kind {
-            ItemKind::Media { hash, .. } => self.media_text.get(hash).cloned().unwrap_or_default(),
+            ItemKind::Media { hash, .. } => self.sidecars.get(hash).map(|sc| sc.title.iter().chain(&sc.tags).cloned().collect::<Vec<_>>().join(" ")).unwrap_or_default(),
             ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_default(),
             kind => item_text(kind).unwrap_or_default().to_owned(),
         };
@@ -1248,8 +1302,11 @@ impl App {
     /// Number keys colour the selected notes and groups: 0 resets, 1-7 pick
     /// red, orange, yellow, green, blue, purple, grey. One undo step.
     fn set_color(&mut self, key: char) {
-        const PALETTE: [&str; 7] = ["#e5534b", "#e8a15d", "#e6c84f", "#57ab5a", "#7aa2f7", "#b083f0", "#8b8f98"];
-        let color = key.to_digit(10).filter(|d| *d > 0).map(|d| PALETTE[d as usize - 1].to_owned());
+        let color = key.to_digit(10).filter(|d| *d > 0).map(|d| panel::PALETTE[d as usize - 1].to_owned());
+        self.set_color_value(color);
+    }
+
+    fn set_color_value(&mut self, color: Option<String>) {
         let afters: Vec<BoardItem> = self
             .selected_items()
             .into_iter()
@@ -1338,7 +1395,7 @@ impl App {
     /// True while the keyboard types into an item; shells then send typed
     /// characters to [`Self::text_input`] instead of shortcuts like Space.
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some() || self.search.is_some()
+        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some()
     }
 
     /// Starts typing into an item's text, caret at the end.
@@ -1383,6 +1440,11 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
+        if let Some(e) = &mut self.panel_edit {
+            e.text.push_str(&s.replace(['\n', '\r', '\t'], " "));
+            self.needs_redraw = true;
+            return true;
+        }
         if let Some(search) = &mut self.search {
             search.query.push_str(&s.replace(['\n', '\r', '\t'], " "));
             self.run_search();
@@ -1602,7 +1664,282 @@ impl App {
             }
             renderer.draw_glyphs(&view, &hint);
         }
+        self.draw_panel(renderer);
         self.needs_redraw = false;
+    }
+}
+
+impl App {
+    // ---- side panel --------------------------------------------------------
+
+    /// What the side panel shows for the selection, if it is open.
+    pub fn panel_info(&self) -> Option<panel::PanelInfo> {
+        use panel::{format_bytes, format_date, format_duration, PanelInfo, VideoInfo};
+        if !self.panel_open || self.selection.is_empty() {
+            return None;
+        }
+        let items = self.selected_items();
+        let colorable = |k: &ItemKind| matches!(k, ItemKind::Note { .. } | ItemKind::Group { .. });
+        let color_of = |k: &ItemKind| match k {
+            ItemKind::Note { color, .. } | ItemKind::Group { color, .. } => color.clone(),
+            _ => None,
+        };
+        if items.len() > 1 {
+            let colour = items.iter().any(|i| colorable(&i.kind)).then(|| {
+                let first = items.iter().find(|i| colorable(&i.kind)).and_then(|i| color_of(&i.kind));
+                items.iter().filter(|i| colorable(&i.kind)).all(|i| color_of(&i.kind) == first).then_some(first).flatten()
+            });
+            return Some(PanelInfo { kind: format!("{} items", items.len()), color: colour, ..Default::default() });
+        }
+        let item = items.into_iter().next()?;
+        let mut info = PanelInfo::default();
+        let size_row = |w: f64, h: f64| ("On board".to_owned(), format!("{:.0} × {:.0}", w, h));
+        match &item.kind {
+            ItemKind::Media { hash, crop } => {
+                let sc = self.sidecars.get(hash);
+                let video = self.videos.contains_key(hash);
+                info.kind = if video { "Video" } else { "Image" }.into();
+                info.title = Some(sc.and_then(|s| s.title.clone()).unwrap_or_default());
+                info.title_hint = "Add a title".into();
+                if let Some(sc) = sc {
+                    info.rows.push(("Size".into(), format!("{} × {} px", sc.width, sc.height)));
+                    info.rows.push(("File".into(), format!("{} · {}", sc.ext.to_uppercase(), format_bytes(sc.bytes))));
+                    if let Some(o) = &sc.original {
+                        info.rows.push(("Original".into(), format!("{} × {} · {}", o.width, o.height, format_bytes(o.bytes))));
+                    }
+                    if let Some(d) = sc.duration_ms {
+                        let fps = sc.fps.map(|f| format!(" · {f:.0} fps")).unwrap_or_default();
+                        info.rows.push(("Length".into(), format!("{}{fps}", format_duration(d as f64 / 1000.0))));
+                    }
+                    info.rows.push(("Added".into(), format_date(sc.added_ms)));
+                    info.rows.push(("Source".into(), sc.source_url.clone().unwrap_or_else(|| "—".into())));
+                    info.tags = Some(sc.tags.clone());
+                } else {
+                    info.tags = None;
+                }
+                if crop.is_some() {
+                    info.rows.push(("Crop".into(), "Cropped (Ctrl-drag a corner)".into()));
+                }
+                if video {
+                    let st = self.video_status.get(hash);
+                    info.video = Some(VideoInfo {
+                        duration_s: st.map_or(0.0, |s| s.duration),
+                        fps: sc.and_then(|s| s.fps),
+                        playing: st.is_none_or(|s| s.playing),
+                        speed: st.map_or(1.0, |s| s.speed),
+                    });
+                }
+            }
+            ItemKind::Note { text, color } => {
+                info.kind = "Note".into();
+                info.rows.push(("Words".into(), text.split_whitespace().count().to_string()));
+                info.rows.push(size_row(item.frame.w, item.frame.h));
+                info.color = Some(color.clone());
+            }
+            ItemKind::Label { text } => {
+                info.kind = "Label".into();
+                info.rows.push(("Words".into(), text.split_whitespace().count().to_string()));
+            }
+            ItemKind::Todo { entries, .. } => {
+                info.kind = "To-do".into();
+                info.rows.push(("Done".into(), format!("{} of {}", entries.iter().filter(|e| e.done).count(), entries.len())));
+            }
+            ItemKind::Group { name, color } => {
+                info.kind = "Group".into();
+                info.title = Some(name.clone());
+                info.title_hint = "Name this group".into();
+                let f = item.frame;
+                let inside = self.items_in([f.x as f32, f.y as f32, (f.x + f.w) as f32, (f.y + f.h) as f32]).len().saturating_sub(1);
+                info.rows.push(("Contains".into(), format!("{inside} items")));
+                info.rows.push(size_row(f.w, f.h));
+                info.color = Some(color.clone());
+            }
+            ItemKind::Board { board_id } => {
+                info.kind = "Board".into();
+                info.title = Some(self.board_names.get(board_id).cloned().unwrap_or_default());
+                info.title_hint = "Name this board".into();
+                if let Some(n) = self.parked.get(board_id).map(|(d, _)| d.board.live_items().count()) {
+                    info.rows.push(("Contains".into(), format!("{n} items")));
+                }
+                info.can_open = true;
+            }
+            ItemKind::Arrow { from, to } => {
+                info.kind = "Arrow".into();
+                let end = |e: &ArrowEnd| match e {
+                    ArrowEnd::Item { id } => self.doc.item(id).map_or("—".into(), |i| self.short_name(i)),
+                    ArrowEnd::Point { .. } => "Free end".into(),
+                };
+                info.rows.push(("From".into(), end(from)));
+                info.rows.push(("To".into(), end(to)));
+            }
+        }
+        Some(info)
+    }
+
+    /// A short human name for an item, for the panel.
+    fn short_name(&self, item: &BoardItem) -> String {
+        match &item.kind {
+            ItemKind::Media { hash, .. } => self.sidecars.get(hash).and_then(|s| s.title.clone()).unwrap_or_else(|| "Picture".into()),
+            ItemKind::Board { board_id } => self.board_names.get(board_id).cloned().unwrap_or_else(|| "Board".into()),
+            kind => item_text(kind).map(|t| t.lines().next().unwrap_or("").to_owned()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Note".into()),
+        }
+    }
+
+    fn panel_layout(&mut self) -> Option<panel::Layout> {
+        let info = self.panel_info()?;
+        Some(panel::layout(&mut self.font, &info, self.panel_edit.as_ref(), self.viewport))
+    }
+
+    fn panel_action(&mut self, action: panel::Action) {
+        use panel::{Action, Field, FieldEdit};
+        self.needs_redraw = true;
+        if !matches!(action, Action::None | Action::Edit(_)) && self.panel_edit.is_some() {
+            self.commit_panel_edit();
+        }
+        let id = self.selection.iter().next().copied();
+        match action {
+            Action::None => {}
+            Action::Close => {
+                self.panel_edit = None;
+                self.panel_open = false;
+            }
+            Action::Edit(field) => {
+                if self.panel_edit.as_ref().is_some_and(|e| e.field == field) {
+                    return;
+                }
+                self.commit_panel_edit();
+                self.end_edit();
+                let text = match field {
+                    Field::Title => self.panel_info().and_then(|i| i.title).unwrap_or_default(),
+                    Field::Tag => String::new(),
+                };
+                self.panel_edit = Some(FieldEdit { field, text });
+            }
+            Action::RemoveTag(tag) => {
+                if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
+                    self.update_sidecar(&hash, |sc| sc.tags.retain(|t| *t != tag));
+                }
+            }
+            Action::Color(c) => self.set_color_value(c),
+            Action::PlayPause => {
+                if let Some(hash) = id.and_then(|id| self.video_of(&id)) {
+                    self.toggle_play(hash);
+                }
+            }
+            Action::Speed(s) => {
+                if let Some(hash) = id.and_then(|id| self.video_of(&id)) {
+                    self.video_commands.push((hash, VideoCommand::Speed(s)));
+                }
+            }
+            Action::OpenBoard => {
+                if let Some(board_id) = id.and_then(|id| match self.doc.item(&id)?.kind {
+                    ItemKind::Board { board_id } => Some(board_id),
+                    _ => None,
+                }) {
+                    self.open_board(board_id, true);
+                }
+            }
+        }
+    }
+
+    /// Applies what was typed into the panel field.
+    fn commit_panel_edit(&mut self) {
+        use panel::Field;
+        let Some(e) = self.panel_edit.take() else { return };
+        self.needs_redraw = true;
+        let Some(item) = self.selection.iter().next().and_then(|id| self.doc.item(id)).cloned() else { return };
+        let text = e.text.trim().to_owned();
+        match (e.field, &item.kind) {
+            (Field::Tag, ItemKind::Media { hash, .. }) => {
+                let hash = hash.clone();
+                // Commas add several tags at once.
+                let new: Vec<String> = text.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
+                self.update_sidecar(&hash, |sc| {
+                    for t in new {
+                        if !sc.tags.contains(&t) {
+                            sc.tags.push(t);
+                        }
+                    }
+                });
+            }
+            (Field::Title, ItemKind::Media { hash, .. }) => {
+                let hash = hash.clone();
+                self.update_sidecar(&hash, |sc| sc.title = (!text.is_empty()).then_some(text));
+            }
+            (Field::Title, ItemKind::Group { .. }) => {
+                let mut after = item.clone();
+                if let ItemKind::Group { name, .. } = &mut after.kind {
+                    *name = text;
+                }
+                self.doc.replace(vec![after]);
+            }
+            (Field::Title, ItemKind::Board { board_id }) if !text.is_empty() => self.rename_board(*board_id, text),
+            _ => {}
+        }
+    }
+
+    /// Changes a picture's or video's details and saves them to the library.
+    fn update_sidecar(&mut self, hash: &ContentHash, f: impl FnOnce(&mut ItemSidecar)) {
+        let Some(sc) = self.sidecars.get_mut(hash) else { return };
+        f(sc);
+        if let Some(lib) = &self.library {
+            if let Err(e) = lib.write_sidecar(sc) {
+                eprintln!("wall: could not save details: {e}");
+            }
+        }
+        if self.search.is_some() {
+            self.run_search();
+        }
+        self.scene.invalidate();
+        self.needs_redraw = true;
+    }
+
+    /// Renames a board inside this one.
+    pub fn rename_board(&mut self, id: Uuid, name: String) {
+        self.board_names.insert(id, name.clone());
+        if let Some((doc, _)) = self.parked.get_mut(&id) {
+            doc.board.name = name.clone();
+        }
+        if let Some(lib) = &self.library {
+            let board = match self.parked.get(&id) {
+                Some((doc, _)) => Ok(doc.board.clone()),
+                None => lib.read_board(id),
+            };
+            match board {
+                Ok(mut b) => {
+                    b.name = name;
+                    if let Err(e) = lib.write_board(&b) {
+                        eprintln!("wall: could not rename board: {e}");
+                    }
+                }
+                Err(e) => eprintln!("wall: could not rename board: {e}"),
+            }
+        }
+        self.scene.invalidate();
+        self.needs_redraw = true;
+    }
+
+    fn draw_panel(&mut self, renderer: &mut Renderer) {
+        let Some(l) = self.panel_layout() else { return };
+        let view = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
+        let mut boxes: Vec<wall_render::BoxInstance> = l
+            .boxes
+            .iter()
+            .map(|b| wall_render::BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] })
+            .collect();
+        if let Some(c) = l.caret {
+            boxes.push(wall_render::BoxInstance { rect: c, fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [0.0, 0.0] });
+        }
+        renderer.draw_boxes(&view, &boxes);
+        let mut glyphs = Vec::new();
+        for t in &l.texts {
+            scene::add_text(&mut self.font, &mut glyphs, &t.text, t.at, t.size, t.color);
+        }
+        if self.font.atlas.dirty {
+            renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+            self.font.atlas.dirty = false;
+        }
+        renderer.draw_glyphs(&view, &glyphs);
     }
 }
 
@@ -1961,6 +2298,106 @@ mod tests {
         assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: None, .. }));
         a.key(Key::Undo);
         assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: Some(_), .. }));
+    }
+
+    fn panel_click(a: &mut App, action: panel::Action) {
+        let l = a.panel_layout().expect("panel open");
+        let r = l.hits.iter().find(|(_, x)| *x == action).unwrap_or_else(|| panic!("no {action:?}")).0;
+        click(a, 50_000, [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0]);
+    }
+
+    #[test]
+    fn side_panel_shows_and_edits_picture_details() {
+        let mut a = App::demo(4);
+        a.resize([1400.0, 900.0]);
+        assert!(a.panel_info().is_none(), "nothing selected, no panel");
+        let pic = a
+            .doc
+            .board
+            .live_items()
+            .find(|i| matches!(&i.kind, ItemKind::Media { hash, .. } if a.sidecars[hash].title.as_deref() == Some("demo-frame-01.png")))
+            .unwrap()
+            .id;
+        a.selection = [pic].into();
+        let info = a.panel_info().unwrap();
+        assert_eq!(info.kind, "Image");
+        assert_eq!(info.title.as_deref(), Some("demo-frame-01.png"));
+        assert!(info.rows.iter().any(|(k, v)| k == "Size" && v == "320 × 200 px"));
+        assert_eq!(info.tags.as_ref().unwrap(), &vec!["warm".to_owned(), "demo".to_owned()]);
+
+        // Add two tags by typing, remove one with its ×.
+        panel_click(&mut a, panel::Action::Edit(panel::Field::Tag));
+        assert!(a.is_editing());
+        a.text_input("Hero shot, Night");
+        a.key(Key::Enter);
+        assert!(!a.is_editing());
+        assert_eq!(a.panel_info().unwrap().tags.unwrap(), vec!["warm", "demo", "hero shot", "night"]);
+        panel_click(&mut a, panel::Action::RemoveTag("demo".into()));
+        assert_eq!(a.panel_info().unwrap().tags.unwrap(), vec!["warm", "hero shot", "night"]);
+        assert_eq!(a.selection.len(), 1, "panel clicks don't change the selection");
+
+        // Rename; search finds the new title and the new tags.
+        panel_click(&mut a, panel::Action::Edit(panel::Field::Title));
+        for _ in 0.."demo-frame-01.png".len() {
+            a.key(Key::Backspace);
+        }
+        a.text_input("Opening shot");
+        a.key(Key::Enter);
+        assert_eq!(a.panel_info().unwrap().title.as_deref(), Some("Opening shot"));
+        a.key(Key::Find);
+        a.text_input("night");
+        assert_eq!(a.search_status().unwrap().2, 1);
+        a.key(Key::Escape);
+
+        // I hides the panel and brings it back; × closes it.
+        a.key(Key::Char('i'));
+        assert!(a.panel_info().is_none());
+        a.key(Key::Char('i'));
+        panel_click(&mut a, panel::Action::Close);
+        assert!(a.panel_info().is_none());
+    }
+
+    #[test]
+    fn side_panel_colours_and_renames() {
+        let mut a = app();
+        let n = add_note(&mut a, 0.0, 0.0);
+        let m = add_note(&mut a, 120.0, 0.0);
+        a.selection = [n, m].into();
+        assert_eq!(a.panel_info().unwrap().kind, "2 items");
+        panel_click(&mut a, panel::Action::Color(Some(panel::PALETTE[3].into())));
+        for id in [n, m] {
+            assert!(matches!(&a.doc.item(&id).unwrap().kind, ItemKind::Note { color: Some(c), .. } if c == panel::PALETTE[3]));
+        }
+        a.key(Key::Undo);
+        assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: None, .. }), "one undo step");
+
+        // Rename a board card; the name shows on the card and in the breadcrumb.
+        a.selection.clear();
+        let inner = a.new_board();
+        panel_click(&mut a, panel::Action::Edit(panel::Field::Title));
+        while a.panel_edit.as_ref().is_some_and(|e| !e.text.is_empty()) {
+            a.key(Key::Backspace);
+        }
+        a.text_input("Client picks");
+        a.key(Key::Enter);
+        assert_eq!(a.board_names[&inner], "Client picks");
+        panel_click(&mut a, panel::Action::OpenBoard);
+        assert_eq!(a.breadcrumb(), vec!["t", "Client picks"]);
+    }
+
+    #[test]
+    fn clicking_the_board_ends_panel_typing() {
+        let mut a = app();
+        let n = add_note(&mut a, 0.0, 0.0);
+        a.selection = [n].into();
+        let g = a.doc.add(vec![(Frame { x: 0.0, y: 300.0, w: 300.0, h: 200.0, ..Default::default() }, ItemKind::Group { name: "Old".into(), color: None })])[0];
+        a.selection = [g].into();
+        panel_click(&mut a, panel::Action::Edit(panel::Field::Title));
+        a.text_input(" refs");
+        click(&mut a, 60_000, [100.0, 100.0]);
+        assert!(!a.is_editing());
+        assert!(matches!(&a.doc.item(&g).unwrap().kind, ItemKind::Group { name, .. } if name == "Old refs"));
+        assert_eq!(a.selection, [n].into());
     }
 
     #[test]
