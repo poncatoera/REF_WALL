@@ -84,6 +84,9 @@ pub struct ItemSidecar {
     /// Marked moments in a video, in milliseconds from the start, sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<u64>,
+    /// Loop back and forth instead of jumping back to the start.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pingpong: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }

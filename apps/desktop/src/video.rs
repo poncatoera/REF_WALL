@@ -87,7 +87,23 @@ pub struct Player {
     last_tick: std::time::Instant,
     /// In and out points: playback loops between them.
     range: Option<(f64, f64)>,
+    /// Back and forth: one pass forwards records the loop's frames, then
+    /// it plays them backwards from memory (ffmpeg only decodes forwards).
+    pingpong: bool,
+    cache: Vec<(f64, Vec<u8>)>,
+    cache_bytes: usize,
+    /// Recording frames since the loop restarted at its start.
+    recording: bool,
+    /// The cache holds a whole forward pass.
+    cache_ready: bool,
+    /// The loop is too big to keep in memory: plain looping instead.
+    too_big: bool,
+    /// Playing backwards: the time shown, and the cached frame shown last.
+    back: Option<(f64, usize)>,
 }
+
+/// Most memory one video's back-and-forth loop may hold.
+const PINGPONG_CACHE_BYTES: usize = 256 << 20;
 
 impl Player {
     /// Plays at most `max_w` pixels wide (see [`decode_width`]).
@@ -111,6 +127,13 @@ impl Player {
             pending: None,
             last_tick: std::time::Instant::now(),
             range: None,
+            pingpong: false,
+            cache: Vec::new(),
+            cache_bytes: 0,
+            recording: false,
+            cache_ready: false,
+            too_big: false,
+            back: None,
         })
     }
 
@@ -120,8 +143,17 @@ impl Player {
             C::Play => self.playing = true,
             C::Pause => self.playing = false,
             C::Speed(s) => self.speed = s,
-            C::Seek(t) => self.seek(t),
+            C::Seek(t) => {
+                self.forget_loop();
+                self.seek(t);
+            }
+            C::PingPong(on) => {
+                self.forget_loop();
+                self.pingpong = on;
+                self.too_big = false;
+            }
             C::Range(r) => {
+                self.forget_loop();
                 self.range = r;
                 if let Some((a, b)) = r {
                     let t = self.position();
@@ -132,6 +164,11 @@ impl Player {
             }
             C::Step(n) => {
                 self.playing = false;
+                if let Some((t, _)) = self.back {
+                    self.forget_loop();
+                    self.seek(t + n as f64 / self.fps);
+                    return;
+                }
                 if n < 0 {
                     self.seek(self.position() + n as f64 / self.fps);
                 } else {
@@ -139,6 +176,15 @@ impl Player {
                 }
             }
         }
+    }
+
+    /// Drops the recorded loop (it changed, or playback jumped).
+    fn forget_loop(&mut self) {
+        self.cache.clear();
+        self.cache_bytes = 0;
+        self.recording = false;
+        self.cache_ready = false;
+        self.back = None;
     }
 
     fn seek(&mut self, t: f64) {
@@ -157,7 +203,8 @@ impl Player {
     }
 
     pub fn status(&self) -> wall_app::VideoStatus {
-        wall_app::VideoStatus { time: self.position(), duration: self.duration, playing: self.playing, speed: self.speed }
+        let time = self.back.map_or_else(|| self.position(), |(t, _)| t);
+        wall_app::VideoStatus { time, duration: self.duration, playing: self.playing, speed: self.speed }
     }
 
     /// Advances the clock and returns the frame to show now, if it changed.
@@ -165,11 +212,41 @@ impl Player {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
+        if let Some((mut t, shown)) = self.back {
+            // Backwards, from the recorded frames.
+            let (a, _) = self.range.unwrap_or((0.0, self.duration));
+            if self.playing {
+                t -= dt * self.speed as f64;
+            }
+            if t <= a {
+                self.back = None;
+                self.seek(a);
+                return self.cache.first().map(|f| f.1.clone());
+            }
+            let k = self.cache.partition_point(|f| f.0 <= t).saturating_sub(1);
+            self.back = Some((t, k));
+            return (k != shown).then(|| self.cache[k].1.clone());
+        }
         if self.playing {
             self.clock += dt * self.speed as f64;
-            if let Some((a, b)) = self.range {
-                if self.position() >= b || self.clock >= self.duration.max(b) {
-                    self.seek(a);
+            let (a, b) = self.range.unwrap_or((0.0, self.duration));
+            let end = match self.range {
+                Some(_) => self.position() >= b || self.clock >= self.duration.max(b),
+                None => self.pingpong && self.clock >= self.duration,
+            };
+            if end {
+                if self.pingpong && (self.cache_ready || self.recording) && !self.cache.is_empty() {
+                    self.cache_ready = true;
+                    self.recording = false;
+                    let last = self.cache.len() - 1;
+                    self.back = Some((self.cache[last].0, usize::MAX));
+                    return None;
+                }
+                self.seek(a);
+                if self.pingpong && !self.too_big {
+                    self.cache.clear();
+                    self.cache_bytes = 0;
+                    self.recording = true;
                 }
             }
         }
@@ -185,6 +262,19 @@ impl Player {
                 break;
             }
             show = Some(frame.2);
+        }
+        if self.recording {
+            if let Some(px) = &show {
+                let t = self.position();
+                if self.cache.last().is_none_or(|l| t > l.0) {
+                    self.cache_bytes += px.len();
+                    self.cache.push((t, px.clone()));
+                }
+                if self.cache_bytes > PINGPONG_CACHE_BYTES {
+                    self.forget_loop();
+                    self.too_big = true;
+                }
+            }
         }
         show
     }
@@ -295,6 +385,39 @@ mod tests {
         assert_eq!(frame.len(), 64 * 36 * 4);
         let colors = wall_media::autotag::dominant_colors(&frame, 64, 36, 2);
         assert_eq!(wall_media::autotag::color_name(&colors[0]), Some("blue"));
+    }
+
+    #[test]
+    fn pingpong_plays_the_loop_backwards_after_one_pass() {
+        if ffmpeg().is_none() {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("c.mp4");
+        let ok = command(ffmpeg().unwrap())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-t", "4", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let mut player = Player::start(clip, 160, 90, 4.0, 25.0, 1280).unwrap();
+        player.command(wall_app::VideoCommand::Range(Some((1.0, 1.6))));
+        player.command(wall_app::VideoCommand::PingPong(true));
+        player.command(wall_app::VideoCommand::Speed(2.0));
+        // Sample the clock: after a first plain pass and a recorded one, it
+        // must go down (backwards) and stay inside the loop.
+        let mut times = Vec::new();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+        while std::time::Instant::now() < end {
+            player.tick();
+            times.push(player.status().time);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let fell = times.windows(2).filter(|w| w[1] < w[0] - 1e-9 && w[0] - w[1] < 0.1).count();
+        assert!(fell > 10, "clock ran backwards for a while: {fell} small steps down");
+        assert!(times.iter().skip(5).all(|t| (0.95..=1.65).contains(t)), "stays in the loop: {:?}", times.iter().fold((9.0f64, 0.0f64), |m, t| (m.0.min(*t), m.1.max(*t))));
+        assert!(player.cache_ready && !player.cache.is_empty());
     }
 
     #[test]
@@ -472,6 +595,7 @@ impl Videos {
                         }
                         p.command(wall_app::VideoCommand::Speed(slot.saved.speed));
                         p.command(wall_app::VideoCommand::Range(app.video_range(&slot.hash)));
+                        p.command(wall_app::VideoCommand::PingPong(app.video_pingpong(&slot.hash)));
                         if !slot.saved.playing {
                             p.command(wall_app::VideoCommand::Pause);
                         }
@@ -495,7 +619,7 @@ impl Videos {
                     wall_app::VideoCommand::Pause => slot.saved.playing = false,
                     wall_app::VideoCommand::Speed(s) => slot.saved.speed = s,
                     wall_app::VideoCommand::Seek(t) => slot.saved.time = t,
-                    wall_app::VideoCommand::Step(_) | wall_app::VideoCommand::Range(_) => {}
+                    wall_app::VideoCommand::Step(_) | wall_app::VideoCommand::Range(_) | wall_app::VideoCommand::PingPong(_) => {}
                 },
             }
         }

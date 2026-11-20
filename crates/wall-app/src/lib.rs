@@ -453,6 +453,7 @@ impl App {
             original: prepared.original.clone(),
             range: None,
             markers: Vec::new(),
+            pingpong: false,
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, Some(rgba.as_raw()));
@@ -500,6 +501,7 @@ impl App {
             original: None,
             range: None,
             markers: Vec::new(),
+            pingpong: false,
             extra: Default::default(),
         };
         auto_tag(&mut sidecar, None);
@@ -596,6 +598,11 @@ impl App {
                     self.set_video_range(&hash, range);
                     continue;
                 }
+                'j' => {
+                    let on = !self.video_pingpong(&hash);
+                    self.update_sidecar(&hash, |sc| sc.pingpong = on);
+                    VideoCommand::PingPong(on)
+                }
                 'm' => {
                     let Some(st) = self.video_status.get(&hash).copied() else { continue };
                     let markers = video::toggle_marker(&self.video_markers(&hash), st.time);
@@ -684,6 +691,11 @@ impl App {
     /// A video's in and out points in seconds, if it has them.
     pub fn video_range(&self, hash: &ContentHash) -> Option<(f64, f64)> {
         self.sidecars.get(hash)?.range.map(|r| (r.in_ms as f64 / 1000.0, r.out_ms as f64 / 1000.0))
+    }
+
+    /// True when a video loops back and forth.
+    pub fn video_pingpong(&self, hash: &ContentHash) -> bool {
+        self.sidecars.get(hash).is_some_and(|s| s.pingpong)
     }
 
     /// A video's markers, in milliseconds.
@@ -809,6 +821,7 @@ impl App {
                     original: None,
                     range: None,
                     markers: Vec::new(),
+                    pingpong: false,
                     extra: Default::default(),
                 },
             );
@@ -2293,6 +2306,9 @@ impl App {
                 let sc = self.sidecars.get(hash);
                 if !look.is_plain() {
                     info.rows.push(("Shown".into(), describe_look(look)));
+                }
+                if sc.is_some_and(|s| s.pingpong) {
+                    info.rows.push(("Loop".into(), "Back and forth".into()));
                 }
                 if let Some(m) = sc.filter(|s| !s.markers.is_empty()) {
                     let times: Vec<String> = m.markers.iter().map(|ms| video::format_time(*ms as f64 / 1000.0)).collect();
@@ -4085,6 +4101,7 @@ mod tests {
                 original: None,
                 range: None,
                 markers: Vec::new(),
+                pingpong: false,
                 extra: Default::default(),
             },
         );

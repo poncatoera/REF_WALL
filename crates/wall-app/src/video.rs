@@ -16,6 +16,8 @@ pub enum VideoCommand {
     Speed(f32),
     /// Loop between in and out points (seconds); None plays the whole clip.
     Range(Option<(f64, f64)>),
+    /// Play the loop forwards then backwards, again and again.
+    PingPong(bool),
 }
 
 /// "0:01.2": minutes, seconds and tenths, for in and out points.

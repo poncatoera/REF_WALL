@@ -16,6 +16,9 @@ struct State {
     videos: Vec<(web_sys::HtmlVideoElement, wall_app::ContentHash, wall_render::ImageId)>,
     /// Videos the person paused (others pause only while off screen).
     user_paused: std::collections::HashSet<wall_app::ContentHash>,
+    /// Back-and-forth videos on their way back: paused, stepped backwards
+    /// by hand each frame (browsers don't play backwards).
+    reversing: std::collections::HashSet<wall_app::ContentHash>,
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
@@ -362,7 +365,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), app, renderer, canvas: canvas.clone(),
+    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), reversing: Default::default(), app, renderer, canvas: canvas.clone(),
         saved_look: (light, grid),
         // `?demo` shows the demo as it ships, without saving.
         store: !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
@@ -581,7 +584,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             let mut s = state.borrow_mut();
             let size = s.sync_size();
             if !s.videos.is_empty() {
-                let State { videos, renderer, app, user_paused, .. } = &mut *s;
+                let State { videos, renderer, app, user_paused, reversing, .. } = &mut *s;
                 use glow::HasContext;
                 for (hash, cmd) in app.take_video_commands() {
                     let Some((v, _, _)) = videos.iter().find(|(_, h, _)| *h == hash) else { continue };
@@ -604,19 +607,34 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                         wall_app::VideoCommand::Speed(r) => v.set_playback_rate(r as f64),
                         wall_app::VideoCommand::Range(Some((a, _))) => v.set_current_time(a),
                         wall_app::VideoCommand::Range(None) => {}
+                        wall_app::VideoCommand::PingPong(_) => {
+                            reversing.remove(&hash);
+                        }
                     }
                 }
                 // Only videos on screen (and big enough) play; the rest keep their last frame.
                 let playable = app.playable_videos();
                 for (v, hash, _) in videos.iter() {
-                    // Loop between in and out points.
-                    if let Some((a, b)) = app.video_range(hash) {
-                        let t = v.current_time();
-                        if t >= b || t < a - 0.25 {
-                            v.set_current_time(a);
+                    let (a, b) = app.video_range(hash).unwrap_or((0.0, v.duration()));
+                    let t = v.current_time();
+                    if reversing.contains(hash) {
+                        if !user_paused.contains(hash) && playable.contains(hash) {
+                            let back = t - v.playback_rate() / 60.0;
+                            if back <= a {
+                                reversing.remove(hash);
+                                v.set_current_time(a);
+                            } else {
+                                v.set_current_time(back);
+                            }
                         }
+                    } else if app.video_pingpong(hash) && b.is_finite() && t >= b - 1.0 / 30.0 {
+                        reversing.insert(hash.clone());
+                        v.pause().unwrap_or(());
+                    } else if app.video_range(hash).is_some() && (t >= b || t < a - 0.25) {
+                        // Loop between in and out points.
+                        v.set_current_time(a);
                     }
-                    let want = playable.contains(hash) && !user_paused.contains(hash);
+                    let want = playable.contains(hash) && !user_paused.contains(hash) && !reversing.contains(hash);
                     if want && v.paused() {
                         drop(v.play());
                     } else if !want && !v.paused() {

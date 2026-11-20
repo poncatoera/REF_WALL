@@ -74,6 +74,7 @@ fn sidecar_round_trip_keeps_unknown_fields() {
         original: Some(OriginalInfo { width: 4096, height: 2048, bytes: 9_000_000, kept_as: None }),
         range: None,
         markers: Vec::new(),
+        pingpong: false,
         extra: Default::default(),
     };
     lib.write_sidecar(&sidecar).unwrap();
@@ -127,6 +128,7 @@ fn media_trash_and_restore() {
         original: None,
         range: None,
         markers: Vec::new(),
+        pingpong: false,
         extra: Default::default(),
     };
     lib.write_sidecar(&sidecar).unwrap();

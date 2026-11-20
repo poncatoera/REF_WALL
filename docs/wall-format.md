@@ -115,6 +115,7 @@ What Wall knows about one media file.
 | `original` | object, optional | `width`, `height` and `bytes` before Wall shrank the file, and `kept_as` (a hash) when the original was kept too. |
 | `range` | object, optional | Video in and out points, `in_ms` and `out_ms`. Playback loops between them. |
 | `markers` | array, optional | Marked moments in a video, milliseconds from the start, sorted. |
+| `pingpong` | bool, optional | Loop the video back and forth instead of jumping back to the start. |
 
 ## Boards: `boards/<uuid>.json`
 

@@ -185,6 +185,7 @@ pub const MENUS: &[Menu] = &[
             ("Slower / faster", "[ / ]", None),
             ("Set in point / out point", "I / O", None),
             ("Add or remove a marker", "M", None),
+            ("Loop back and forth", "J", None),
             ("Previous / next marker", "; / '", None),
             ("Clear in and out", "Side panel", None),
             ("Scrub", "Drag the bar", None),

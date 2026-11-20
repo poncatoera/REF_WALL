@@ -264,6 +264,7 @@ mod tests {
             original: None,
             range: None,
             markers: Vec::new(),
+            pingpong: false,
             extra: Default::default(),
         }
     }
