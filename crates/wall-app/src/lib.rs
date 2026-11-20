@@ -6,6 +6,7 @@
 pub mod doc;
 pub mod menu;
 pub mod panel;
+mod library_view;
 mod scene;
 mod snap;
 pub mod video;
@@ -240,6 +241,8 @@ pub struct App {
     menu_open: Option<usize>,
     /// Menu commands waiting for the shell (file picker, clipboard).
     shell_commands: Vec<menu::ShellCommand>,
+    /// The library drawer, while open (L).
+    library_view: Option<library_view::LibraryView>,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -299,6 +302,7 @@ impl App {
             tag_filter: None,
             menu_open: None,
             shell_commands: Vec::new(),
+            library_view: None,
         }
     }
 
@@ -852,6 +856,10 @@ impl App {
         if self.menu_click(pos) {
             return;
         }
+        if let Some(action) = self.library_layout().and_then(|l| l.action_at(pos)) {
+            self.library_action(action);
+            return;
+        }
         if let Some(action) = self.panel_layout().and_then(|l| l.action_at(pos)) {
             self.panel_action(action);
             return;
@@ -1098,6 +1106,9 @@ impl App {
             Wheel::Lines(l) => l,
             Wheel::Pixels(p) => p / 100.0,
         };
+        if self.library_wheel(steps) {
+            return;
+        }
         self.camera.zoom_at(1.15f32.powf(steps), self.cursor, self.viewport);
         self.needs_redraw = true;
     }
@@ -1208,6 +1219,7 @@ impl App {
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
+            Key::Escape if self.library_view.is_some() => self.library_view = None,
             Key::Escape if self.selection.is_empty() && self.tag_filter.is_some() => self.filter_by_tag(None),
             Key::Escape if self.selection.is_empty() => self.go_up(),
             Key::Escape => self.selection.clear(),
@@ -1218,6 +1230,7 @@ impl App {
                 self.new_board();
             }
             Key::Char('p' | 'P') => self.panel_open = !self.panel_open,
+            Key::Char('l' | 'L') => self.toggle_library(),
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::Find => {}
@@ -1827,8 +1840,14 @@ impl App {
             renderer.draw_glyphs(&view, &hint);
         }
         self.draw_panel(renderer);
-        self.draw_menu(renderer);
+        let redraw_library = self.library_view.is_some();
         self.needs_redraw = false;
+        if redraw_library {
+            // Sets needs_redraw again while thumbnails are still loading.
+            self.draw_library(renderer);
+        }
+        // The menu bar and its drop-downs go over everything.
+        self.draw_menu(renderer);
     }
 }
 
@@ -2261,6 +2280,7 @@ impl App {
                 self.camera.zoom_at(1.0 / z, centre, self.viewport);
             }
             C::TogglePanel => self.panel_open = !self.panel_open,
+            C::ToggleLibrary => self.toggle_library(),
             C::GoUp => self.go_up(),
         }
     }

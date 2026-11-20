@@ -91,6 +91,45 @@ fn sidecar_round_trip_keeps_unknown_fields() {
 }
 
 #[test]
+fn media_trash_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::create(dir.path(), "x", 1).unwrap();
+    let hash = lib.import_bytes(b"picture", "png").unwrap().hash().clone();
+    let sidecar = ItemSidecar {
+        hash: hash.clone(),
+        kind: MediaKind::Image,
+        ext: "png".into(),
+        width: 10,
+        height: 10,
+        bytes: 7,
+        duration_ms: None,
+        fps: None,
+        added_ms: 5,
+        title: Some("Neon".into()),
+        source_url: None,
+        tags: vec![],
+        auto_tags: vec![],
+        colors: vec![],
+        original: None,
+        range: None,
+        extra: Default::default(),
+    };
+    lib.write_sidecar(&sidecar).unwrap();
+    let media = lib.media_path(&hash, "png");
+
+    lib.trash_media(&hash, 100).unwrap();
+    assert!(!lib.has_media(&hash) && !media.exists());
+    assert!(lib.sidecars().unwrap().is_empty());
+    assert_eq!(lib.trashed_media().unwrap(), vec![sidecar.clone()]);
+
+    lib.restore_media(&hash).unwrap();
+    assert!(lib.has_media(&hash));
+    assert_eq!(std::fs::read(&media).unwrap(), b"picture");
+    assert!(lib.trashed_media().unwrap().is_empty());
+    assert!(lib.restore_media(&hash).is_err(), "nothing left to restore");
+}
+
+#[test]
 fn board_round_trip_list_and_trash() {
     let dir = tempfile::tempdir().unwrap();
     let lib = Library::create(dir.path(), "x", 1).unwrap();

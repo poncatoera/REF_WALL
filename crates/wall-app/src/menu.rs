@@ -39,6 +39,7 @@ pub enum Command {
     ZoomOut,
     ActualSize,
     TogglePanel,
+    ToggleLibrary,
     GoUp,
 }
 
@@ -93,6 +94,7 @@ pub const MENUS: &[Menu] = &[
             ("Bring to front", "Ctrl ]", Some(Command::BringToFront)),
             ("Send to back", "Ctrl [", Some(Command::SendToBack)),
             SEP,
+            ("Move without snapping", "Ctrl-drag", None),
             ("Draw an arrow", "Alt-drag", None),
             ("Crop a picture", "Ctrl-drag corner", None),
             ("Colour a note or group", "1 – 7, 0 clears", None),
@@ -107,6 +109,7 @@ pub const MENUS: &[Menu] = &[
             ("Actual size", "Shift 0", Some(Command::ActualSize)),
             SEP,
             ("Show or hide side panel", "P", Some(Command::TogglePanel)),
+            ("Library and trash", "L", Some(Command::ToggleLibrary)),
             ("Up to the parent board", "Esc", Some(Command::GoUp)),
         ],
     },

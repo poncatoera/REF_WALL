@@ -16,6 +16,8 @@ pub enum Error {
     BadExtension(String),
     #[error("{0} already exists")]
     AlreadyExists(PathBuf),
+    #[error("{0} is not in the trash")]
+    NotInTrash(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

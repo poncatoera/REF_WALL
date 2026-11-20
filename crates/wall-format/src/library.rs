@@ -164,6 +164,80 @@ impl Library {
         fs::rename(&from, &to).at(&from)?;
         Ok(to)
     }
+
+    // ---- media trash -------------------------------------------------------
+
+    /// Moves a picture or video and its sidecar into
+    /// `trash/<now_ms>-media-<hash>/`. Boards that use it show a placeholder
+    /// until it is restored. Nothing is hard-deleted.
+    pub fn trash_media(&self, hash: &ContentHash, now_ms: u64) -> Result<PathBuf> {
+        let sc = self.read_sidecar(hash)?;
+        let dir = self.root.join("trash").join(format!("{now_ms}-media-{hash}"));
+        fs::create_dir_all(&dir).at(&dir)?;
+        let media = self.media_path(hash, &sc.ext);
+        if media.is_file() {
+            fs::rename(&media, dir.join(format!("{hash}.{}", sc.ext))).at(&media)?;
+        }
+        let side = self.sidecar_path(hash);
+        fs::rename(&side, dir.join(format!("{hash}.json"))).at(&side)?;
+        Ok(dir)
+    }
+
+    /// Trash folders of trashed media, newest first, as (folder, hash).
+    fn media_trash_dirs(&self) -> Result<Vec<(PathBuf, String)>> {
+        let trash = self.root.join("trash");
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&trash).at(&trash)? {
+            let path = entry.at(&trash)?.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if let Some((_, hash)) = name.split_once("-media-").filter(|_| path.is_dir()) {
+                out.push((path.clone(), hash.to_owned()));
+            }
+        }
+        // Names start with the trash time in ms: sort newest first.
+        out.sort_by_key(|(p, _)| {
+            let t: u64 = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.split('-').next()?.parse().ok()).unwrap_or(0);
+            std::cmp::Reverse(t)
+        });
+        Ok(out)
+    }
+
+    /// Sidecars of trashed media, newest first. A hash trashed twice is
+    /// listed once.
+    pub fn trashed_media(&self) -> Result<Vec<ItemSidecar>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (dir, hash) in self.media_trash_dirs()? {
+            if !seen.insert(hash.clone()) {
+                continue;
+            }
+            if let Ok(sc) = read_json::<ItemSidecar>(&dir.join(format!("{hash}.json"))) {
+                out.push(sc);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Puts the most recently trashed copy of `hash` back.
+    pub fn restore_media(&self, hash: &ContentHash) -> Result<()> {
+        let key = hash.to_string();
+        let Some((dir, _)) = self.media_trash_dirs()?.into_iter().find(|(_, h)| *h == key) else {
+            return Err(Error::NotInTrash(key));
+        };
+        let sc: ItemSidecar = read_json(&dir.join(format!("{hash}.json")))?;
+        let from = dir.join(format!("{hash}.{}", sc.ext));
+        if from.is_file() {
+            let to = self.media_path(hash, &sc.ext);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).at(parent)?;
+            }
+            fs::rename(&from, &to).at(&from)?;
+        }
+        let side = dir.join(format!("{hash}.json"));
+        fs::rename(&side, self.sidecar_path(hash)).at(&side)?;
+        fs::remove_dir(&dir).at(&dir)?;
+        Ok(())
+    }
 }
 
 fn check_ext(ext: &str) -> Result<String> {

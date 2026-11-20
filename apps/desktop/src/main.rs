@@ -421,6 +421,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             App::open_library(&path, &device_name(), now_ms())?
         }
     };
+    // WALL_OPEN_LIBRARY=1 starts with the library drawer open (screenshots).
+    if std::env::var_os("WALL_OPEN_LIBRARY").is_some() {
+        app.toggle_library();
+    }
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
         if let [x, y, z] = v[..] {
