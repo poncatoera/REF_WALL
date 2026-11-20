@@ -555,6 +555,7 @@ impl ApplicationHandler for Shell {
                     match cmd {
                         wall_app::ShellCommand::Copy { cut } => copy(&mut self.app, cut),
                         wall_app::ShellCommand::Paste => paste(&mut self.app),
+                        wall_app::ShellCommand::OpenUrl(url) => open_url(&url),
                         wall_app::ShellCommand::Import => {
                             for path in pick_files() {
                                 import_file(&mut self.app, &mut self.videos, path);
@@ -833,5 +834,20 @@ mod tests {
         // A library that was moved away isn't offered again.
         std::fs::rename(&lib, dir.path().join("gone.wall")).unwrap();
         assert_eq!(settings::last_library(), None);
+    }
+}
+
+/// Opens a web address in the default browser. The app only sends
+/// http(s) addresses without spaces or quotes, and they go to the opener
+/// as one argument (no shell).
+fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer.exe").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = r {
+        show_error(&format!("Could not open {url}: {e}"));
     }
 }

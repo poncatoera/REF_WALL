@@ -426,7 +426,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         divider(&mut l, x0, &mut y);
         let r = [left, y, inner, 32.0];
         l.rect(r, FIELD(), LINE(), 6.0);
-        let t = "Open board";
+        let t = if info.kind == "Link" { "Open link" } else { "Open board" };
         let tw = text_width(font, t, 13.5);
         l.text(t, [r[0] + (inner - tw) / 2.0, r[1] + 21.0], 13.5, INK());
         l.hits.push((r, Action::OpenBoard));

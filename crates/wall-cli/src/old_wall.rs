@@ -195,6 +195,7 @@ pub fn import_into(old: &Path, new: &Path, container: Option<&str>, now: u64) ->
                     continue;
                 }
             },
+            "link" if !text(it, "url").is_empty() => ItemKind::Link { url: text(it, "url").to_owned(), title: text(it, "title").to_owned() },
             "palette" | "link" | "type" | "sketch" => {
                 report.converted_to_notes += 1;
                 ItemKind::Note { text: card_text(kind, it), color: None }
@@ -305,6 +306,7 @@ fn kind_name_of(k: &ItemKind) -> &'static str {
         ItemKind::Group { .. } => "groups",
         ItemKind::Arrow { .. } => "arrows",
         ItemKind::Board { .. } => "boards",
+        ItemKind::Link { .. } => "links",
     }
 }
 

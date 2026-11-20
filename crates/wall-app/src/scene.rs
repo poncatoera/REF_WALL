@@ -241,6 +241,22 @@ impl Scene {
                     let name = board_names.get(board_id).map_or("Board", |n| n.as_str());
                     label = Some((name, TEXT()));
                 }
+                ItemKind::Link { url, title } => {
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
+                    if title.is_empty() {
+                        // Untitled (or being typed): the address itself, wrapped.
+                        label = Some((url.as_str(), TEXT()));
+                    } else {
+                        let t = clip_line(font, title, 16.0, rect[2] - 40.0);
+                        add_text(font, &mut run.glyphs, &t, [rect[0] + 14.0, rect[1] + 30.0], 16.0, TEXT());
+                    }
+                    let site = clip_line(font, &link_site(url), 12.5, rect[2] - 28.0);
+                    let y = if title.is_empty() { rect[1] + rect[3] - 12.0 } else { rect[1] + 52.0 };
+                    if !title.is_empty() || !url.is_empty() {
+                        add_text(font, &mut run.glyphs, &site, [rect[0] + 14.0, y], 12.5, crate::theme::t().text_done);
+                    }
+                    add_text(font, &mut run.glyphs, "↗", [rect[0] + rect[2] - 24.0, rect[1] + 24.0], 14.0, ACCENT());
+                }
                 ItemKind::Arrow { .. } => {
                     if let Some(pts) = arrow {
                         run.curves.push(arrow_curve(pts, ARROW_COLOR(), ARROW_WIDTH));
@@ -477,6 +493,7 @@ impl TextStyle {
     pub fn of(kind: &ItemKind, width: f32) -> Option<Self> {
         Some(match kind {
             ItemKind::Note { .. } | ItemKind::Todo { .. } | ItemKind::Board { .. } => TextStyle { at: [14.0, 30.0], size: 16.0, wrap: Some(width - 28.0), multiline: true },
+            ItemKind::Link { .. } => TextStyle { at: [14.0, 30.0], size: 14.0, wrap: Some(width - 44.0), multiline: false },
             ItemKind::Group { .. } => TextStyle { at: [12.0, 30.0], size: 20.0, wrap: None, multiline: false },
             ItemKind::Label { .. } => TextStyle { at: [0.0, 96.0], size: 96.0, wrap: None, multiline: false },
             _ => return None,
@@ -714,4 +731,11 @@ mod tests {
 /// for upside down.
 fn look_bits(look: &wall_format::Look) -> f32 {
     (look.turns % 4) as f32 + if look.mirror { 4.0 } else { 0.0 } + if look.flip_v { 8.0 } else { 0.0 }
+}
+
+/// The site part of a link: "www.example.com/a/b" -> "example.com".
+pub fn link_site(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    host.strip_prefix("www.").unwrap_or(host).to_owned()
 }

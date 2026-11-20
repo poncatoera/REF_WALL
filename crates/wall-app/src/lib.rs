@@ -158,6 +158,7 @@ fn item_text(kind: &ItemKind) -> Option<&str> {
         ItemKind::Note { text, .. } | ItemKind::Label { text } => Some(text),
         ItemKind::Todo { title, .. } => Some(title),
         ItemKind::Group { name, .. } => Some(name),
+        ItemKind::Link { url, .. } => Some(url),
         _ => None,
     }
 }
@@ -167,6 +168,7 @@ fn item_text_mut(kind: &mut ItemKind) -> Option<&mut String> {
         ItemKind::Note { text, .. } | ItemKind::Label { text } => Some(text),
         ItemKind::Todo { title, .. } => Some(title),
         ItemKind::Group { name, .. } => Some(name),
+        ItemKind::Link { url, .. } => Some(url),
         _ => None,
     }
 }
@@ -975,6 +977,14 @@ impl App {
             }) {
                 self.last_click = None;
                 self.open_board(board_id, true);
+                return;
+            }
+            if let Some(url) = hit.and_then(|id| match &self.doc.item(&id)?.kind {
+                ItemKind::Link { url, .. } if !url.is_empty() => Some(url.clone()),
+                _ => None,
+            }) {
+                self.open_url(url);
+                self.last_click = None;
                 return;
             }
             if let Some(hash) = hit.and_then(|id| self.video_of(&id)) {
@@ -1856,8 +1866,11 @@ impl App {
             return;
         }
         let at = self.camera.screen_to_board(self.cursor, self.viewport);
-        let id = self.new_note(at, text);
-        let _ = id;
+        if let Some(url) = as_url(&text) {
+            self.new_link(at, url);
+        } else {
+            self.new_note(at, text);
+        }
         self.end_edit();
     }
 
@@ -2258,6 +2271,14 @@ impl App {
                 info.rows.push(size_row(f.w, f.h));
                 info.color = Some(color.clone());
             }
+            ItemKind::Link { url, title } => {
+                info.kind = "Link".into();
+                info.title = Some(title.clone());
+                info.title_hint = "Add a title".into();
+                info.rows.push(("Site".into(), scene::link_site(url)));
+                info.rows.push(("Address".into(), url.clone()));
+                info.can_open = !url.is_empty();
+            }
             ItemKind::Board { board_id } => {
                 info.kind = "Board".into();
                 info.title = Some(self.board_names.get(board_id).cloned().unwrap_or_default());
@@ -2400,6 +2421,12 @@ impl App {
                 }
             }
             Action::OpenBoard => {
+                if let Some(url) = id.and_then(|id| match &self.doc.item(&id)?.kind {
+                    ItemKind::Link { url, .. } => Some(url.clone()),
+                    _ => None,
+                }) {
+                    self.open_url(url);
+                }
                 if let Some(board_id) = id.and_then(|id| match self.doc.item(&id)?.kind {
                     ItemKind::Board { board_id } => Some(board_id),
                     _ => None,
@@ -2447,6 +2474,13 @@ impl App {
                 let mut after = item.clone();
                 if let ItemKind::Group { name, .. } = &mut after.kind {
                     *name = text;
+                }
+                self.doc.replace(vec![after]);
+            }
+            (Field::Title, ItemKind::Link { .. }) => {
+                let mut after = item.clone();
+                if let ItemKind::Link { title, .. } = &mut after.kind {
+                    *title = text;
                 }
                 self.doc.replace(vec![after]);
             }
@@ -2561,6 +2595,9 @@ impl App {
             Tool::Text => {
                 self.new_text(at);
             }
+            Tool::Link => {
+                self.new_link(at, String::new());
+            }
             Tool::Group => {
                 let s = self.card_scale();
                 let (w, h) = (480.0 * s, 320.0 * s);
@@ -2578,6 +2615,30 @@ impl App {
             Tool::Select | Tool::Arrow | Tool::Import => {}
         }
         self.needs_redraw = true;
+    }
+
+    /// A link card at a board point. Empty `url`: ready for typing one.
+    pub fn new_link(&mut self, at: [f32; 2], url: String) -> Uuid {
+        self.end_edit();
+        let s = self.card_scale();
+        let frame = Frame { x: at[0] as f64 - 20.0 * s, y: at[1] as f64 - 20.0 * s, w: 280.0 * s, h: 68.0 * s, z: self.doc.top_z() + 1.0, text_scale: s, ..Default::default() };
+        let id = Uuid::new_v4();
+        let caret = url.len();
+        let item = BoardItem { id, frame, kind: ItemKind::Link { url, title: String::new() }, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false };
+        self.doc.preview(item);
+        self.editing = Some(Editing { id, caret, original: None, todo: false });
+        self.selection = [id].into();
+        self.needs_redraw = true;
+        id
+    }
+
+    /// Asks the shell to open a web address (only http and https).
+    pub fn open_url(&mut self, url: String) {
+        let url = if url.contains("://") { url } else { format!("https://{url}") };
+        let plain = !url.contains(|c: char| c.is_whitespace() || c.is_control() || c == '"' || c == '\'');
+        if plain && (url.starts_with("https://") || url.starts_with("http://")) {
+            self.shell_commands.push(menu::ShellCommand::OpenUrl(url));
+        }
     }
 
     /// A line of text straight on the board (no card), ready for typing.
@@ -2851,6 +2912,13 @@ fn describe_look(look: &wall_format::Look) -> String {
     let s = parts.join(", ");
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// Pasted text that is just one web address.
+fn as_url(text: &str) -> Option<String> {
+    let t = text.trim();
+    let ok = (t.starts_with("https://") || t.starts_with("http://")) && t.len() > 10 && !t.contains(char::is_whitespace);
+    ok.then(|| t.to_owned())
 }
 
 #[cfg(test)]
@@ -3697,6 +3765,38 @@ mod tests {
         a.pointer_up(Button::Primary, [400.0, 950.0]);
         assert_eq!(a.item_count(), before + 1);
         assert_eq!(a.tool, Tool::Select);
+    }
+
+    #[test]
+    fn pasted_address_makes_a_link_card_that_opens_on_double_click() {
+        let mut a = app();
+        a.cursor = [400.0, 300.0];
+        a.paste_text("  https://www.example.com/refs?q=1 ");
+        let id = *a.selection.iter().next().unwrap();
+        let item = a.doc.item(&id).unwrap().clone();
+        assert_eq!(item.kind, ItemKind::Link { url: "https://www.example.com/refs?q=1".into(), title: String::new() });
+        assert_eq!(scene::link_site("https://www.example.com/refs?q=1"), "example.com");
+        // A double-click asks the shell to open it.
+        let p = [item.frame.x as f32 + 30.0, item.frame.y as f32 + 30.0];
+        let screen = [(p[0] - a.camera.center[0]) * a.camera.zoom + a.viewport[0] / 2.0, (p[1] - a.camera.center[1]) * a.camera.zoom + a.viewport[1] / 2.0];
+        a.take_shell_commands();
+        for _ in 0..2 {
+            a.pointer_down(Button::Primary, screen, Mods::default());
+            a.pointer_up(Button::Primary, screen);
+        }
+        assert_eq!(a.take_shell_commands(), vec![menu::ShellCommand::OpenUrl("https://www.example.com/refs?q=1".into())]);
+        // Ordinary text still becomes a note; odd schemes are never opened.
+        a.paste_text("see https://example.com later");
+        assert!(matches!(a.doc.item(a.selection.iter().next().unwrap()).unwrap().kind, ItemKind::Note { .. }));
+        a.open_url("file:///C:/Windows/system32/calc.exe".into());
+        a.open_url("https://a.com/\" x".into());
+        assert!(a.take_shell_commands().is_empty());
+        // The rail's link tool makes an empty card to type an address into.
+        a.make_with_tool(toolbar::Tool::Link, [0.0, 0.0]);
+        a.text_input("example.org");
+        let id = a.editing.as_ref().unwrap().id;
+        a.end_edit();
+        assert!(matches!(&a.doc.item(&id).unwrap().kind, ItemKind::Link { url, .. } if url == "example.org"));
     }
 
     #[test]

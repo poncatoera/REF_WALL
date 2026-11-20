@@ -141,6 +141,11 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         }
         // Libraries are folders on disk; the web menus don't offer them.
         wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall => {}
+        wall_app::ShellCommand::OpenUrl(url) => {
+            if let Some(w) = web_sys::window() {
+                let _ = w.open_with_url_and_target_and_features(&url, "_blank", "noopener");
+            }
+        }
         wall_app::ShellCommand::ExportImage => {
             if let Err(e) = export_png(&s) {
                 web_sys::console::error_1(&e);

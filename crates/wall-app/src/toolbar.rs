@@ -16,6 +16,8 @@ pub enum Tool {
     /// While on, a drag on the board draws an arrow (as Alt-drag does).
     Arrow,
     Board,
+    /// A web link card.
+    Link,
     /// Pictures or videos from disk.
     Import,
 }
@@ -23,7 +25,7 @@ pub enum Tool {
 impl Tool {
     /// Tools that make something when clicked or dragged onto the board.
     pub fn makes_item(self) -> bool {
-        matches!(self, Tool::Note | Tool::Text | Tool::Todo | Tool::Group | Tool::Board)
+        matches!(self, Tool::Note | Tool::Text | Tool::Todo | Tool::Group | Tool::Board | Tool::Link)
     }
 }
 
@@ -37,6 +39,7 @@ pub const TOOLS: &[Option<(Tool, &str)>] = &[
     Some((Tool::Group, "Group")),
     Some((Tool::Arrow, "Arrow  ·  or Alt-drag")),
     Some((Tool::Board, "Board  ·  B")),
+    Some((Tool::Link, "Link  ·  or paste an address")),
     None,
     Some((Tool::Import, "Pictures or videos…")),
 ];
@@ -151,6 +154,11 @@ fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
         Tool::Select => glyph(l, "↖", c, 19.0, ink),
         Tool::Arrow => glyph(l, "↗", c, 19.0, ink),
         Tool::Text => glyph(l, "T", c, 19.0, ink),
+        Tool::Link => {
+            // Two linked rings.
+            l.outline([x - 9.0, y - 4.0, 11.0, 8.0], ink, 4.0);
+            l.outline([x - 2.0, y - 4.0, 11.0, 8.0], ink, 4.0);
+        }
         Tool::Note => {
             l.outline([x - 7.0, y - 8.0, 14.0, 16.0], ink, 2.0);
             l.fill([x - 3.5, y - 3.0, 7.0, 1.4], ink, 0.0);

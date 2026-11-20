@@ -215,6 +215,12 @@ pub enum ItemKind {
         from: ArrowEnd,
         to: ArrowEnd,
     },
+    /// A web link: its address, and a title to show instead of it.
+    Link {
+        url: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
+    },
     /// A board inside this board.
     Board {
         board_id: Uuid,

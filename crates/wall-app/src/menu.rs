@@ -76,7 +76,7 @@ pub enum Command {
 }
 
 /// Commands the shell carries out, because they need the system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellCommand {
     /// Pick files to import.
     Import,
@@ -90,6 +90,8 @@ pub enum ShellCommand {
     ExportImage,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
+    /// Open a web address in the browser.
+    OpenUrl(String),
 }
 
 impl Command {
