@@ -234,6 +234,30 @@ impl Document {
         self.version += 1;
     }
 
+    /// How many steps undo can go back; see [`Self::join_undo_since`].
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Makes every step recorded since `depth` one undo step (say, all the
+    /// pictures of one drop, then laying them out). Per item it keeps the
+    /// state before the first step and after the last.
+    pub fn join_undo_since(&mut self, depth: usize) {
+        if self.undo.len() <= depth + 1 {
+            return;
+        }
+        let mut joined = Change::default();
+        for change in self.undo.drain(depth..) {
+            for c in change.items {
+                match joined.items.iter_mut().find(|j| j.after.id == c.after.id) {
+                    Some(j) => j.after = c.after,
+                    None => joined.items.push(c),
+                }
+            }
+        }
+        self.undo.push(joined);
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(change) = self.undo.pop() else { return false };
         self.apply_side(&change, true);
@@ -299,6 +323,24 @@ mod tests {
         assert!(d.can_redo());
         d.translate(&set, 2.0, 0.0);
         assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn joined_steps_undo_and_redo_as_one() {
+        let mut d = doc();
+        d.add(vec![note(0.0)]);
+        let depth = d.undo_depth();
+        let ids = d.add(vec![note(100.0)]);
+        d.add(vec![note(200.0)]);
+        let moved = d.item(&ids[0]).cloned().unwrap();
+        d.commit_drag(&[moved], 50.0, 0.0);
+        d.join_undo_since(depth);
+        assert_eq!(d.undo_depth(), depth + 1);
+        assert!(d.undo());
+        assert_eq!(d.board.live_items().count(), 1, "both adds and the move undone at once");
+        assert!(d.redo());
+        assert_eq!(d.board.live_items().count(), 3);
+        assert_eq!(d.item(&ids[0]).unwrap().frame.x, 150.0, "redo lands on the moved spot");
     }
 
     #[test]

@@ -64,6 +64,8 @@ struct Shell {
     title: String,
     /// An old-Wall import running in the background.
     old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
+    /// The pictures of the drop in progress (one undo step).
+    batch: Option<ImportBatch>,
     /// Light mode and grid as last saved to settings.
     saved_look: (bool, bool),
 }
@@ -157,18 +159,84 @@ fn copy(app: &mut App, cut: bool) {
 }
 
 /// Imports a picture or video file, as if it was dropped on the window.
-fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathBuf) {
+/// Returns the new picture's item (videos arrive later, once converted).
+fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathBuf) -> Option<uuid::Uuid> {
     if video::is_video(&path) {
         videos.import(path);
-        return;
+        return None;
     }
     let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
     let result = std::fs::read(&path)
         .map_err(|e| e.to_string())
         .and_then(|bytes| app.import_image_bytes(&bytes, name.as_deref(), now_ms()).map_err(|e| e.to_string()));
-    if let Err(e) = result {
-        eprintln!("wall: could not import {}: {e}", path.display());
+    match result {
+        Ok(id) => Some(id),
+        Err(e) => {
+            eprintln!("wall: could not import {}: {e}", path.display());
+            None
+        }
     }
+}
+
+/// Pictures imported together: one undo step, laid out in a grid.
+struct ImportBatch {
+    undo_from: usize,
+    ids: Vec<uuid::Uuid>,
+    at: Instant,
+    /// Where the first picture landed; the grid stays centred there.
+    centre: Option<(f64, f64)>,
+}
+
+/// Files dropped within this long of each other are one batch (the window
+/// gets one event per dropped file).
+const BATCH_MS: u128 = 1500;
+
+/// Imports files as one batch with any batch still open: one undo step,
+/// the pictures in rows from where the first one landed, all selected.
+fn import_files(app: &mut App, videos: &mut video::Videos, batch: &mut Option<ImportBatch>, paths: Vec<std::path::PathBuf>) {
+    let open = batch.take().filter(|b| b.at.elapsed().as_millis() < BATCH_MS && app.doc.undo_depth() >= b.undo_from);
+    let mut b = open.unwrap_or_else(|| ImportBatch { undo_from: app.doc.undo_depth(), ids: Vec::new(), at: Instant::now(), centre: None });
+    for path in paths {
+        if let Some(id) = import_file(app, videos, path) {
+            b.ids.push(id);
+        }
+    }
+    if b.ids.len() > 1 {
+        let sizes: Vec<_> = b.ids.iter().filter_map(|id| app.doc.item(id)).map(|i| (i.frame.w, i.frame.h)).collect();
+        if sizes.len() == b.ids.len() {
+            // Centred where the first one landed (the drop point).
+            let c = *b.centre.get_or_insert_with(|| app.doc.item(&b.ids[0]).map(|i| (i.frame.x + i.frame.w / 2.0, i.frame.y + i.frame.h / 2.0)).unwrap_or_default());
+            let unplaced = grid_layout(&sizes, (0.0, 0.0));
+            let (w, h) = unplaced.iter().fold((0.0f64, 0.0f64), |(w, h), r| (w.max(r[0] + r[2]), h.max(r[1] + r[3])));
+            for (id, r) in b.ids.iter().zip(grid_layout(&sizes, (c.0 - w / 2.0, c.1 - h / 2.0))) {
+                app.set_item_frame(*id, r);
+            }
+        }
+        app.selection = b.ids.iter().copied().collect();
+    }
+    app.doc.join_undo_since(b.undo_from);
+    b.at = Instant::now();
+    *batch = Some(b);
+}
+
+/// Rows of about square-root-of-n items, each row as tall as its tallest,
+/// 24 board units apart, from `origin` (top-left).
+fn grid_layout(sizes: &[(f64, f64)], origin: (f64, f64)) -> Vec<[f64; 4]> {
+    const GAP: f64 = 24.0;
+    let per_row = (sizes.len() as f64).sqrt().ceil().max(1.0) as usize;
+    let mut out = Vec::with_capacity(sizes.len());
+    let mut y = origin.1;
+    for row in sizes.chunks(per_row) {
+        let mut x = origin.0;
+        let mut tallest: f64 = 0.0;
+        for &(w, h) in row {
+            out.push([x, y, w, h]);
+            x += w + GAP;
+            tallest = tallest.max(h);
+        }
+        y += tallest + GAP;
+    }
+    out
 }
 
 /// File > Import: the system's file picker.
@@ -442,14 +510,8 @@ impl ApplicationHandler for Shell {
                 self.app.resize([size.width as f32, size.height as f32]);
                 self.gfx = Some(gfx);
                 // WALL_IMPORT="a.png;b.mp4" imports files at start, like a drop (for tests).
-                for path in std::env::var("WALL_IMPORT").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {
-                    let path = std::path::PathBuf::from(path);
-                    if video::is_video(&path) {
-                        self.videos.import(path);
-                    } else if let Err(e) = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| self.app.import_image_bytes(&b, None, now_ms()).map_err(|e| e.to_string())) {
-                        eprintln!("wall: could not import {}: {e}", path.display());
-                    }
-                }
+                let paths = std::env::var("WALL_IMPORT").unwrap_or_default().split(';').filter(|p| !p.is_empty()).map(std::path::PathBuf::from).collect();
+                import_files(&mut self.app, &mut self.videos, &mut self.batch, paths);
             }
             Err(e) => {
                 eprintln!("wall: could not start graphics: {e}");
@@ -543,11 +605,9 @@ impl ApplicationHandler for Shell {
                     switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
                 } else if path.is_dir() {
                     // Any other folder: import the pictures and videos in it.
-                    for file in media_in(&path) {
-                        import_file(&mut self.app, &mut self.videos, file);
-                    }
+                    import_files(&mut self.app, &mut self.videos, &mut self.batch, media_in(&path));
                 } else {
-                    import_file(&mut self.app, &mut self.videos, path);
+                    import_files(&mut self.app, &mut self.videos, &mut self.batch, vec![path]);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -562,9 +622,9 @@ impl ApplicationHandler for Shell {
                             }
                         }
                         wall_app::ShellCommand::Import => {
-                            for path in pick_files() {
-                                import_file(&mut self.app, &mut self.videos, path);
-                            }
+                            let paths = pick_files();
+                            self.batch = None;
+                            import_files(&mut self.app, &mut self.videos, &mut self.batch, paths);
                         }
                         wall_app::ShellCommand::OpenLibrary { new } => {
                             if let Some(path) = pick_library(new) {
@@ -815,6 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         posters: LibraryPosters::default(),
         title,
         old_import: None,
+        batch: None,
         saved_look: (light, grid),
     };
     event_loop.run_app(&mut shell)?;
@@ -824,6 +885,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_pictures_go_in_rows_without_overlapping() {
+        let sizes = [(400.0, 300.0), (200.0, 500.0), (300.0, 300.0), (100.0, 100.0), (640.0, 360.0)];
+        let r = grid_layout(&sizes, (10.0, 20.0));
+        assert_eq!(r[0], [10.0, 20.0, 400.0, 300.0]);
+        assert_eq!(r[1][0], 10.0 + 400.0 + 24.0);
+        // Three to a row; the second row starts under the tallest of the first.
+        assert_eq!(r[3][..2], [10.0, 20.0 + 500.0 + 24.0]);
+        for (i, a) in r.iter().enumerate() {
+            for b in &r[i + 1..] {
+                let apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
 
     #[test]
     fn remembers_the_last_library() {
