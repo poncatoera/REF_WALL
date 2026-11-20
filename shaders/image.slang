@@ -9,7 +9,11 @@ struct View
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<View> view;
-[[vk::binding(1, 0)]] Sampler2D image_tex;
+// Separate texture + sampler: naga cannot read Slang's combined Sampler2D
+// (OpTypeSampledImage variable). In GL the sampler drops out and filtering
+// comes from the texture object.
+[[vk::binding(1, 0)]] Texture2D image_tex;
+[[vk::binding(2, 0)]] SamplerState image_smp;
 
 struct ImageInstance
 {
@@ -56,7 +60,7 @@ float sd_round_box(float2 p, float2 half_size, float radius)
 [shader("fragment")]
 float4 fs_main(VsOut i) : SV_Target
 {
-    float4 c = image_tex.Sample(i.uv);
+    float4 c = image_tex.Sample(image_smp, i.uv);
     float radius = min(i.params.y, min(i.half_size.x, i.half_size.y));
     float d = sd_round_box(i.local, i.half_size, radius);
     float mask = 1.0 - smoothstep(-view.pixel * 0.5, view.pixel * 0.5, d);
