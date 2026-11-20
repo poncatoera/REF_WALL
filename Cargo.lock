@@ -1898,6 +1898,7 @@ dependencies = [
  "glutin-winit",
  "image",
  "raw-window-handle",
+ "serde_json",
  "wall-app",
  "wall-media",
  "wall-render",

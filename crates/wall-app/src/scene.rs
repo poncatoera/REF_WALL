@@ -66,6 +66,9 @@ impl Scene {
                     self.text(font, item.id, name, &item.kind, [c[0], c[1], c[2], 1.0], rect);
                 }
                 ItemKind::Media { hash, .. } => {
+                    // Placeholder under the picture, seen until its pixels (or a
+                    // video's first frame) arrive.
+                    self.groups.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [6.0, 1.0] });
                     self.images.push((hash.clone(), ImageInstance { rect, params: [1.0, 6.0, 0.0, 0.0] }));
                 }
                 ItemKind::Note { text, color } => {

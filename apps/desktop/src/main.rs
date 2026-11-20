@@ -6,10 +6,14 @@
 //! - `WALL_SCREENSHOT=path.png` renders a few frames, saves the window and exits.
 //! - `WALL_CAMERA="x,y,zoom"` sets the start view.
 //! - `WALL_BENCH=1` redraws continuously and prints fps (vsync off).
+//! - `WALL_IMPORT="a.png;b.mp4"` imports files at start, as if dropped.
+//! - `WALL_SCREENSHOT_FRAME=n` takes the screenshot at frame n (default 3).
 //! - `WALL_DEMO=n` opens a generated demo board with n notes instead of a library.
 //!
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
 //! `Wall/Library.wall` in the home folder. Boards save automatically.
+
+mod video;
 
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -44,6 +48,9 @@ struct Shell {
     bench: bool,
     mods: ModifiersState,
     cursor: [f32; 2],
+    videos: video::Videos,
+    /// Frame WALL_SCREENSHOT is taken at (WALL_SCREENSHOT_FRAME, default 3).
+    screenshot_frame: u32,
 }
 
 impl Shell {
@@ -122,6 +129,15 @@ impl ApplicationHandler for Shell {
                 }
                 gfx.window.request_redraw();
                 self.gfx = Some(gfx);
+                // WALL_IMPORT="a.png;b.mp4" imports files at start, like a drop (for tests).
+                for path in std::env::var("WALL_IMPORT").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {
+                    let path = std::path::PathBuf::from(path);
+                    if video::is_video(&path) {
+                        self.videos.import(path);
+                    } else if let Err(e) = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| self.app.import_image_bytes(&b, None, now_ms()).map_err(|e| e.to_string())) {
+                        eprintln!("wall: could not import {}: {e}", path.display());
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("wall: could not start graphics: {e}");
@@ -196,6 +212,7 @@ impl ApplicationHandler for Shell {
                     }
                 }
             }
+            WindowEvent::DroppedFile(path) if video::is_video(&path) => self.videos.import(path),
             WindowEvent::DroppedFile(path) => {
                 let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
                 let result = std::fs::read(&path)
@@ -206,8 +223,9 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.videos.pump(&mut self.app, &mut gfx.renderer);
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
-                if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames == 3) {
+                if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && self.videos.settled(1500)) {
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
                         Ok(()) => println!("wall: saved {path}"),
                         Err(e) => eprintln!("wall: screenshot failed: {e}"),
@@ -219,7 +237,7 @@ impl ApplicationHandler for Shell {
                 }
                 self.frames += 1;
                 let elapsed = self.fps_clock.elapsed().as_secs_f32();
-                if elapsed >= 2.0 {
+                if elapsed >= 2.0 && self.screenshot.is_none() {
                     println!("wall: {:.0} fps", self.frames as f32 / elapsed);
                     self.frames = 0;
                     self.fps_clock = Instant::now();
@@ -230,7 +248,7 @@ impl ApplicationHandler for Shell {
             }
             _ => {}
         }
-        if self.app.needs_redraw {
+        if self.app.needs_redraw || self.videos.busy() {
             gfx.window.request_redraw();
         }
         if let Err(e) = self.app.save_if_dirty() {
@@ -316,6 +334,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bench: std::env::var_os("WALL_BENCH").is_some(),
         mods: ModifiersState::empty(),
         cursor: [0.0, 0.0],
+        videos: video::Videos::default(),
+        screenshot_frame: std::env::var("WALL_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
     };
     event_loop.run_app(&mut shell)?;
     Ok(())

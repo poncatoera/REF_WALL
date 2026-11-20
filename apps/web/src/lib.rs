@@ -12,6 +12,8 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingContext, WheelEvent};
 
 struct State {
+    /// Playing `<video>` elements and the textures their frames go to.
+    videos: Vec<(web_sys::HtmlVideoElement, wall_render::ImageId)>,
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
@@ -54,7 +56,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
     let app = App::demo(2000);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { app, renderer, canvas: canvas.clone() }));
+    let state = Rc::new(RefCell::new(State { videos: Vec::new(), app, renderer, canvas: canvas.clone() }));
 
     fn pos(e: &PointerEvent) -> [f32; 2] {
         [e.offset_x() as f32 * dpr(), e.offset_y() as f32 * dpr()]
@@ -164,7 +166,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
                 if files.length() > 0 {
                     for i in 0..files.length() {
                         if let Some(file) = files.get(i) {
-                            import_file(s.clone(), file);
+                            import_any(s.clone(), file);
                         }
                     }
                     return;
@@ -192,7 +194,7 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
             let Some(files) = e.data_transfer().and_then(|d| d.files()) else { return };
             for i in 0..files.length() {
                 if let Some(file) = files.get(i) {
-                    import_file(s.clone(), file);
+                    import_any(s.clone(), file);
                 }
             }
         });
@@ -207,6 +209,21 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
         {
             let mut s = state.borrow_mut();
             let size = s.sync_size();
+            if !s.videos.is_empty() {
+                let State { videos, renderer, app, .. } = &mut *s;
+                use glow::HasContext;
+                for (v, tex) in videos.iter() {
+                    if v.ready_state() >= 2 {
+                        unsafe {
+                            let gl = renderer.gl();
+                            gl.bind_texture(glow::TEXTURE_2D, Some(renderer.texture(*tex)));
+                            gl.tex_image_2d_with_html_video(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, glow::RGBA, glow::UNSIGNED_BYTE, v);
+                            gl.bind_texture(glow::TEXTURE_2D, None);
+                        }
+                    }
+                }
+                app.needs_redraw = true;
+            }
             if s.app.needs_redraw {
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);
@@ -215,6 +232,62 @@ pub fn start(canvas_id: &str) -> Result<(), JsValue> {
         request_frame(frame.borrow().as_ref().unwrap());
     }));
     request_frame(frame2.borrow().as_ref().unwrap());
+    Ok(())
+}
+
+fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
+    if file.type_().starts_with("video/") {
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = import_video(s, &file).await {
+                web_sys::console::warn_1(&format!("wall: could not import {}: {}", file.name(), e.as_string().unwrap_or_else(|| format!("{e:?}"))).into());
+            }
+        });
+    } else {
+        import_file(s, file);
+    }
+}
+
+/// Plays a dropped video in a hidden `<video>` element (the browser
+/// decodes), stores its bytes, and copies each frame into a texture.
+async fn import_video(s: Rc<RefCell<State>>, file: &web_sys::File) -> Result<(), JsValue> {
+    const MAX_BYTES: f64 = 20_000_000.0;
+    if file.size() > MAX_BYTES {
+        // Converting in the browser (WebCodecs) comes with the cloud library.
+        return Err(format!("{:.1} MB is over the 20 MB limit; convert it first", file.size() / 1e6).into());
+    }
+    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
+    let video: web_sys::HtmlVideoElement = document.create_element("video")?.dyn_into()?;
+    video.set_muted(true);
+    video.set_loop(true);
+    video.set_autoplay(true);
+    video.set_attribute("playsinline", "")?;
+    let loaded = js_sys::Promise::new(&mut |resolve, reject| {
+        let _ = video.add_event_listener_with_callback("loadeddata", &resolve);
+        let _ = video.add_event_listener_with_callback("error", &reject);
+    });
+    video.set_src(&web_sys::Url::create_object_url_with_blob(file)?);
+    wasm_bindgen_futures::JsFuture::from(loaded).await.map_err(|_| JsValue::from_str("the browser cannot play this video"))?;
+    let buf = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await?;
+    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+    let ext = match file.type_().as_str() {
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        _ => "mp4",
+    };
+    let meta = wall_app::VideoMeta {
+        width: video.video_width(),
+        height: video.video_height(),
+        duration_ms: (video.duration() * 1000.0) as u64,
+        fps: None,
+    };
+    let mut st = s.borrow_mut();
+    let st = &mut *st;
+    let id = st.app.import_video(&bytes, ext, meta, Some(&file.name()), js_sys::Date::now() as u64).map_err(|e| e.to_string())?;
+    let hash = st.app.media_hash(&id).ok_or("video item missing")?;
+    let tex = st.renderer.create_video_texture(meta.width, meta.height).map_err(|e| e.to_string())?;
+    st.app.attach_texture(hash, tex);
+    let _ = video.play();
+    st.videos.push((video, tex));
     Ok(())
 }
 

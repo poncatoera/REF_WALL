@@ -213,6 +213,47 @@ impl Renderer {
         }
     }
 
+    /// A texture for video frames: no mipmaps (they would be rebuilt every
+    /// frame), linear filtering. Fill it with [`Self::update_image`].
+    pub fn create_video_texture(&mut self, width: u32, height: u32) -> Result<ImageId, RenderError> {
+        let gl = &self.gl;
+        unsafe {
+            let tex = gl.create_texture().map_err(RenderError::Gl)?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width as i32, height as i32, 0, glow::RGBA,
+                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            for (k, v) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Ok(ImageId(tex))
+        }
+    }
+
+    /// Replaces a video texture's pixels with a new RGBA8 frame of the size
+    /// it was created with.
+    pub fn update_image(&mut self, id: ImageId, rgba: &[u8], width: u32, height: u32) {
+        let gl = &self.gl;
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(id.0));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(rgba)));
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    /// The GL texture behind an image, for shells that upload frames
+    /// themselves (the web shell copies `<video>` frames directly).
+    pub fn texture(&self, id: ImageId) -> glow::Texture {
+        id.0
+    }
+
     pub fn delete_image(&mut self, id: ImageId) {
         unsafe { self.gl.delete_texture(id.0) };
     }

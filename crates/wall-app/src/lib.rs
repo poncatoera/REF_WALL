@@ -9,11 +9,12 @@ mod scene;
 use std::collections::{BTreeSet, HashMap};
 
 use uuid::Uuid;
-use wall_format::{Board, BoardItem, ContentHash, Frame, ItemKind, ItemSidecar, Library, MediaKind};
+use wall_format::{Board, BoardItem, Frame, ItemKind, ItemSidecar, Library, MediaKind};
 use wall_render::{ImageId, Renderer, ViewUniform};
 use wall_text::Font;
 
 pub use doc::Document;
+pub use wall_format::ContentHash;
 use scene::Scene;
 
 /// Pan and zoom over the infinite board.
@@ -142,6 +143,26 @@ enum Picture {
     Ready(ImageId),
 }
 
+/// What a shell measured about a video file before importing it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoMeta {
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+    pub fps: Option<f32>,
+}
+
+/// A video on the board that has no texture yet; the shell starts a player
+/// for it and hands back a texture with [`App::attach_texture`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoSource {
+    pub hash: ContentHash,
+    /// The file in the open library, if there is one.
+    pub path: Option<std::path::PathBuf>,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct App {
     pub camera: Camera,
     pub doc: Document,
@@ -160,6 +181,8 @@ pub struct App {
     editing: Option<Editing>,
     last_click: Option<(u64, [f32; 2])>,
     now_ms: u64,
+    /// Video hashes and their file extension and size.
+    videos: HashMap<ContentHash, (String, u32, u32)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +193,8 @@ pub enum AppError {
     Media(#[from] wall_media::MediaError),
     #[error("could not decode image: {0}")]
     Decode(#[from] image::ImageError),
+    #[error("video is {0} bytes; convert it under the 20 MB limit first")]
+    VideoTooLarge(u64),
 }
 
 const BACKGROUND: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
@@ -193,6 +218,7 @@ impl App {
             editing: None,
             last_click: None,
             now_ms: 0,
+            videos: HashMap::new(),
         }
     }
 
@@ -237,6 +263,12 @@ impl App {
             .filter(|h| !self.pictures.contains_key(h))
             .collect();
         for hash in hashes {
+            if let Ok(sc) = library.read_sidecar(&hash) {
+                if sc.kind == MediaKind::Video {
+                    self.videos.insert(hash, (sc.ext, sc.width, sc.height));
+                    continue;
+                }
+            }
             let loaded = library.read_sidecar(&hash).ok().and_then(|sc| {
                 let bytes = std::fs::read(library.media_path(&hash, &sc.ext)).ok()?;
                 image::load_from_memory(&bytes).ok()
@@ -300,6 +332,80 @@ impl App {
         let (w, h) = rgba.dimensions();
         self.pictures.entry(hash.clone()).or_insert(Picture::Pending { rgba: rgba.into_raw(), width: w, height: h });
         Ok(self.place_media(hash, w, h))
+    }
+
+    /// Imports a video file's bytes (already under the size limit; shells
+    /// convert larger files first) and drops it at the cursor. Its frames
+    /// come from a player the shell runs; see [`Self::video_sources`].
+    pub fn import_video(&mut self, bytes: &[u8], ext: &str, meta: VideoMeta, source: Option<&str>, now_ms: u64) -> Result<Uuid, AppError> {
+        let limits = wall_media::Limits::default();
+        if bytes.len() as u64 > limits.max_video_bytes {
+            return Err(AppError::VideoTooLarge(bytes.len() as u64));
+        }
+        let hash = ContentHash::of(bytes);
+        if let Some(lib) = &self.library {
+            let known = lib.has_media(&hash);
+            lib.import_bytes(bytes, ext)?;
+            if !known {
+                lib.write_sidecar(&ItemSidecar {
+                    hash: hash.clone(),
+                    kind: MediaKind::Video,
+                    ext: ext.into(),
+                    width: meta.width,
+                    height: meta.height,
+                    bytes: bytes.len() as u64,
+                    duration_ms: Some(meta.duration_ms),
+                    fps: meta.fps,
+                    added_ms: now_ms,
+                    title: source.map(|s| s.to_owned()),
+                    source_url: None,
+                    tags: Vec::new(),
+                    auto_tags: Vec::new(),
+                    colors: Vec::new(),
+                    original: None,
+                    extra: Default::default(),
+                })?;
+            }
+        }
+        self.videos.insert(hash.clone(), (ext.to_owned(), meta.width, meta.height));
+        Ok(self.place_media(hash, meta.width, meta.height))
+    }
+
+    /// Videos on the board that still need a player and texture.
+    pub fn video_sources(&self) -> Vec<VideoSource> {
+        let on_board: BTreeSet<&ContentHash> = self
+            .doc
+            .board
+            .live_items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media { hash, .. } => Some(hash),
+                _ => None,
+            })
+            .collect();
+        self.videos
+            .iter()
+            .filter(|(h, _)| on_board.contains(h) && !self.pictures.contains_key(*h))
+            .map(|(h, (ext, w, h2))| VideoSource {
+                hash: h.clone(),
+                path: self.library.as_ref().map(|l| l.media_path(h, ext)),
+                width: *w,
+                height: *h2,
+            })
+            .collect()
+    }
+
+    /// The media hash of a picture or video item.
+    pub fn media_hash(&self, id: &Uuid) -> Option<ContentHash> {
+        match &self.doc.item(id)?.kind {
+            ItemKind::Media { hash, .. } => Some(hash.clone()),
+            _ => None,
+        }
+    }
+
+    /// Gives a picture or video a texture the shell created and fills.
+    pub fn attach_texture(&mut self, hash: ContentHash, id: ImageId) {
+        self.pictures.insert(hash, Picture::Ready(id));
+        self.needs_redraw = true;
     }
 
     /// Writes the board to the library if it changed and no drag is in
@@ -889,6 +995,28 @@ mod tests {
         a.key(Key::Enter);
         assert!(!a.is_editing());
         assert_eq!(note_text(&a, &g), "Refs!");
+    }
+
+    #[test]
+    fn videos_import_into_the_library_and_ask_for_a_player() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("V.wall");
+        let mut a = App::open_library(&root, "test", 1).unwrap();
+        a.resize([1000.0, 800.0]);
+        let bytes = b"not really an mp4, but the app only stores it".to_vec();
+        let meta = VideoMeta { width: 640, height: 360, duration_ms: 4000, fps: Some(25.0) };
+        let id = a.import_video(&bytes, "mp4", meta, Some("clip.mp4"), 5).unwrap();
+        assert_eq!(a.doc.item(&id).unwrap().frame.w, 640.0);
+        let src = a.video_sources();
+        assert_eq!(src.len(), 1);
+        let path = src[0].path.clone().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        a.save_if_dirty().unwrap();
+        // Reopened, the video still asks for a player and is not decoded as an image.
+        let b = App::open_library(&root, "test", 2).unwrap();
+        assert_eq!(b.video_sources(), src);
+        let big = vec![0u8; 20_000_001];
+        assert!(matches!(a.import_video(&big, "mp4", meta, None, 6), Err(AppError::VideoTooLarge(_))));
     }
 
     #[test]
