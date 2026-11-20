@@ -212,6 +212,12 @@ pub struct App {
     video_commands: Vec<(ContentHash, VideoCommand)>,
     /// Fit the view to the board once the real window size is known.
     fit_on_resize: bool,
+    /// Boards opened before (with their undo history and view), by id.
+    parked: HashMap<Uuid, (Document, Camera)>,
+    /// Names of every known board, for board cards and the breadcrumb.
+    board_names: HashMap<Uuid, String>,
+    /// The boards above the open one, outermost first.
+    nav: Vec<Uuid>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -230,6 +236,7 @@ const BACKGROUND: [f32; 4] = [0.075, 0.078, 0.086, 1.0];
 
 impl App {
     pub fn new(board: Board, device: &str) -> Self {
+        let (board_id, board_name) = (board.id, board.name.clone());
         Self {
             camera: Camera { center: [0.0, 0.0], zoom: 1.0 },
             doc: Document::new(board, device),
@@ -251,6 +258,9 @@ impl App {
             video_status: HashMap::new(),
             video_commands: Vec::new(),
             fit_on_resize: false,
+            parked: HashMap::new(),
+            board_names: [(board_id, board_name)].into(),
+            nav: Vec::new(),
         }
     }
 
@@ -267,7 +277,8 @@ impl App {
             boards.push(library.read_board(id)?);
         }
         boards.sort_by_key(|b| b.created_ms);
-        let board = match boards.into_iter().next() {
+        let names: HashMap<Uuid, String> = boards.iter().map(|b| (b.id, b.name.clone())).collect();
+        let board = match boards.into_iter().find(|b| b.parent.is_none()) {
             Some(b) => b,
             None => {
                 let b = Board::new("Board 1", now_ms);
@@ -276,6 +287,7 @@ impl App {
             }
         };
         let mut app = Self::new(board, device);
+        app.board_names.extend(names);
         app.load_pictures(&library);
         app.library = Some(library);
         app.fit_on_resize = true;
@@ -731,6 +743,14 @@ impl App {
             return;
         }
         if double && !mods.shift {
+            if let Some(board_id) = hit.and_then(|id| match self.doc.item(&id)?.kind {
+                ItemKind::Board { board_id } => Some(board_id),
+                _ => None,
+            }) {
+                self.last_click = None;
+                self.open_board(board_id, true);
+                return;
+            }
             if let Some(hash) = hit.and_then(|id| self.video_of(&id)) {
                 self.toggle_play(hash);
                 self.last_click = None;
@@ -955,10 +975,14 @@ impl App {
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
+            Key::Escape if self.selection.is_empty() => self.go_up(),
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
             Key::Left | Key::Right | Key::Home | Key::End => {}
             Key::Char(c @ '0'..='7') => self.set_color(c),
+            Key::Char('b' | 'B') => {
+                self.new_board();
+            }
             Key::Char(c) => self.video_key(c),
             Key::Duplicate => self.duplicate(),
             Key::BringToFront => self.restack(true),
@@ -985,6 +1009,96 @@ impl App {
             }
         }
         out
+    }
+
+    // ---- boards inside boards ---------------------------------------------
+
+    /// Id of the open board.
+    pub fn board_id(&self) -> Uuid {
+        self.doc.board.id
+    }
+
+    /// Names from the outermost board down to the open one.
+    pub fn breadcrumb(&self) -> Vec<String> {
+        self.nav
+            .iter()
+            .chain(std::iter::once(&self.doc.board.id))
+            .map(|id| self.board_names.get(id).cloned().unwrap_or_else(|| "Board".into()))
+            .collect()
+    }
+
+    /// Adds a new, empty board inside this one as a card at the cursor.
+    pub fn new_board(&mut self) -> Uuid {
+        self.end_edit();
+        let mut board = Board::new(format!("Board {}", self.board_names.len() + 1), self.now_ms);
+        board.parent = Some(self.doc.board.id);
+        let id = board.id;
+        self.board_names.insert(id, board.name.clone());
+        match &self.library {
+            Some(lib) => {
+                if let Err(e) = lib.write_board(&board) {
+                    eprintln!("wall: could not create board: {e}");
+                }
+            }
+            None => {
+                let doc = Document::new(board, self.doc.device.clone());
+                self.parked.insert(id, (doc, Camera { center: [0.0, 0.0], zoom: 1.0 }));
+            }
+        }
+        let at = self.camera.screen_to_board(self.cursor, self.viewport);
+        let frame = Frame { x: at[0] as f64 - 110.0, y: at[1] as f64 - 70.0, w: 220.0, h: 140.0, ..Default::default() };
+        let item = self.doc.add(vec![(frame, ItemKind::Board { board_id: id })])[0];
+        self.selection = [item].into();
+        self.needs_redraw = true;
+        id
+    }
+
+    /// Opens another board. `down` records the current one as its parent in
+    /// the breadcrumb (false when going back up).
+    pub fn open_board(&mut self, id: Uuid, down: bool) {
+        if id == self.doc.board.id {
+            return;
+        }
+        self.end_edit();
+        if let Err(e) = self.save_if_dirty() {
+            eprintln!("wall: could not save: {e}");
+        }
+        let next = match self.parked.remove(&id) {
+            Some(p) => Some(p),
+            None => self.library.as_ref().and_then(|l| l.read_board(id).ok()).map(|b| (Document::new(b, self.doc.device.clone()), Camera { center: [0.0, 0.0], zoom: 1.0 })),
+        };
+        let Some((mut doc, camera)) = next else {
+            eprintln!("wall: board {id} not found");
+            return;
+        };
+        doc.set_clock(self.now_ms);
+        let fresh = !doc.can_undo() && doc.version == 0;
+        let prev_doc = std::mem::replace(&mut self.doc, doc);
+        let prev_cam = std::mem::replace(&mut self.camera, camera);
+        let prev_id = prev_doc.board.id;
+        self.parked.insert(prev_id, (prev_doc, prev_cam));
+        if down {
+            self.nav.push(prev_id);
+        }
+        self.saved_version = self.doc.version;
+        self.selection.clear();
+        self.gesture = Gesture::Idle;
+        self.scene.invalidate();
+        if let Some(lib) = self.library.take() {
+            self.load_pictures(&lib);
+            self.library = Some(lib);
+        }
+        if fresh {
+            self.fit_view();
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Back to the board this one sits in.
+    pub fn go_up(&mut self) {
+        if let Some(parent) = self.nav.pop() {
+            self.open_board(parent, false);
+        }
     }
 
     // ---- arranging ---------------------------------------------------------
@@ -1286,7 +1400,7 @@ impl App {
             })
             .collect();
 
-        self.scene.update(&self.doc, &mut self.font);
+        self.scene.update(&self.doc, &mut self.font, &self.board_names);
         if self.font.atlas.dirty {
             renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
             self.font.atlas.dirty = false;
@@ -1318,6 +1432,19 @@ impl App {
         self.scene.draw(renderer, &view, &textures);
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
+        if !self.nav.is_empty() {
+            // Breadcrumb at the top-left, constant size on screen.
+            let text = format!("{}   (Esc to go up)", self.breadcrumb().join("  ›  "));
+            let size = 14.0 / self.camera.zoom;
+            let at = self.camera.screen_to_board([16.0, 28.0], self.viewport);
+            let mut crumb = Vec::new();
+            scene::add_text(&mut self.font, &mut crumb, &text, at, size, [0.7, 0.72, 0.78, 1.0]);
+            if self.font.atlas.dirty {
+                renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
+                self.font.atlas.dirty = false;
+            }
+            renderer.draw_glyphs(&view, &crumb);
+        }
         if self.doc.board.live_items().next().is_none() {
             // Empty board: a hint in the middle of the screen, constant size.
             let mut hint = Vec::new();
@@ -1588,7 +1715,7 @@ mod tests {
     #[test]
     fn draw_order_follows_z_with_few_batches() {
         let mut a = App::demo(400);
-        a.scene.update(&a.doc, &mut a.font);
+        a.scene.update(&a.doc, &mut a.font, &a.board_names);
         assert_eq!(a.scene.run_count(), 1, "nothing overlaps in the demo grid: one batch");
         // A note dragged over a picture, then the picture brought forward:
         // the picture must draw after (above) the note.
@@ -1599,7 +1726,7 @@ mod tests {
         add_note(&mut b, 150.0, 120.0);
         b.selection = [pic].into();
         b.key(Key::BringToFront);
-        b.scene.update(&b.doc, &mut b.font);
+        b.scene.update(&b.doc, &mut b.font, &b.board_names);
         assert_eq!(b.scene.run_count(), 2);
     }
 
@@ -1691,6 +1818,48 @@ mod tests {
         assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: None, .. }));
         a.key(Key::Undo);
         assert!(matches!(&a.doc.item(&n).unwrap().kind, ItemKind::Note { color: Some(_), .. }));
+    }
+
+    #[test]
+    fn boards_inside_boards_open_edit_and_come_back() {
+        let mut a = app();
+        a.pointer_move([500.0, 400.0]);
+        let child = a.new_board();
+        let card = *a.selection.iter().next().unwrap();
+        let root = a.board_id();
+        // Double-click the card to open it.
+        click(&mut a, 1000, [500.0, 400.0]);
+        click(&mut a, 1100, [500.0, 400.0]);
+        assert_eq!(a.board_id(), child);
+        assert_eq!(a.breadcrumb(), vec!["t".to_owned(), "Board 2".to_owned()]);
+        let n = add_note(&mut a, 0.0, 0.0);
+        a.key(Key::Escape); // nothing selected: go up
+        assert_eq!(a.board_id(), root);
+        assert!(a.doc.item(&card).is_some());
+        assert!(a.doc.item(&n).is_none(), "the note lives in the child board");
+        a.open_board(child, true);
+        assert!(a.doc.item(&n).is_some());
+        a.key(Key::Undo); // undo history survived the trip
+        assert!(a.doc.item(&n).is_none());
+    }
+
+    #[test]
+    fn child_boards_save_to_the_library_and_the_root_opens_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("B.wall");
+        let mut a = App::open_library(&root_path, "test", 1).unwrap();
+        a.resize([1000.0, 800.0]);
+        let root = a.board_id();
+        let child = a.new_board();
+        a.open_board(child, true);
+        add_note(&mut a, 0.0, 0.0);
+        a.go_up();
+        a.save_if_dirty().unwrap();
+        let b = App::open_library(&root_path, "test", 2).unwrap();
+        assert_eq!(b.board_id(), root);
+        let mut b = b;
+        b.open_board(child, true);
+        assert_eq!(b.item_count(), 1);
     }
 
     #[test]

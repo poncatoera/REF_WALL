@@ -80,7 +80,13 @@ impl Scene {
     }
 
     /// Rebuilds instances if the document changed since the last call.
-    pub fn update(&mut self, doc: &Document, font: &mut Font) {
+    /// Forces a rebuild on the next update (another board was opened).
+    pub fn invalidate(&mut self) {
+        self.version = None;
+        self.text_cache.clear();
+    }
+
+    pub fn update(&mut self, doc: &Document, font: &mut Font, board_names: &HashMap<Uuid, String>) {
         if self.version == Some(doc.version) {
             return;
         }
@@ -150,8 +156,22 @@ impl Scene {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: NOTE_STROKE, shape: [8.0, 1.0] });
                     label = Some((title.as_str(), TEXT));
                 }
-                ItemKind::Board { .. } => {
+                ItemKind::Board { board_id } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL, stroke: ACCENT, shape: [8.0, 1.5] });
+                    // A small stack mark in the corner says "this opens".
+                    let px = 10.0;
+                    for k in 0..2 {
+                        let o = 6.0 * k as f32;
+                        run.boxes.push(BoxInstance {
+                            rect: [rect[0] + rect[2] - 34.0 + o, rect[1] + rect[3] - 30.0 - o, 22.0, 16.0],
+                            fill: NOTE_FILL,
+                            stroke: [ACCENT[0] * 0.8, ACCENT[1] * 0.8, ACCENT[2] * 0.8, 1.0],
+                            shape: [3.0, 1.0],
+                        });
+                        let _ = px;
+                    }
+                    let name = board_names.get(board_id).map_or("Board", |n| n.as_str());
+                    label = Some((name, TEXT));
                 }
                 ItemKind::Arrow { .. } => {
                     if let Some(pts) = arrow {
@@ -304,7 +324,7 @@ pub struct TextStyle {
 impl TextStyle {
     pub fn of(kind: &ItemKind, width: f32) -> Option<Self> {
         Some(match kind {
-            ItemKind::Note { .. } | ItemKind::Todo { .. } => TextStyle { at: [14.0, 30.0], size: 16.0, wrap: Some(width - 28.0), multiline: true },
+            ItemKind::Note { .. } | ItemKind::Todo { .. } | ItemKind::Board { .. } => TextStyle { at: [14.0, 30.0], size: 16.0, wrap: Some(width - 28.0), multiline: true },
             ItemKind::Group { .. } => TextStyle { at: [12.0, 30.0], size: 20.0, wrap: None, multiline: false },
             ItemKind::Label { .. } => TextStyle { at: [0.0, 96.0], size: 96.0, wrap: None, multiline: false },
             _ => return None,
