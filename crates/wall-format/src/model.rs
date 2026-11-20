@@ -224,6 +224,12 @@ pub enum ItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<String>,
     },
+    /// A row of colours ("#rrggbb"), with an optional name.
+    Palette {
+        colors: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        name: String,
+    },
     /// A web link: its address, and a title to show instead of it.
     Link {
         url: String,

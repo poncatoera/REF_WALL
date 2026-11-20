@@ -997,6 +997,12 @@ impl App {
             self.last_click = None;
             return;
         }
+        if let Some(hex) = hit.filter(|id| self.selection.contains(id) && !mods.shift).and_then(|id| self.swatch_at(id, board)) {
+            // A click on a colour of a selected palette copies its hex code.
+            self.shell_commands.push(menu::ShellCommand::CopyText(hex));
+            self.last_click = None;
+            return;
+        }
         if let Some((hash, x, w, duration)) = hit.and_then(|id| self.scrub_target(id, board)) {
             self.selection = [hit.unwrap()].into();
             self.video_commands.push((hash.clone(), VideoCommand::Seek(video::time_at(board[0], x, w, duration))));
@@ -1915,6 +1921,8 @@ impl App {
         let at = self.camera.screen_to_board(self.cursor, self.viewport);
         if let Some(url) = as_url(&text) {
             self.new_link(at, url);
+        } else if let Some(colors) = as_hex_colors(&text) {
+            self.new_palette(at, colors);
         } else {
             self.new_note(at, text);
         }
@@ -2318,6 +2326,14 @@ impl App {
                 info.rows.push(size_row(f.w, f.h));
                 info.color = Some(color.clone());
             }
+            ItemKind::Palette { colors, name } => {
+                info.kind = "Palette".into();
+                info.title = Some(name.clone());
+                info.title_hint = "Name this palette".into();
+                info.palette = colors.clone();
+                info.rows.push(("Colours".into(), colors.iter().map(|c| c.to_uppercase()).collect::<Vec<_>>().join("  ")));
+                info.rows.push(("Copy".into(), "Click a colour on the card".into()));
+            }
             ItemKind::Stroke { points, .. } => {
                 info.kind = "Drawing".into();
                 info.rows.push(("Points".into(), points.len().to_string()));
@@ -2529,6 +2545,13 @@ impl App {
                 }
                 self.doc.replace(vec![after]);
             }
+            (Field::Title, ItemKind::Palette { .. }) => {
+                let mut after = item.clone();
+                if let ItemKind::Palette { name, .. } = &mut after.kind {
+                    *name = text;
+                }
+                self.doc.replace(vec![after]);
+            }
             (Field::Title, ItemKind::Link { .. }) => {
                 let mut after = item.clone();
                 if let ItemKind::Link { title, .. } = &mut after.kind {
@@ -2650,6 +2673,10 @@ impl App {
             Tool::Link => {
                 self.new_link(at, String::new());
             }
+            Tool::Palette => {
+                let colors = self.selection_colors();
+                self.new_palette(at, colors);
+            }
             Tool::Group => {
                 let s = self.card_scale();
                 let (w, h) = (480.0 * s, 320.0 * s);
@@ -2687,6 +2714,50 @@ impl App {
         let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None })])[0];
         self.needs_redraw = true;
         Some(id)
+    }
+
+    /// Colours of the selected pictures and videos (their extracted
+    /// palettes, first ones first, no repeats, at most 8), or a starter set.
+    fn selection_colors(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for i in self.selected_items() {
+            if let ItemKind::Media { hash, .. } = &i.kind {
+                for c in self.sidecars.get(hash).map(|s| s.colors.clone()).unwrap_or_default() {
+                    if !out.contains(&c) && out.len() < 8 {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            out = ["#1d1f24", "#3d5a80", "#98c1d9", "#e0fbfc", "#ee6c4d"].map(String::from).to_vec();
+        }
+        out
+    }
+
+    /// A palette card at a board point, selected. One undo step.
+    pub fn new_palette(&mut self, at: [f32; 2], colors: Vec<String>) -> Uuid {
+        self.end_edit();
+        let s = self.card_scale();
+        let w = (20.0 + 62.0 * colors.len().max(2) as f64) * s;
+        let frame = Frame { x: at[0] as f64 - 20.0 * s, y: at[1] as f64 - 20.0 * s, w, h: 110.0 * s, z: self.doc.top_z() + 1.0, text_scale: s, ..Default::default() };
+        let id = self.doc.add(vec![(frame, ItemKind::Palette { colors, name: String::new() })])[0];
+        self.selection = [id].into();
+        self.needs_redraw = true;
+        id
+    }
+
+    /// The colour of the palette swatch under a board point.
+    fn swatch_at(&self, id: Uuid, p: [f32; 2]) -> Option<String> {
+        let item = self.doc.item(&id)?;
+        let ItemKind::Palette { colors, name } = &item.kind else { return None };
+        let f = item.frame;
+        // Laid out at the card's unscaled size, like to-dos.
+        let s = if f.text_scale > 0.0 { f.text_scale as f32 } else { 1.0 };
+        let rect = [f.x as f32, f.y as f32, f.w as f32 / s, f.h as f32 / s];
+        let p = [rect[0] + (p[0] - rect[0]) / s, rect[1] + (p[1] - rect[1]) / s];
+        let k = scene::palette_swatches(rect, colors.len(), !name.is_empty()).iter().position(|r| panel::inside(*r, p))?;
+        colors.get(k).cloned()
     }
 
     /// A link card at a board point. Empty `url`: ready for typing one.
@@ -2995,6 +3066,25 @@ fn as_url(text: &str) -> Option<String> {
 
 /// Pen line width in screen pixels when drawn.
 const PEN_PX: f32 = 3.0;
+
+/// Pasted text that is only hex colours ("#aabbcc", "aabbcc", "#abc"; two or
+/// more, split by spaces, commas or lines), as "#rrggbb".
+fn as_hex_colors(text: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for w in text.split(|c: char| c.is_whitespace() || c == ',' || c == ';').filter(|w| !w.is_empty()) {
+        let h = w.trim_start_matches('#');
+        if !h.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let full = match h.len() {
+            6 => h.to_lowercase(),
+            3 => h.chars().flat_map(|c| [c, c]).collect::<String>().to_lowercase(),
+            _ => return None,
+        };
+        out.push(format!("#{full}"));
+    }
+    (out.len() >= 2 && out.len() <= 32).then_some(out)
+}
 
 #[cfg(test)]
 mod tests {
@@ -3898,6 +3988,57 @@ mod tests {
         // Moving it keeps the shape; undo takes it away.
         a.key(Key::Undo);
         assert!(a.doc.item(&stroke.id).is_none());
+    }
+
+    #[test]
+    fn palettes_come_from_pasted_hex_or_selected_pictures_and_copy_on_click() {
+        let mut a = app();
+        assert_eq!(as_hex_colors("#FFF, 102030\n#aabbcc"), Some(vec!["#ffffff".into(), "#102030".into(), "#aabbcc".into()]));
+        assert_eq!(as_hex_colors("#fff and #000"), None);
+        assert_eq!(as_hex_colors("#fff"), None, "one colour is just text");
+        a.cursor = [400.0, 300.0];
+        a.paste_text("#ff0000 #00ff00 #0000ff");
+        let id = *a.selection.iter().next().unwrap();
+        let item = a.doc.item(&id).unwrap().clone();
+        assert!(matches!(&item.kind, ItemKind::Palette { colors, .. } if colors.len() == 3));
+        // Clicking the second swatch of the selected palette copies it.
+        let f = item.frame;
+        let r = scene::palette_swatches([f.x as f32, f.y as f32, f.w as f32, f.h as f32], 3, false)[1];
+        let p = [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0];
+        let screen = [(p[0] - a.camera.center[0]) * a.camera.zoom + a.viewport[0] / 2.0, (p[1] - a.camera.center[1]) * a.camera.zoom + a.viewport[1] / 2.0];
+        a.take_shell_commands();
+        a.pointer_down(Button::Primary, screen, Mods::default());
+        a.pointer_up(Button::Primary, screen);
+        assert_eq!(a.take_shell_commands(), vec![menu::ShellCommand::CopyText("#00ff00".into())]);
+        // From the rail with a picture selected: the picture's colours.
+        let hash = a.add_picture(vec![0; 4], 1, 1);
+        a.sidecars.insert(
+            hash.clone(),
+            ItemSidecar {
+                hash: hash.clone(),
+                kind: MediaKind::Image,
+                ext: "png".into(),
+                width: 1,
+                height: 1,
+                bytes: 4,
+                duration_ms: None,
+                fps: None,
+                added_ms: 0,
+                title: None,
+                source_url: None,
+                tags: Vec::new(),
+                auto_tags: Vec::new(),
+                colors: vec!["#112233".into(), "#445566".into()],
+                original: None,
+                range: None,
+                extra: Default::default(),
+            },
+        );
+        let pic = a.doc.add(vec![(Frame { x: 0.0, y: 0.0, w: 100.0, h: 100.0, ..Default::default() }, ItemKind::Media { hash, crop: None, look: Default::default() })])[0];
+        a.selection = [pic].into();
+        a.make_with_tool(toolbar::Tool::Palette, [500.0, 500.0]);
+        let made = a.doc.item(a.selection.iter().next().unwrap()).unwrap();
+        assert_eq!(made.kind, ItemKind::Palette { colors: vec!["#112233".into(), "#445566".into()], name: String::new() });
     }
 
     #[test]

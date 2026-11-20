@@ -308,6 +308,7 @@ fn kind_name_of(k: &ItemKind) -> &'static str {
         ItemKind::Board { .. } => "boards",
         ItemKind::Link { .. } => "links",
         ItemKind::Stroke { .. } => "drawings",
+        ItemKind::Palette { .. } => "palettes",
     }
 }
 

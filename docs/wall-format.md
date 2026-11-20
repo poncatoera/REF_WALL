@@ -162,6 +162,7 @@ Every item has `id`, `frame`, `type`, `rev`, `updated_ms` and
 | `media` | `hash`, `crop` (optional), `look` (optional) | A picture or video. `crop` is the visible part in 0–1 texture units of the source. `look` is `{ turns, mirror, flip_v, grayscale }`, each left out when 0 / false: `turns` is quarter turns clockwise (0–3), applied after the crop; `mirror` and `flip_v` flip what you see after turning. The frame's `w` and `h` are the size on the board, so a quarter-turned picture's frame is tall where the source is wide. |
 | `link` | `url`, `title` (optional) | A web link card. Shows the title (or the address) and the site. |
 | `stroke` | `points`, `width`, `color` (optional) | A pen line. `points` are `[x, y]` pairs in 0–1 of the frame, so resizing the frame scales the line; `width` is in board units. Without a colour it uses the board's text colour. |
+| `palette` | `colors`, `name` (optional) | A row of colour swatches, each `"#rrggbb"`. |
 | `note` | `text`, `color` (optional) | A card of text. `color` is `#rrggbb`. |
 | `label` | `text` | Large free text without a card. |
 | `todo` | `title`, `entries`: `[{ "text", "done" }]` | A checklist. |

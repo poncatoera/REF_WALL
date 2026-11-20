@@ -92,6 +92,8 @@ pub enum ShellCommand {
     ImportOldWall,
     /// Open a web address in the browser.
     OpenUrl(String),
+    /// Put this text on the clipboard (a palette colour's hex code).
+    CopyText(String),
 }
 
 impl Command {

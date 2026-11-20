@@ -241,6 +241,22 @@ impl Scene {
                     let name = board_names.get(board_id).map_or("Board", |n| n.as_str());
                     label = Some((name, TEXT()));
                 }
+                ItemKind::Palette { colors, name } => {
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
+                    if !name.is_empty() {
+                        let t = clip_line(font, name, 15.0, rect[2] - 28.0);
+                        add_text(font, &mut run.glyphs, &t, [rect[0] + 12.0, rect[1] + 24.0], 15.0, TEXT());
+                    }
+                    let swatches = palette_swatches(rect, colors.len(), !name.is_empty());
+                    for (c, r) in colors.iter().zip(&swatches) {
+                        let fill = parse_hex(Some(c)).map_or([0.5, 0.5, 0.5, 1.0], |c| [c[0], c[1], c[2], 1.0]);
+                        run.boxes.push(BoxInstance { rect: *r, fill, stroke: NOTE_STROKE(), shape: [4.0, 1.0] });
+                        if r[2] >= 44.0 {
+                            let hex = c.trim_start_matches('#').to_uppercase();
+                            add_text(font, &mut run.glyphs, &hex, [r[0] + 1.0, r[1] + r[3] + 15.0], 11.0, crate::theme::t().text_done);
+                        }
+                    }
+                }
                 ItemKind::Stroke { points, width, color } => {
                     let ink = parse_hex(color.as_deref()).map_or(TEXT(), |c| [c[0], c[1], c[2], 1.0]);
                     run.curves.extend(stroke_curves(points, rect, *width, ink));
@@ -773,4 +789,17 @@ pub fn stroke_points(points: &[[f32; 2]], rect: [f32; 4]) -> Vec<[f32; 2]> {
 
 fn stroke_curves(points: &[[f32; 2]], rect: [f32; 4], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
     pen_curves(&stroke_points(points, rect), width, ink)
+}
+
+/// Where a palette card's colour swatches sit: one row across the card,
+/// under the name if it has one, with room for the hex codes below.
+pub fn palette_swatches(rect: [f32; 4], n: usize, named: bool) -> Vec<[f32; 4]> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let (pad, gap) = (10.0, 6.0);
+    let top = rect[1] + if named { 34.0 } else { pad };
+    let h = (rect[1] + rect[3] - 24.0 - top).max(4.0);
+    let w = ((rect[2] - 2.0 * pad - gap * (n as f32 - 1.0)) / n as f32).max(2.0);
+    (0..n).map(|k| [rect[0] + pad + k as f32 * (w + gap), top, w, h]).collect()
 }

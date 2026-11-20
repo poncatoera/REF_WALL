@@ -20,6 +20,8 @@ pub enum Tool {
     Board,
     /// A web link card.
     Link,
+    /// A colour palette card (from the selected pictures' colours).
+    Palette,
     /// Pictures or videos from disk.
     Import,
 }
@@ -27,7 +29,7 @@ pub enum Tool {
 impl Tool {
     /// Tools that make something when clicked or dragged onto the board.
     pub fn makes_item(self) -> bool {
-        matches!(self, Tool::Note | Tool::Text | Tool::Todo | Tool::Group | Tool::Board | Tool::Link)
+        matches!(self, Tool::Note | Tool::Text | Tool::Todo | Tool::Group | Tool::Board | Tool::Link | Tool::Palette)
     }
 }
 
@@ -43,6 +45,7 @@ pub const TOOLS: &[Option<(Tool, &str)>] = &[
     Some((Tool::Pen, "Pen  ·  Esc to stop")),
     Some((Tool::Board, "Board  ·  B")),
     Some((Tool::Link, "Link  ·  or paste an address")),
+    Some((Tool::Palette, "Palette  ·  from the selected pictures")),
     None,
     Some((Tool::Import, "Pictures or videos…")),
 ];
@@ -145,6 +148,7 @@ fn ghost_size(tool: Tool) -> [f32; 2] {
     match tool {
         Tool::Group => [240.0, 160.0],
         Tool::Board => [220.0, 140.0],
+        Tool::Palette => [260.0, 110.0],
         Tool::Text => [160.0, 40.0],
         _ => [240.0, 72.0],
     }
@@ -164,6 +168,12 @@ fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
                 l.fill([x + 6.0 - o - 1.2, y - 7.0 + o - 1.2, 2.6, 2.6], ink, 1.3);
             }
             l.fill([x - 9.0, y + 6.0, 3.0, 3.0], ink, 0.5);
+        }
+        Tool::Palette => {
+            for k in 0..3 {
+                let a = [1.0, 0.75, 0.5][k];
+                l.fill([x - 9.0 + k as f32 * 6.5, y - 7.0, 5.0, 14.0], [ink[0], ink[1], ink[2], ink[3] * a], 1.0);
+            }
         }
         Tool::Link => {
             // Two linked rings.

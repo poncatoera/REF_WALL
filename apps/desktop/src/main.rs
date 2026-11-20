@@ -556,6 +556,11 @@ impl ApplicationHandler for Shell {
                         wall_app::ShellCommand::Copy { cut } => copy(&mut self.app, cut),
                         wall_app::ShellCommand::Paste => paste(&mut self.app),
                         wall_app::ShellCommand::OpenUrl(url) => open_url(&url),
+                        wall_app::ShellCommand::CopyText(text) => {
+                            if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                                eprintln!("wall: could not copy: {e}");
+                            }
+                        }
                         wall_app::ShellCommand::Import => {
                             for path in pick_files() {
                                 import_file(&mut self.app, &mut self.videos, path);
