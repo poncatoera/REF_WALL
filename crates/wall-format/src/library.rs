@@ -87,7 +87,15 @@ impl Library {
 
     // ---- media -------------------------------------------------------------
 
+    /// Where a media file lives. `ext` usually comes from a sidecar, which
+    /// anyone can edit, so anything but letters and digits is dropped: a
+    /// crafted `ext` like `../../x` can never point outside the library.
     pub fn media_path(&self, hash: &ContentHash, ext: &str) -> PathBuf {
+        let mut ext: String = ext.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        ext.make_ascii_lowercase();
+        if ext.is_empty() {
+            ext.push_str("bin");
+        }
         self.root.join("media").join(hash.shard()).join(format!("{hash}.{ext}"))
     }
 

@@ -195,3 +195,15 @@ fn merge_is_order_independent() {
     assert_eq!(b.live_items().count(), 0);
     assert!(!b.merge_item(edits[2].clone()), "older edit can't resurrect it");
 }
+
+#[test]
+fn crafted_extension_stays_inside_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::create(dir.path().join("L.wall"), "L", 1).unwrap();
+    let hash = wall_format::ContentHash::of(b"x");
+    let p = lib.media_path(&hash, "/../../../etc/passwd");
+    assert!(p.starts_with(lib.root().join("media")), "{}", p.display());
+    assert_eq!(p.extension().unwrap(), "etcpassw");
+    assert_eq!(lib.media_path(&hash, "..").extension().unwrap(), "bin");
+    assert_eq!(lib.media_path(&hash, "PNG").extension().unwrap(), "png");
+}
