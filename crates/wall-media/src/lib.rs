@@ -7,6 +7,8 @@
 //!   build runs it with WebCodecs.
 
 pub mod autotag;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffmpeg;
 pub mod image_rules;
 pub mod video_rules;
 
