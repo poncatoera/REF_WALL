@@ -23,6 +23,7 @@ pub enum Command {
     Import,
     OpenLibrary,
     NewLibrary,
+    ImportOldWall,
     ExportImage,
     NewNote,
     NewBoard,
@@ -60,12 +61,14 @@ pub enum ShellCommand {
     OpenLibrary { new: bool },
     /// Save the whole board as a PNG picture.
     ExportImage,
+    /// Pick an old (Electron) Wall library and bring its boards in.
+    ImportOldWall,
 }
 
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-        matches!(self, Command::OpenLibrary | Command::NewLibrary)
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall)
     }
 }
 
@@ -85,6 +88,7 @@ pub const MENUS: &[Menu] = &[
             SEP,
             ("Open library…", "", Some(Command::OpenLibrary)),
             ("New library…", "", Some(Command::NewLibrary)),
+            ("Import old Wall library…", "", Some(Command::ImportOldWall)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
             SEP,

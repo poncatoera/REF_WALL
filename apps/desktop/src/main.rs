@@ -60,6 +60,8 @@ struct Shell {
     posters: LibraryPosters,
     /// Window title: the library's name.
     title: String,
+    /// An old-Wall import running in the background.
+    old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
 }
 
 /// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
@@ -198,6 +200,34 @@ fn pick_library(new: bool) -> Option<std::path::PathBuf> {
             None
         }
     }
+}
+
+/// File > Import old Wall library: the old library's folder (with library.json).
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_old_wall() -> Option<std::path::PathBuf> {
+    let path = rfd::FileDialog::new().set_title("Import an old Wall library (the folder with library.json)").pick_folder()?;
+    if path.join("library.json").is_file() {
+        Some(path)
+    } else {
+        show_error(&format!("{} has no library.json, so it isn't an old Wall library.", path.display()));
+        None
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_old_wall() -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_PICK_OLD").map(Into::into)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn show_info(text: &str) {
+    println!("wall: {text}");
+    rfd::MessageDialog::new().set_title("Wall").set_description(text).set_level(rfd::MessageLevel::Info).show();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn show_info(text: &str) {
+    println!("wall: {text}");
 }
 
 /// No folder picker on Linux yet: WALL_PICK_LIBRARY names the folder (tests).
@@ -503,12 +533,43 @@ impl ApplicationHandler for Shell {
                                 switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
                             }
                         }
+                        wall_app::ShellCommand::ImportOldWall => {
+                            let root = self.app.library_root().map(|p| p.to_owned());
+                            match (root, &self.old_import) {
+                                (_, Some(_)) => show_error("An import is already running."),
+                                (None, _) => show_error("Open a library first; the old boards are added to it."),
+                                (Some(root), None) => {
+                                    if let Some(old) = pick_old_wall() {
+                                        println!("wall: importing the old Wall library {}", old.display());
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        std::thread::spawn(move || {
+                                            let _ = tx.send(wall_import::old_wall::import_into(&old, &root, Some("Old Wall"), now_ms()));
+                                        });
+                                        self.old_import = Some(rx);
+                                        gfx.window.set_title(&format!("{} (importing old Wall…)", self.title));
+                                    }
+                                }
+                            }
+                        }
                         wall_app::ShellCommand::ExportImage => {
                             let name = format!("{}.png", self.app.board_name());
                             if let Some(path) = pick_export(&name) {
                                 export_png(&mut self.app, &mut gfx.renderer, &path);
                             }
                         }
+                    }
+                }
+                if let Some(result) = self.old_import.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                    self.old_import = None;
+                    gfx.window.set_title(&self.title);
+                    match result {
+                        Ok(report) => {
+                            if let Some(id) = report.container {
+                                self.app.add_board_card(id, "Old Wall");
+                            }
+                            show_info(&format!("The old Wall library is in the \"Old Wall\" board.\n\n{}", report.text()));
+                        }
+                        Err(e) => show_error(&format!("Could not import the old Wall library: {e}")),
                     }
                 }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
@@ -543,7 +604,7 @@ impl ApplicationHandler for Shell {
             }
             _ => {}
         }
-        if self.app.needs_redraw || self.videos.busy() || self.app.library_waiting() {
+        if self.app.needs_redraw || self.videos.busy() || self.app.library_waiting() || self.old_import.is_some() {
             gfx.window.request_redraw();
         }
         if let Err(e) = self.app.save_if_dirty() {
@@ -695,6 +756,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         screenshot_frame: std::env::var("WALL_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
         posters: LibraryPosters::default(),
         title,
+        old_import: None,
     };
     event_loop.run_app(&mut shell)?;
     Ok(())

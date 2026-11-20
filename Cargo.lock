@@ -2562,6 +2562,7 @@ dependencies = [
  "tempfile",
  "uuid",
  "wall-app",
+ "wall-cli",
  "wall-media",
  "wall-render",
  "winit",

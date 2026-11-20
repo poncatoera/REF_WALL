@@ -1627,6 +1627,23 @@ impl App {
     }
 
     /// Creates a to-do list at a board point and starts typing into it.
+    /// The open library's folder, if one is open.
+    pub fn library_root(&self) -> Option<&std::path::Path> {
+        self.library.as_ref().map(|l| l.root())
+    }
+
+    /// Adds a card for a board that was just written to the library (by an
+    /// import) to the open board, in the middle of the view, and selects it.
+    pub fn add_board_card(&mut self, board_id: Uuid, name: &str) {
+        self.board_names.insert(board_id, name.to_owned());
+        let s = self.card_scale();
+        let at = self.camera.center;
+        let frame = Frame { x: at[0] as f64 - 110.0 * s, y: at[1] as f64 - 70.0 * s, w: 220.0 * s, h: 140.0 * s, z: self.doc.top_z() + 1.0, text_scale: s, ..Default::default() };
+        let item = self.doc.add(vec![(frame, ItemKind::Board { board_id })])[0];
+        self.selection = [item].into();
+        self.needs_redraw = true;
+    }
+
     /// Text scale for a card made now: cards made while zoomed far out are
     /// drawn larger so they can be read at that zoom (as in the old Wall).
     fn card_scale(&self) -> f64 {
@@ -2468,6 +2485,7 @@ impl App {
             C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
+            C::ImportOldWall => self.shell_commands.push(S::ImportOldWall),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),
             C::Paste => self.shell_commands.push(S::Paste),

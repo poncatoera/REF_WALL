@@ -22,6 +22,8 @@ const BY: &str = "old-wall-import";
 #[derive(Default, Debug)]
 pub struct Report {
     pub boards: usize,
+    /// The board the old boards went into, with [`import_into`].
+    pub container: Option<Uuid>,
     pub items: BTreeMap<&'static str, usize>,
     pub converted_to_notes: usize,
     pub skipped: Vec<String>,
@@ -86,6 +88,14 @@ fn media_file(root: &Path, rel: &str) -> Option<PathBuf> {
 /// Imports the old library at `old` into the `.wall` library at `new`
 /// (created if needed). Returns what was imported.
 pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
+    import_into(old, new, None, now)
+}
+
+/// Like [`import`]. With `container`, the old boards go into a new board of
+/// that name (inside the home board, which is left as it is) instead of
+/// onto the home board: for importing into a library that is open in Wall,
+/// which then adds a card for it. Its id is in [`Report::container`].
+pub fn import_into(old: &Path, new: &Path, container: Option<&str>, now: u64) -> Res<Report> {
     let bytes = std::fs::read(old.join("library.json")).map_err(|e| format!("{}: {e} (is this an old Wall library?)", old.join("library.json").display()))?;
     let lib_json: Value = serde_json::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes)).map_err(|e| format!("library.json: {e}"))?;
     let old_boards = lib_json["boards"].as_array().ok_or("library.json has no boards")?;
@@ -112,6 +122,12 @@ pub fn import(old: &Path, new: &Path, now: u64) -> Res<Report> {
     }
     existing.sort_by_key(|b| b.created_ms);
     let mut home = existing.into_iter().find(|b| b.parent.is_none()).unwrap_or_else(|| Board::new("Home", now));
+    if let Some(name) = container {
+        let mut c = Board::new(name, now);
+        c.parent = Some(home.id);
+        report.container = Some(c.id);
+        home = c;
+    }
 
     // Boards first, so items and board cards can point at them.
     let mut board_ids: HashMap<String, Uuid> = HashMap::new();
@@ -355,7 +371,7 @@ fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut Hash
         Some(h) => h.clone(),
         None => {
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
-            let (h, _, _) = crate::import_one(lib, &file, &name, now)?;
+            let (h, _, _) = crate::media::import_one(lib, &file, &name, now)?;
             done.insert(key, h.clone());
             h
         }
