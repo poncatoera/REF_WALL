@@ -2847,4 +2847,27 @@ mod tests {
         assert_eq!(items.iter().filter(|i| matches!(i.kind, ItemKind::Note { .. })).count(), 20);
         assert_eq!(items.iter().filter(|i| matches!(i.kind, ItemKind::Group { .. })).count(), 2);
     }
+
+    /// Scene rebuild cost while dragging on a 5,000-note board. Run with
+    /// `cargo test -p wall-app --release -- --ignored --nocapture scene_rebuild`.
+    #[test]
+    #[ignore]
+    fn scene_rebuild_cost_5000() {
+        let mut a = App::demo(5000);
+        a.scene.update(&a.doc, &mut a.font, &a.board_names);
+        let id = a.doc.board.live_items().find(|i| matches!(i.kind, ItemKind::Note { .. })).unwrap().id;
+        let ids: BTreeSet<Uuid> = [id].into();
+        let n = 30;
+        let (mut edit, mut rebuild) = (0.0, 0.0);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            a.doc.translate(&ids, 1.0, 0.0);
+            edit += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            a.scene.update(&a.doc, &mut a.font, &a.board_names);
+            rebuild += t.elapsed().as_secs_f64();
+        }
+        let per = |s: f64| s * 1000.0 / n as f64;
+        println!("{} items: edit {:.2} ms + scene rebuild {:.2} ms per drag frame", a.item_count(), per(edit), per(rebuild));
+    }
 }

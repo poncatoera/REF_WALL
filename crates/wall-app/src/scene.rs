@@ -18,6 +18,8 @@ const TEXT: [f32; 4] = [0.92, 0.92, 0.94, 1.0];
 
 struct CachedText {
     key: (String, u32, u32, u32),
+    /// Rebuild that last used this entry; older ones are dropped.
+    gen: u64,
     glyphs: Vec<GlyphInstance>,
 }
 
@@ -66,6 +68,10 @@ pub struct Scene {
     /// Everything else, back to front.
     runs: Vec<Run>,
     text_cache: HashMap<Uuid, CachedText>,
+    /// Counts rebuilds, to drop cache entries of deleted items.
+    gen: u64,
+    /// Instance counts of the last rebuild, to size buffers up front.
+    last_counts: (usize, usize),
 }
 
 impl Scene {
@@ -94,11 +100,13 @@ impl Scene {
         self.back = Run::default();
         self.runs.clear();
 
+        self.gen += 1;
+        let gen = self.gen;
+        let (last_boxes, last_glyphs) = self.last_counts;
+
         let mut items: Vec<_> = doc.board.live_items().collect();
         items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
-        let mut seen = std::collections::HashSet::new();
         for item in items {
-            seen.insert(item.id);
             let f = item.frame;
             let mut rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
             let arrow = match &item.kind {
@@ -115,7 +123,14 @@ impl Scene {
             if !is_group {
                 // Start a new run if this item overlaps one already in the current run.
                 if self.runs.last().is_none_or(|r| r.overlaps(rect)) {
-                    self.runs.push(Run::default());
+                    let mut run = Run::default();
+                    if self.runs.is_empty() {
+                        // Most boards are one run: size it like last time so
+                        // a drag frame doesn't regrow megabytes of instances.
+                        run.boxes.reserve(last_boxes);
+                        run.glyphs.reserve(last_glyphs);
+                    }
+                    self.runs.push(run);
                 }
                 self.runs.last_mut().unwrap().claim(rect);
             }
@@ -180,10 +195,11 @@ impl Scene {
                 }
             }
             if let Some((t, color)) = label {
-                item_text(&mut self.text_cache, font, &mut run.glyphs, item.id, t, &item.kind, color, rect);
+                item_text(&mut self.text_cache, gen, font, &mut run.glyphs, item.id, t, &item.kind, color, rect);
             }
         }
-        self.text_cache.retain(|id, _| seen.contains(id));
+        self.text_cache.retain(|_, e| e.gen == gen);
+        self.last_counts = self.runs.first().map_or((0, 0), |r| (r.boxes.len(), r.glyphs.len()));
     }
 
 
@@ -201,11 +217,17 @@ impl Scene {
 
 /// Appends an item's text, from cache when text, style and width are unchanged.
 #[allow(clippy::too_many_arguments)]
-fn item_text(cache: &mut HashMap<Uuid, CachedText>, font: &mut Font, out: &mut Vec<GlyphInstance>, id: Uuid, text: &str, kind: &ItemKind, color: [f32; 4], rect: [f32; 4]) {
+fn item_text(cache: &mut HashMap<Uuid, CachedText>, gen: u64, font: &mut Font, out: &mut Vec<GlyphInstance>, id: Uuid, text: &str, kind: &ItemKind, color: [f32; 4], rect: [f32; 4]) {
         let Some(style) = TextStyle::of(kind, rect[2]) else { return };
-        let key = (text.to_owned(), style.size.to_bits(), rect[2].to_bits(), rect[3].to_bits());
-        let entry = cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0, 0, 0), glyphs: Vec::new() });
-        if entry.key != key {
+        // Mark the entry used before anything else, so retain keeps it.
+        let dims = (style.size.to_bits(), rect[2].to_bits(), rect[3].to_bits());
+        let entry = cache.entry(id).or_insert_with(|| CachedText { key: (String::new(), 0, 0, 0), gen, glyphs: Vec::new() });
+        entry.gen = gen;
+        // Compare before building a key: this runs for every item on every
+        // rebuild (each drag frame), and copying the text would allocate.
+        let same = entry.key.0 == text && (entry.key.1, entry.key.2, entry.key.3) == dims;
+        if !same {
+            let key = (text.to_owned(), dims.0, dims.1, dims.2);
             entry.glyphs.clear();
             let max_lines = style.max_lines(rect[3]);
             for (n, range) in style.lines(font, text, max_lines).into_iter().enumerate() {
