@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
-use wall_format::{Board, ContentHash, ItemKind};
+use wall_format::{Board, ContentHash, ItemKind, MediaKind};
 use wall_text::Font;
 
 use crate::library_view::Thumb;
@@ -402,9 +402,44 @@ impl App {
         by_seen.into_iter().take(RECENT).map(|(id, _)| self.row(*id, 0, false, None)).collect()
     }
 
+    /// A board's thumbnail: its biggest picture or video, else (a board of
+    /// boards) the first of its boards that has one.
+    fn board_thumb(&self, id: Uuid, depth: usize) -> Option<ContentHash> {
+        let own = if id == self.doc.board.id { thumb_of(&self.doc.board) } else { self.board_meta.get(&id).and_then(|m| m.thumb.clone()) };
+        if own.is_some() || depth > 4 {
+            return own;
+        }
+        let mut children: Vec<(&Uuid, &BoardMeta)> = self.board_meta.iter().filter(|(_, m)| m.parent == Some(id)).collect();
+        children.sort_by_key(|(c, m)| (self.board_order.iter().position(|o| o == *c).unwrap_or(usize::MAX), m.created_ms));
+        children.into_iter().find_map(|(c, _)| self.board_thumb(*c, depth + 1))
+    }
+
+    /// Videos among the panel's thumbnails that need a frame from the shell,
+    /// as for [`App::library_posters_wanted`]. Each is asked for once.
+    pub(crate) fn sidebar_posters_wanted(&mut self) -> Vec<(ContentHash, std::path::PathBuf, u32, u32, f64)> {
+        let Some(l) = self.sidebar_layout() else { return Vec::new() };
+        let Some(lib) = self.library.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (hash, _) in &l.images {
+            if self.board_thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_) | Picture::Preview(_))) {
+                continue;
+            }
+            let Some(sc) = self.sidecars.get(hash).cloned().or_else(|| lib.read_sidecar(hash).ok()) else { continue };
+            if sc.kind != MediaKind::Video {
+                continue;
+            }
+            let s = (128.0 / sc.width.max(sc.height).max(1) as f32).min(1.0);
+            let even = |x: f32| ((x.round() as u32) & !1).max(2);
+            let at = sc.duration_ms.map_or(0.0, |ms| (ms as f64 / 1000.0 * 0.1).min(1.0));
+            out.push((hash.clone(), lib.media_path(hash, &sc.ext), even(sc.width as f32 * s), even(sc.height as f32 * s), at));
+            self.board_thumbs.insert(hash.clone(), Thumb::Requested);
+        }
+        out
+    }
+
     fn row(&self, id: Uuid, depth: usize, has_children: bool, note: Option<String>) -> Row {
         let current = id == self.doc.board.id;
-        let thumb = if current { thumb_of(&self.doc.board) } else { self.board_meta.get(&id).and_then(|m| m.thumb.clone()) };
+        let thumb = self.board_thumb(id, 0);
         Row {
             id,
             name: self.board_names.get(&id).cloned().unwrap_or_else(|| "Board".into()),
@@ -808,9 +843,22 @@ impl App {
                 self.needs_redraw = true;
                 break;
             }
+            let Some(lib) = self.library.as_ref() else { break };
+            let Some(sc) = self.sidecars.get(hash).cloned().or_else(|| lib.read_sidecar(hash).ok()) else {
+                self.board_thumbs.insert(hash.clone(), Thumb::Failed);
+                continue;
+            };
+            if sc.kind == MediaKind::Video {
+                // A frame comes from the shell (sidebar_posters_wanted).
+                continue;
+            }
             budget -= 1;
-            let path = self.library.as_ref().and_then(|lib| self.sidecars.get(hash).map(|sc| lib.media_path(hash, &sc.ext)).or_else(|| lib.read_sidecar(hash).ok().map(|sc| lib.media_path(hash, &sc.ext))));
-            let thumb = path.and_then(|p| std::fs::read(p).ok()).and_then(|b| crate::library_view::decode_thumb(&b));
+            // The tiny cached image if there is one, else the picture itself.
+            let tiny = lib.root().join("cache").join("previews").join(format!("{hash}.t.jpg"));
+            let thumb = std::fs::read(&tiny)
+                .ok()
+                .and_then(|b| crate::library_view::decode_thumb(&b))
+                .or_else(|| std::fs::read(lib.media_path(hash, &sc.ext)).ok().and_then(|b| crate::library_view::decode_thumb(&b)));
             self.board_thumbs.insert(hash.clone(), match thumb {
                 Some((rgba, width, height)) => Thumb::Pending { rgba, width, height },
                 None => Thumb::Failed,

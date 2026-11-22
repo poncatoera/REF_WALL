@@ -538,9 +538,10 @@ impl App {
     /// shell decodes it (off the UI thread) and hands it to
     /// [`App::set_library_poster`].
     pub fn library_posters_wanted(&mut self) -> Vec<(ContentHash, std::path::PathBuf, u32, u32, f64)> {
-        let Some(l) = self.library_layout() else { return Vec::new() };
-        let (Some(v), Some(lib)) = (self.library_view.as_mut(), self.library.as_ref()) else { return Vec::new() };
-        let mut out = Vec::new();
+        // The boards panel's video thumbnails come the same way.
+        let mut out = self.sidebar_posters_wanted();
+        let Some(l) = self.library_layout() else { return out };
+        let (Some(v), Some(lib)) = (self.library_view.as_mut(), self.library.as_ref()) else { return out };
         for hash in &l.visible {
             if v.thumbs.contains_key(hash) || matches!(self.pictures.get(hash), Some(Picture::Ready(_) | Picture::Preview(_))) {
                 continue;
@@ -562,10 +563,21 @@ impl App {
     /// shell keeps drawing until they arrive.
     pub fn library_waiting(&self) -> bool {
         self.library_view.as_ref().is_some_and(|v| v.thumbs.values().any(|t| matches!(t, Thumb::Requested)))
+            || self.board_thumbs.values().any(|t| matches!(t, Thumb::Requested))
     }
 
     /// A video preview frame from the shell (None if it couldn't decode).
     pub fn set_library_poster(&mut self, hash: ContentHash, frame: Option<(Vec<u8>, u32, u32)>) {
+        if matches!(self.board_thumbs.get(&hash), Some(Thumb::Requested)) {
+            self.board_thumbs.insert(
+                hash.clone(),
+                match &frame {
+                    Some((rgba, width, height)) => Thumb::Pending { rgba: rgba.clone(), width: *width, height: *height },
+                    None => Thumb::Failed,
+                },
+            );
+            self.needs_redraw = true;
+        }
         if let Some(v) = &mut self.library_view {
             v.thumbs.insert(hash, match frame {
                 Some((rgba, width, height)) => Thumb::Pending { rgba, width, height },
