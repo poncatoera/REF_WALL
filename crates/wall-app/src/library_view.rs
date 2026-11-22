@@ -1,5 +1,5 @@
-//! The library drawer (L): every picture and video in the library as a grid
-//! of thumbnails at the bottom of the window. Click one to place it on the
+//! The library tab of the left panel (L): every picture and video in the
+//! library as a grid of thumbnails. Click one to place it on the
 //! board; the × on a tile moves it to the library's trash, and the Trash tab
 //! puts things back.
 //!
@@ -14,11 +14,9 @@ use wall_text::Font;
 
 use crate::panel::{self, PanelBox, TextRun};
 
-const MARGIN: f32 = 12.0;
 const PAD: f32 = 16.0;
 const TILE_W: f32 = 148.0;
 const IMAGE_H: f32 = 104.0;
-const TILE_H: f32 = IMAGE_H + 24.0;
 const GAP: f32 = 12.0;
 const HEADER_H: f32 = 40.0;
 /// Thumbnails are decoded at most this wide or tall.
@@ -121,11 +119,6 @@ impl Layout {
     }
 }
 
-/// The drawer's height for a window `viewport_h` tall.
-pub fn height(viewport_h: f32) -> f32 {
-    (viewport_h * 0.42).clamp(HEADER_H + TILE_H + 2.0 * PAD, 520.0).min(viewport_h - 2.0 * MARGIN)
-}
-
 /// Picture rect inside a tile's image area, keeping its shape.
 fn fit_rect(area: [f32; 4], w: u32, h: u32) -> [f32; 4] {
     let (w, h) = (w.max(1) as f32, h.max(1) as f32);
@@ -134,15 +127,22 @@ fn fit_rect(area: [f32; 4], w: u32, h: u32) -> [f32; 4] {
     [area[0] + (area[2] - fw) / 2.0, area[1] + (area[3] - fh) / 2.0, fw, fh]
 }
 
-/// Lays the drawer out along the bottom of the window, leaving `right_inset`
-/// pixels free on the right (for the side panel).
-pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_inset: f32) -> Layout {
+/// Lays the library out in `area`. `compact` is the narrow version for the
+/// left side panel: two columns of smaller tiles, no frame, hint or close.
+pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: bool) -> Layout {
     let mut l = Layout::default();
-    let h = height(viewport[1]);
-    let w = (viewport[0] - 2.0 * MARGIN - right_inset).max(TILE_W + 2.0 * PAD);
-    let (x0, y0) = (MARGIN, viewport[1] - MARGIN - h);
-    l.rect = [x0, y0, w, h];
-    l.rect([x0, y0, w, h], BG(), LINE(), 10.0);
+    let [x0, y0, w, h] = area;
+    l.rect = area;
+    let (tile_w, image_h) = if compact {
+        let tw = ((w - 2.0 * PAD - GAP) / 2.0).floor();
+        (tw, (tw * 0.72).floor())
+    } else {
+        (TILE_W, IMAGE_H)
+    };
+    let tile_h = image_h + 24.0;
+    if !compact {
+        l.rect(area, BG(), LINE(), 10.0);
+    }
 
     // Header: tabs, hint, close.
     let mut x = x0 + PAD;
@@ -161,23 +161,25 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     if view.has_trash {
         tab(&mut l, format!("TRASH  {}", view.trashed.len()), Tab::Trash, &mut x);
     }
-    let hint = match view.tab {
-        Tab::All => "Click to place on the board · × moves to trash · L closes",
-        Tab::Trash => "Click to put back in the library",
-    };
-    let close = [x0 + w - PAD - 18.0, y0 + 9.0, 22.0, 22.0];
-    let hint_max = (close[0] - 16.0 - x).max(0.0);
-    let hint = panel::fit(font, hint, 11.5, hint_max);
-    let hint_w = panel::text_width(font, &hint, 11.5);
-    l.text(hint, [close[0] - 16.0 - hint_w, ty], 11.5, DIM());
-    l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM());
-    l.hits.push((close, Action::Close));
+    if !compact {
+        let hint = match view.tab {
+            Tab::All => "Click to place on the board · × moves to trash · L closes",
+            Tab::Trash => "Click to put back in the library",
+        };
+        let close = [x0 + w - PAD - 18.0, y0 + 9.0, 22.0, 22.0];
+        let hint_max = (close[0] - 16.0 - x).max(0.0);
+        let hint = panel::fit(font, hint, 11.5, hint_max);
+        let hint_w = panel::text_width(font, &hint, 11.5);
+        l.text(hint, [close[0] - 16.0 - hint_w, ty], 11.5, DIM());
+        l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM());
+        l.hits.push((close, Action::Close));
+    }
 
     // Grid.
     let gx = x0 + PAD;
     let gy = y0 + HEADER_H + 8.0;
-    let cols = (((w - 2.0 * PAD + GAP) / (TILE_W + GAP)).floor() as usize).max(1);
-    let rows = (((h - HEADER_H - 8.0 - PAD + GAP) / (TILE_H + GAP)).floor() as usize).max(1);
+    let cols = (((w - 2.0 * PAD + GAP) / (tile_w + GAP)).floor() as usize).max(1);
+    let rows = (((h - HEADER_H - 8.0 - PAD + GAP) / (tile_h + GAP)).floor() as usize).max(1);
     let shown = view.shown();
     let total_rows = shown.len().div_ceil(cols);
     l.max_scroll_row = total_rows.saturating_sub(rows);
@@ -185,6 +187,7 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
 
     if shown.is_empty() {
         let msg = match view.tab {
+            Tab::All if compact => "Nothing here yet.",
             Tab::All => "Nothing here yet. Drop pictures or videos on the window.",
             Tab::Trash => "The trash is empty.",
         };
@@ -193,8 +196,8 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     for (i, sc) in shown.iter().enumerate().skip(first).take(cols * rows) {
         let k = i - first;
         let (c, r) = ((k % cols) as f32, (k / cols) as f32);
-        let tile = [gx + c * (TILE_W + GAP), gy + r * (TILE_H + GAP), TILE_W, TILE_H];
-        let area = [tile[0], tile[1], TILE_W, IMAGE_H];
+        let tile = [gx + c * (tile_w + GAP), gy + r * (tile_h + GAP), tile_w, tile_h];
+        let area = [tile[0], tile[1], tile_w, image_h];
         l.rect(area, TILE(), LINE(), 6.0);
         l.visible.push(sc.hash.clone());
         let inner = [area[0] + 4.0, area[1] + 4.0, area[2] - 8.0, area[3] - 8.0];
@@ -210,8 +213,8 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
             l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, INK());
         }
         let title = sc.title.clone().unwrap_or_else(|| format!("{} × {}", sc.width, sc.height));
-        let title = panel::fit(font, &title, 12.0, TILE_W - 4.0);
-        l.text(title, [tile[0] + 2.0, tile[1] + IMAGE_H + 17.0], 12.0, DIM());
+        let title = panel::fit(font, &title, 12.0, tile_w - 4.0);
+        l.text(title, [tile[0] + 2.0, tile[1] + image_h + 17.0], 12.0, DIM());
 
         match view.tab {
             Tab::All => {
@@ -226,7 +229,7 @@ pub fn layout(font: &mut Font, view: &LibraryView, viewport: [f32; 2], right_ins
     }
     if l.max_scroll_row > 0 {
         let shown_rows = rows.min(total_rows);
-        let msg = format!("Rows {}–{} of {} · scroll for more", view.scroll_row.min(l.max_scroll_row) + 1, view.scroll_row.min(l.max_scroll_row) + shown_rows, total_rows);
+        let msg = format!("{}{}–{} of {}{}", if compact { "" } else { "Rows " }, view.scroll_row.min(l.max_scroll_row) + 1, view.scroll_row.min(l.max_scroll_row) + shown_rows, total_rows, if compact { " rows" } else { " · scroll for more" });
         let mw = panel::text_width(font, &msg, 11.0);
         l.text(msg, [x0 + w - PAD - mw, y0 + h - 6.0], 11.0, DIM());
     }
@@ -278,7 +281,7 @@ mod tests {
         let items = vec![sidecar(1, MediaKind::Image, 10), sidecar(2, MediaKind::Video, 20)];
         let v = LibraryView::new(items, vec![], true);
         assert_eq!(v.items[0].title.as_deref(), Some("Item 2"));
-        let l = layout(&mut font(), &v, [1200.0, 800.0], 0.0);
+        let l = layout_in(&mut font(), &v, [0.0, 80.0, 279.0, 720.0], true);
         assert_eq!(l.visible.len(), 2);
         // Both get an image slot (the video's preview frame comes from the
         // shell); the video also shows its length.
@@ -299,10 +302,10 @@ mod tests {
     fn trash_tab_restores_and_hidden_without_library() {
         let mut v = LibraryView::new(vec![], vec![sidecar(3, MediaKind::Image, 1)], true);
         v.tab = Tab::Trash;
-        let l = layout(&mut font(), &v, [1200.0, 800.0], 0.0);
+        let l = layout_in(&mut font(), &v, [0.0, 80.0, 279.0, 720.0], true);
         assert!(l.hits.iter().any(|(_, a)| *a == Action::Restore(v.trashed[0].hash.clone())));
         let web = LibraryView::new(vec![], vec![], false);
-        let l = layout(&mut font(), &web, [1200.0, 800.0], 0.0);
+        let l = layout_in(&mut font(), &web, [0.0, 80.0, 279.0, 720.0], true);
         assert!(!l.hits.iter().any(|(_, a)| *a == Action::Tab(Tab::Trash)));
     }
 
@@ -310,7 +313,7 @@ mod tests {
     fn scrolls_by_rows_within_range() {
         let items: Vec<_> = (0..60).map(|n| sidecar(n, MediaKind::Image, n as u64)).collect();
         let mut v = LibraryView::new(items, vec![], true);
-        let l = layout(&mut font(), &v, [1000.0, 800.0], 0.0);
+        let l = layout_in(&mut font(), &v, [0.0, 80.0, 279.0, 720.0], true);
         assert!(l.max_scroll_row > 0);
         v.scroll(100, &l);
         assert_eq!(v.scroll_row, l.max_scroll_row);
@@ -318,7 +321,7 @@ mod tests {
         assert_eq!(v.scroll_row, 0);
         let first = l.visible[0].clone();
         v.scroll(1, &l);
-        let l2 = layout(&mut font(), &v, [1000.0, 800.0], 0.0);
+        let l2 = layout_in(&mut font(), &v, [0.0, 80.0, 279.0, 720.0], true);
         assert_ne!(l2.visible[0], first);
     }
 
@@ -342,9 +345,9 @@ mod tests {
         let tile = l.hits.iter().find(|(_, x)| matches!(x, Action::Place(_))).unwrap().0;
         a.pointer_down(crate::Button::Primary, [tile[0] + 20.0, tile[1] + 60.0], crate::Mods::default());
         assert_eq!(a.item_count(), 1, "clicking a tile places it on the board");
-        // Placed above the drawer, not under it.
+        // Placed beside the panel, not under it.
         let f = a.doc.board.live_items().next().unwrap().frame;
-        assert!((f.y + f.h / 2.0) < a.camera.screen_to_board([0.0, l.rect[1]], a.viewport)[1] as f64);
+        assert!((f.x + f.w / 2.0) > a.camera.screen_to_board([crate::sidebar::WIDTH, 0.0], a.viewport)[0] as f64);
 
         let l = a.library_layout().unwrap();
         let x = l.hits.iter().find(|(_, x)| matches!(x, Action::Trash(_))).unwrap().0;
@@ -373,7 +376,7 @@ mod tests {
         let id = a.import_video(b"fake mp4", "mp4", meta, Some("clip.mp4"), 5).unwrap();
         a.selection = [id].into();
         a.key(crate::Key::Delete);
-        a.toggle_library();
+        a.toggle_sidebar(crate::sidebar::Tab::Library);
 
         let wanted = a.library_posters_wanted();
         assert_eq!(wanted.len(), 1);
@@ -425,12 +428,10 @@ fn ACCENT() -> [f32; 4] {
 }
 
 impl App {
-    /// Opens or closes the library drawer (L).
-    pub fn toggle_library(&mut self) {
+    /// Reads the library's contents for the Library tab (once per opening
+    /// of the tab, so new imports show up).
+    pub(crate) fn ensure_library_view(&mut self) {
         self.needs_redraw = true;
-        if self.library_view.take().is_some() {
-            return;
-        }
         let (items, trashed, has_trash) = match &self.library {
             Some(lib) => {
                 let items = lib.sidecars().map(|v| v.into_iter().filter_map(Result::ok).collect()).unwrap_or_default();
@@ -442,24 +443,18 @@ impl App {
         self.library_view = Some(LibraryView::new(items, trashed, has_trash));
     }
 
+    /// True while the left panel shows the Library tab.
     pub fn library_is_open(&self) -> bool {
-        self.library_view.is_some()
-    }
-
-    /// Space on the right kept free for the side panel when it reaches down
-    /// into the drawer's area.
-    fn library_right_inset(&mut self) -> f32 {
-        let top = self.viewport[1] - 12.0 - height(self.viewport[1]);
-        match self.panel_layout() {
-            Some(p) if p.rect[1] + p.rect[3] > top => (self.viewport[0] - p.rect[0]).max(0.0),
-            _ => 0.0,
-        }
+        self.library_view.is_some() && self.sidebar_tab() == Some(crate::sidebar::Tab::Library)
     }
 
     pub(crate) fn library_layout(&mut self) -> Option<Layout> {
-        let inset = if self.library_view.is_some() { self.library_right_inset() } else { 0.0 };
+        if !self.library_is_open() {
+            return None;
+        }
+        let area = self.sidebar_layout()?.content;
         let view = self.library_view.as_ref()?;
-        Some(layout(&mut self.font, view, self.viewport, inset))
+        Some(layout_in(&mut self.font, view, area, true))
     }
 
     /// Wheel over the drawer scrolls it. True if it was over the drawer.
@@ -480,7 +475,7 @@ impl App {
         self.needs_redraw = true;
         let now = self.now_ms;
         match action {
-            Action::Close => self.library_view = None,
+            Action::Close => self.close_sidebar(),
             Action::None => {}
             Action::Tab(t) => {
                 if let Some(v) = &mut self.library_view {
@@ -525,8 +520,8 @@ impl App {
     fn library_place(&mut self, hash: ContentHash) {
         let Some(sc) = self.library_view.as_ref().and_then(|v| v.items.iter().find(|s| s.hash == hash)).cloned() else { return };
         let saved = self.cursor;
-        let free_h = self.viewport[1] - 12.0 - height(self.viewport[1]);
-        self.cursor = [self.viewport[0] / 2.0, (free_h / 2.0).max(1.0)];
+        let left = self.left_inset();
+        self.cursor = [left + (self.viewport[0] - left) / 2.0, self.viewport[1] / 2.0];
         self.place_media(hash, sc.width, sc.height);
         self.cursor = saved;
         // Decode the full picture (or register the video) like on open.

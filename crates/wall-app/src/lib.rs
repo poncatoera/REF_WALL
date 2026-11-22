@@ -11,6 +11,7 @@ mod picture_loader;
 mod scene;
 mod snap;
 pub mod theme;
+pub mod sidebar;
 pub mod toolbar;
 mod grid;
 pub mod video;
@@ -140,6 +141,11 @@ enum Gesture {
     /// Dragging a tool out of the rail; released on the board, it makes
     /// that thing there (released on the rail, in the middle of the view).
     RailDrag { tool: toolbar::Tool },
+    /// Moving the tool rail by its handle.
+    RailMove,
+    /// A board row in the left panel pressed: a click opens it, a drag
+    /// reorders it.
+    SideRow { id: Uuid, start: [f32; 2], moved: bool },
     /// Drawing with the pen: the line so far, in board units.
     Draw { points: Vec<[f32; 2]> },
 }
@@ -279,6 +285,16 @@ pub struct App {
     show_grid: bool,
     /// The rail's current tool (Select, or Arrow while drawing arrows).
     tool: toolbar::Tool,
+    /// Where the tool rail floats (shells remember it).
+    rail_place: toolbar::Placement,
+    /// The boards and library panel on the left, while open.
+    sidebar: Option<sidebar::Sidebar>,
+    /// Every board's parent, dates and thumbnail picture.
+    board_meta: HashMap<Uuid, sidebar::BoardMeta>,
+    /// Saved order of boards among their sisters.
+    board_order: Vec<Uuid>,
+    /// Thumbnails of boards' pictures that aren't loaded on the board.
+    board_thumbs: HashMap<ContentHash, library_view::Thumb>,
     /// Loads pictures as they come on screen (previews, then full size).
     loader: picture_loader::Loader,
     /// Media imported with no library open, for the shell to store.
@@ -317,6 +333,7 @@ fn BACKGROUND() -> [f32; 4] {
 impl App {
     pub fn new(board: Board, device: &str) -> Self {
         let (board_id, board_name) = (board.id, board.name.clone());
+        let root_meta = sidebar::BoardMeta::of(&board);
         Self {
             camera: Camera { center: [0.0, 0.0], zoom: 1.0 },
             doc: Document::new(board, device),
@@ -353,6 +370,11 @@ impl App {
             library_view: None,
             show_grid: true,
             tool: toolbar::Tool::Select,
+            rail_place: toolbar::Placement::default(),
+            sidebar: None,
+            board_meta: [(board_id, root_meta)].into(),
+            board_order: Vec::new(),
+            board_thumbs: HashMap::new(),
             loader: Default::default(),
             new_media: Vec::new(),
         }
@@ -372,6 +394,7 @@ impl App {
         }
         boards.sort_by_key(|b| b.created_ms);
         let names: HashMap<Uuid, String> = boards.iter().map(|b| (b.id, b.name.clone())).collect();
+        let meta: HashMap<Uuid, sidebar::BoardMeta> = boards.iter().map(|b| (b.id, sidebar::BoardMeta::of(b))).collect();
         let board = match boards.into_iter().find(|b| b.parent.is_none()) {
             Some(b) => b,
             None => {
@@ -382,6 +405,8 @@ impl App {
         };
         let mut app = Self::new(board, device);
         app.board_names.extend(names);
+        app.board_meta.extend(meta);
+        app.board_order = library.manifest().board_order.clone();
         app.load_pictures(&library);
         app.library = Some(library);
         app.fit_on_resize = true;
@@ -429,8 +454,10 @@ impl App {
             return;
         }
         let (w, h) = ((b[2] - b[0]) as f32, (b[3] - b[1]) as f32);
-        let zoom = (self.viewport[0] / (w + 80.0)).min(self.viewport[1] / (h + 80.0)).clamp(MIN_ZOOM, 1.0);
-        self.camera = Camera { center: [((b[0] + b[2]) / 2.0) as f32, ((b[1] + b[3]) / 2.0) as f32], zoom };
+        // Fit in the part of the window the left panel leaves free.
+        let inset = self.left_inset();
+        let zoom = ((self.viewport[0] - inset) / (w + 80.0)).min(self.viewport[1] / (h + 80.0)).clamp(MIN_ZOOM, 1.0);
+        self.camera = Camera { center: [((b[0] + b[2]) / 2.0) as f32 - inset / 2.0 / zoom, ((b[1] + b[3]) / 2.0) as f32], zoom };
         self.needs_redraw = true;
     }
 
@@ -993,10 +1020,21 @@ impl App {
             return;
         }
         let rail = self.rail_layout();
+        if rail.contains(pos) && panel::inside(rail.side, pos) {
+            self.toggle_sidebar(sidebar::Tab::Boards);
+            return;
+        }
         if rail.contains(pos) {
-            if let Some(tool) = rail.tool_at(pos) {
+            if panel::inside(rail.grip, pos) {
+                self.gesture = Gesture::RailMove;
+            } else if panel::inside(rail.fold, pos) {
+                self.rail_place.collapsed = !self.rail_place.collapsed;
+            } else if let Some(tool) = rail.tool_at(pos) {
                 self.rail_click(tool);
             }
+            return;
+        }
+        if self.sidebar_press(pos) {
             return;
         }
         if let Some(action) = self.library_layout().and_then(|l| l.action_at(pos)) {
@@ -1180,6 +1218,18 @@ impl App {
                 return;
             }
             Gesture::RailDrag { .. } => {}
+            Gesture::RailMove => {
+                self.rail_place = self.rail_place.dragged(pos, self.viewport);
+                self.needs_redraw = true;
+                return;
+            }
+            Gesture::SideRow { start, moved, .. } => {
+                if (pos[0] - start[0]).abs() + (pos[1] - start[1]).abs() > 5.0 {
+                    *moved = true;
+                }
+                self.needs_redraw = true;
+                return;
+            }
             Gesture::Draw { points } => {
                 // A new point every 2 screen pixels keeps lines smooth and small.
                 let last = points.last().copied().unwrap_or(board);
@@ -1240,11 +1290,28 @@ impl App {
         self.cursor = pos;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Move { originals, delta, .. } => {
-                self.doc.commit_drag(&originals, delta[0], delta[1]);
+                // Dropped on a board in the left panel: moved to that board.
+                let onto = if self.sidebar.is_some() { self.side_rows_at(pos).filter(|(t, _)| *t != self.doc.board.id) } else { None };
+                match onto {
+                    Some((target, _)) => {
+                        self.doc.preview_offset(&originals, 0.0, 0.0);
+                        self.move_selection_to_board(target);
+                    }
+                    None => {
+                        self.doc.commit_drag(&originals, delta[0], delta[1]);
+                    }
+                }
             }
             Gesture::Draw { mut points } => {
                 points.push(self.camera.screen_to_board(pos, self.viewport));
                 self.add_stroke(&points);
+            }
+            Gesture::SideRow { id, moved, .. } => self.sidebar_release(id, moved, pos),
+            Gesture::RailMove => {
+                // Keep where it shows (inside the window), not where the
+                // pointer went.
+                let r = toolbar::rect(&self.rail_place, self.viewport, 0.0);
+                self.rail_place.at = [r[0], r[1]];
             }
             Gesture::RailDrag { tool } => {
                 let at = if self.rail_layout().contains(pos) { self.camera.center } else { self.camera.screen_to_board(pos, self.viewport) };
@@ -1299,7 +1366,7 @@ impl App {
             Wheel::Lines(l) => l,
             Wheel::Pixels(p) => p / 100.0,
         };
-        if self.library_wheel(steps) {
+        if self.sidebar_wheel(steps) || self.library_wheel(steps) {
             return;
         }
         self.camera.zoom_at(1.15f32.powf(steps), self.cursor, self.viewport);
@@ -1309,6 +1376,9 @@ impl App {
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
         if self.menu_open.take().is_some() && key == Key::Escape {
+            return;
+        }
+        if self.sidebar_key(key) {
             return;
         }
         if let Some(e) = &mut self.panel_edit {
@@ -1413,7 +1483,7 @@ impl App {
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
             Key::Escape if self.tool != toolbar::Tool::Select => self.tool = toolbar::Tool::Select,
-            Key::Escape if self.library_view.is_some() => self.library_view = None,
+            Key::Escape if self.library_is_open() => self.close_sidebar(),
             Key::Escape if self.selection.is_empty() && self.tag_filter.is_some() => self.filter_by_tag(None),
             Key::Escape if self.selection.is_empty() => self.go_up(),
             Key::Escape => self.selection.clear(),
@@ -1432,7 +1502,8 @@ impl App {
             Key::Char('+' | '=') => self.run_command(menu::Command::ZoomIn),
             Key::Char('-' | '_') => self.run_command(menu::Command::ZoomOut),
             Key::Char('z' | 'Z') => self.run_command(menu::Command::ActualSize),
-            Key::Char('l' | 'L') => self.toggle_library(),
+            Key::Char('l' | 'L') => self.toggle_sidebar(sidebar::Tab::Library),
+            Key::Char('s' | 'S') => self.toggle_sidebar(sidebar::Tab::Boards),
             Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
             Key::Char('r' | 'R') => self.run_command(menu::Command::RotateRight),
             Key::Char('h' | 'H') => self.run_command(menu::Command::Mirror),
@@ -1577,6 +1648,7 @@ impl App {
         board.parent = Some(self.doc.board.id);
         let id = board.id;
         self.board_names.insert(id, board.name.clone());
+        self.board_meta.insert(id, sidebar::BoardMeta::of(&board));
         match &self.library {
             Some(lib) => {
                 if let Err(e) = lib.write_board(&board) {
@@ -1620,6 +1692,8 @@ impl App {
         let prev_doc = std::mem::replace(&mut self.doc, doc);
         let prev_cam = std::mem::replace(&mut self.camera, camera);
         let prev_id = prev_doc.board.id;
+        self.board_meta.insert(prev_id, sidebar::BoardMeta { seen_ms: self.now_ms, ..sidebar::BoardMeta::of(&prev_doc.board) });
+        self.board_meta.insert(id, sidebar::BoardMeta { seen_ms: self.now_ms, ..sidebar::BoardMeta::of(&self.doc.board) });
         self.parked.insert(prev_id, (prev_doc, prev_cam));
         if down {
             self.nav.push(prev_id);
@@ -1792,7 +1866,7 @@ impl App {
     /// True while the keyboard types into an item; shells then send typed
     /// characters to [`Self::text_input`] instead of shortcuts like Space.
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some()
+        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some() || self.sidebar_typing()
     }
 
     /// Starts typing into an item's text, caret at the end.
@@ -1925,6 +1999,9 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
+        if self.sidebar_text(s) {
+            return true;
+        }
         if let Some(e) = &mut self.panel_edit {
             e.text.push_str(&s.replace(['\n', '\r', '\t'], " "));
             self.needs_redraw = true;
@@ -2271,7 +2348,8 @@ impl App {
             renderer.draw_glyphs(&view, &hint);
         }
         self.draw_panel(renderer);
-        let redraw_library = self.library_view.is_some();
+        self.draw_sidebar(renderer);
+        let redraw_library = self.library_layout().is_some();
         self.needs_redraw = false;
         if redraw_library {
             // Sets needs_redraw again while thumbnails are still loading.
@@ -2731,8 +2809,50 @@ impl App {
             Gesture::RailDrag { tool } => Some(*tool),
             _ => None,
         };
+        let inset = self.left_inset();
+        let side_open = self.sidebar.is_some();
         let font = &mut self.font;
-        toolbar::layout(self.tool, self.cursor, dragging, &mut |s| panel::text_width(font, s, 12.0))
+        toolbar::layout(self.tool, side_open, self.cursor, dragging, &self.rail_place, self.viewport, inset, &mut |s| panel::text_width(font, s, 12.0))
+    }
+
+    /// Where the tool rail floats, as "x,y,horizontal,folded" for settings.
+    pub fn rail_setting(&self) -> String {
+        self.rail_place.to_setting()
+    }
+
+    /// True while a drag of any kind is under way.
+    pub fn busy_dragging(&self) -> bool {
+        !matches!(self.gesture, Gesture::Idle)
+    }
+
+    /// The tool rail and the left panel as one settings string:
+    /// "x,y,horizontal,folded;boards|library|" .
+    pub fn ui_setting(&self) -> String {
+        let side = match self.sidebar_tab() {
+            Some(sidebar::Tab::Boards) => "boards",
+            Some(sidebar::Tab::Library) => "library",
+            None => "",
+        };
+        format!("{};{side}", self.rail_place.to_setting())
+    }
+
+    /// Restores [`Self::ui_setting`].
+    pub fn set_ui_setting(&mut self, s: &str) {
+        let (rail, side) = s.split_once(';').unwrap_or((s, ""));
+        self.set_rail_setting(rail);
+        match side {
+            "boards" if self.sidebar.is_none() => self.toggle_sidebar(sidebar::Tab::Boards),
+            "library" if self.sidebar.is_none() => self.toggle_sidebar(sidebar::Tab::Library),
+            _ => {}
+        }
+    }
+
+    /// Puts the tool rail back where a setting says (ignored if garbled).
+    pub fn set_rail_setting(&mut self, s: &str) {
+        if let Some(p) = toolbar::Placement::from_setting(s) {
+            self.rail_place = p;
+            self.needs_redraw = true;
+        }
     }
 
     /// The tool under the pointer was pressed: modes switch, things to make
@@ -2987,7 +3107,8 @@ impl App {
                 self.camera.zoom_at(1.0 / z, centre, self.viewport);
             }
             C::TogglePanel => self.panel_open = !self.panel_open,
-            C::ToggleLibrary => self.toggle_library(),
+            C::ToggleLibrary => self.toggle_sidebar(sidebar::Tab::Library),
+            C::ToggleBoards => self.toggle_sidebar(sidebar::Tab::Boards),
             C::ToggleTheme => self.set_light_mode(!theme::is_light()),
             C::ToggleGrid => self.set_grid(!self.show_grid),
             C::RotateRight => self.change_look(|l| l.turns = (l.turns + 1) % 4),

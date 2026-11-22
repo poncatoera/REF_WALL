@@ -68,6 +68,8 @@ struct Shell {
     batch: Option<ImportBatch>,
     /// Light mode and grid as last saved to settings.
     saved_look: (bool, bool),
+    /// Tool rail place and left panel, as last saved.
+    saved_ui: String,
 }
 
 /// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
@@ -382,6 +384,14 @@ mod settings {
         read().get(key).and_then(|v| v.as_bool())
     }
 
+    pub fn get_str(key: &str) -> Option<String> {
+        read().get(key).and_then(|v| v.as_str()).map(str::to_owned)
+    }
+
+    pub fn set_str(key: &str, val: &str) {
+        save(key, val.into());
+    }
+
     pub fn set_bool(key: &str, val: bool) {
         save(key, val.into());
     }
@@ -652,6 +662,13 @@ impl ApplicationHandler for Shell {
                     }
                     self.saved_look = look;
                 }
+                // Remember where the tool rail is and whether the left panel
+                // is open (saved when a drag is over, not on every move).
+                let ui = self.app.ui_setting();
+                if ui != self.saved_ui && !self.app.busy_dragging() {
+                    settings::set_str("ui", &ui);
+                    self.saved_ui = ui;
+                }
                 let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     // WALL_EXPORT=board.png also exports the board (tests).
@@ -815,13 +832,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_light_mode(light);
     let grid = settings::get_bool("grid").unwrap_or(true);
     app.set_grid(grid);
+    // Tool rail and left panel as left.
+    if let Some(ui) = settings::get_str("ui") {
+        app.set_ui_setting(&ui);
+    }
     // WALL_BOARD=<board id> opens that board of the library at start (tests).
     if let Some(id) = std::env::var("WALL_BOARD").ok().and_then(|s| s.trim().parse::<uuid::Uuid>().ok()) {
         app.open_board(id, true);
     }
-    // WALL_OPEN_LIBRARY=1 starts with the library drawer open (screenshots).
-    if std::env::var_os("WALL_OPEN_LIBRARY").is_some() {
-        app.toggle_library();
+    // WALL_OPEN_LIBRARY=1 starts with the library tab open (screenshots).
+    if std::env::var_os("WALL_OPEN_LIBRARY").is_some() && !app.library_is_open() {
+        app.toggle_sidebar(wall_app::sidebar::Tab::Library);
     }
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {
@@ -845,6 +866,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_import: None,
         batch: None,
         saved_look: (light, grid),
+        saved_ui: settings::get_str("ui").unwrap_or_default(),
     };
     event_loop.run_app(&mut shell)?;
     Ok(())

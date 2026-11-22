@@ -16,6 +16,10 @@ pub struct Manifest {
     pub id: Uuid,
     pub name: String,
     pub created_ms: u64,
+    /// The order boards are listed in, among boards with the same parent.
+    /// Boards not listed come after, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub board_order: Vec<Uuid>,
     #[serde(flatten)]
     pub extra: Extra,
 }

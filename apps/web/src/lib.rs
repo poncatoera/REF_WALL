@@ -24,6 +24,7 @@ struct State {
     canvas: HtmlCanvasElement,
     /// Light mode and grid as last saved to localStorage.
     saved_look: (bool, bool),
+    saved_ui: String,
     /// Boards are saved in the browser (off with `?demo`).
     store: bool,
     /// Saved boards have been looked for; saving may start.
@@ -359,10 +360,13 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     let grid = stored("wall.grid").as_deref() != Some("0");
     app.set_light_mode(light);
     app.set_grid(grid);
+    let saved_ui = stored("wall.ui").unwrap_or_default();
+    app.set_ui_setting(&saved_ui);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
     let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), reversing: Default::default(), app, renderer, canvas: canvas.clone(),
         saved_look: (light, grid),
+        saved_ui,
         // `?demo` shows the demo as it ships, without saving.
         store: !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
         loaded: false,
@@ -657,6 +661,13 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             if look != s.saved_look {
                 s.saved_look = look;
                 save_look(look.0, look.1);
+            }
+            let ui = s.app.ui_setting();
+            if ui != s.saved_ui && !s.app.busy_dragging() {
+                if let Some(st) = storage() {
+                    let _ = st.set_item("wall.ui", &ui);
+                }
+                s.saved_ui = ui;
             }
         }
         request_frame(frame.borrow().as_ref().unwrap());

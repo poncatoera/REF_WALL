@@ -46,6 +46,7 @@ own data next to Wall's.
 | `id` | UUID | Stable id of the library, used by sync. |
 | `name` | string | Display name. |
 | `created_ms` | integer | Creation time, Unix milliseconds. |
+| `board_order` | array of ids, optional | The order boards are listed in among boards with the same parent. Boards not listed come after, oldest first. |
 
 All times in this format are Unix milliseconds, UTC.
 

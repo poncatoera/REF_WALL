@@ -50,6 +50,7 @@ impl Library {
             id: Uuid::new_v4(),
             name: name.into(),
             created_ms: now_ms,
+            board_order: Vec::new(),
             extra: Default::default(),
         };
         write_json(&manifest_path, &manifest)?;
@@ -79,6 +80,12 @@ impl Library {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Saves the order boards are listed in (see [`Manifest::board_order`]).
+    pub fn set_board_order(&mut self, order: Vec<Uuid>) -> Result<()> {
+        self.manifest.board_order = order;
+        write_json(&self.root.join("wall.json"), &self.manifest)
     }
 
     pub fn manifest(&self) -> &Manifest {
