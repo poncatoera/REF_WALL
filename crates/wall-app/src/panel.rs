@@ -56,6 +56,8 @@ pub enum Field {
     Title,
     /// The "add a tag" box.
     Tag,
+    /// The name of a video's marker (its index).
+    Marker(usize),
 }
 
 /// Typing into a panel field.
@@ -83,6 +85,9 @@ pub enum Action {
     AcceptTag(String),
     /// Drop a suggested tag.
     DismissTag(String),
+    /// Jump the video to marker k.
+    SeekMarker(usize),
+    RemoveMarker(usize),
     /// A click on the panel that does nothing, so it doesn't reach the board.
     None,
 }
@@ -95,6 +100,10 @@ pub struct VideoInfo {
     pub speed: f32,
     /// In and out points in seconds.
     pub range: Option<(f64, f64)>,
+    /// Markers: time in seconds and name.
+    pub markers: Vec<(f64, String)>,
+    /// The marker the video is on now.
+    pub at_marker: Option<usize>,
 }
 
 /// What the panel shows, gathered from the selection.
@@ -293,6 +302,40 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             None => l.text("I and O set in and out points", [left, y + 17.0], 12.5, DIM()),
         }
         y += 24.0 + 14.0;
+        if v.markers.is_empty() {
+            l.text("M marks a moment", [left, y + 12.0], 12.5, DIM());
+            y += 20.0 + 8.0;
+        }
+        for (k, (t, label)) in v.markers.iter().enumerate() {
+            // Time (jumps there), name (click to type), remove.
+            let on = v.at_marker == Some(k);
+            let tr = [left, y, 58.0, 24.0];
+            l.rect(tr, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
+            l.text(crate::video::format_time(*t), [tr[0] + 8.0, tr[1] + 16.5], 12.0, if on { [1.0; 4] } else { INK() });
+            l.hits.push((tr, Action::SeekMarker(k)));
+            let nr = [left + 64.0, y, inner - 64.0 - 28.0, 24.0];
+            let typing = edit.filter(|e| e.field == Field::Marker(k));
+            l.rect(nr, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
+            let (shown, colour) = match typing {
+                Some(e) => (e.text.clone(), INK()),
+                None if label.is_empty() => ("Name this moment".to_owned(), DIM()),
+                None => (label.clone(), INK()),
+            };
+            let shown = if typing.is_some() { shown } else { fit(font, &shown, 12.5, nr[2] - 16.0) };
+            l.text(shown.clone(), [nr[0] + 8.0, nr[1] + 16.5], 12.5, colour);
+            if typing.is_some() {
+                let w = text_width(font, &shown, 12.5);
+                l.caret = Some([nr[0] + 8.0 + w + 1.0, nr[1] + 5.0, 1.5, 14.0]);
+            }
+            l.hits.push((nr, Action::Edit(Field::Marker(k))));
+            let xr = [left + inner - 24.0, y, 24.0, 24.0];
+            l.text("×", [xr[0] + 7.0, xr[1] + 17.0], 15.0, DIM());
+            l.hits.push((xr, Action::RemoveMarker(k)));
+            y += 28.0;
+        }
+        if !v.markers.is_empty() {
+            y += 8.0;
+        }
     }
 
     // Colour swatches.

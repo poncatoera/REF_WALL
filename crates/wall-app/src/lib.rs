@@ -701,7 +701,7 @@ impl App {
     }
 
     /// A video's markers, in milliseconds.
-    pub fn video_markers(&self, hash: &ContentHash) -> Vec<u64> {
+    pub fn video_markers(&self, hash: &ContentHash) -> Vec<video::Marker> {
         self.sidecars.get(hash).map(|s| s.markers.clone()).unwrap_or_default()
     }
 
@@ -751,7 +751,7 @@ impl App {
             if st.duration > 0.0 {
                 // Markers: small pink ticks through the track.
                 for m in self.video_markers(&hash) {
-                    let xm = x + w * ((m as f64 / 1000.0) / st.duration).clamp(0.0, 1.0) as f32;
+                    let xm = x + w * ((m.ms as f64 / 1000.0) / st.duration).clamp(0.0, 1.0) as f32;
                     out.push(wall_render::BoxInstance { rect: [xm - px, y - 6.0 * px, 2.0 * px, 16.0 * px], fill: [1.0, 0.36, 0.62, 1.0], stroke: [0.0; 4], shape: [px, 0.0] });
                 }
             }
@@ -2313,10 +2313,6 @@ impl App {
                 if sc.is_some_and(|s| s.pingpong) {
                     info.rows.push(("Loop".into(), "Back and forth".into()));
                 }
-                if let Some(m) = sc.filter(|s| !s.markers.is_empty()) {
-                    let times: Vec<String> = m.markers.iter().map(|ms| video::format_time(*ms as f64 / 1000.0)).collect();
-                    info.rows.push(("Markers".into(), times.join("  ")));
-                }
                 let video = self.videos.contains_key(hash);
                 info.kind = if video { "Video" } else { "Image" }.into();
                 info.title = Some(sc.and_then(|s| s.title.clone()).unwrap_or_default());
@@ -2346,6 +2342,8 @@ impl App {
                     let st = self.video_status.get(hash);
                     info.video = Some(VideoInfo {
                         range: self.video_range(hash),
+                        markers: sc.map(|s| s.markers.iter().map(|m| (m.ms as f64 / 1000.0, m.label.clone())).collect()).unwrap_or_default(),
+                        at_marker: st.and_then(|s| video::marker_at(&sc.map(|s| s.markers.clone()).unwrap_or_default(), s.time)),
                         duration_s: st.map_or(0.0, |s| s.duration),
                         fps: sc.and_then(|s| s.fps),
                         playing: st.is_none_or(|s| s.playing),
@@ -2496,6 +2494,7 @@ impl App {
                 let text = match field {
                     Field::Title => self.panel_info().and_then(|i| i.title).unwrap_or_default(),
                     Field::Tag => String::new(),
+                    Field::Marker(k) => id.and_then(|id| self.media_hash(&id)).and_then(|h| self.video_markers(&h).get(k).map(|m| m.label.clone())).unwrap_or_default(),
                 };
                 self.panel_edit = Some(FieldEdit { field, text });
             }
@@ -2505,6 +2504,23 @@ impl App {
                 }
             }
             Action::Color(c) => self.set_color_value(c),
+            Action::SeekMarker(k) => {
+                if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
+                    if let Some(m) = self.video_markers(&hash).get(k) {
+                        self.video_commands.push((hash.clone(), VideoCommand::Pause));
+                        self.video_commands.push((hash, VideoCommand::Seek(m.ms as f64 / 1000.0)));
+                    }
+                }
+            }
+            Action::RemoveMarker(k) => {
+                if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
+                    self.update_sidecar(&hash, |sc| {
+                        if k < sc.markers.len() {
+                            sc.markers.remove(k);
+                        }
+                    });
+                }
+            }
             Action::AcceptTag(t) => {
                 if let Some(hash) = id.and_then(|id| self.media_hash(&id)) {
                     self.update_sidecar(&hash, |sc| {
@@ -2572,6 +2588,15 @@ impl App {
             return;
         }
         let Some(item) = self.selection.iter().next().and_then(|id| self.doc.item(id)).cloned() else { return };
+        if let (Field::Marker(k), ItemKind::Media { hash, .. }) = (&e.field, &item.kind) {
+            let (k, hash) = (*k, hash.clone());
+            self.update_sidecar(&hash, |sc| {
+                if let Some(m) = sc.markers.get_mut(k) {
+                    m.label = text;
+                }
+            });
+            return;
+        }
         match (e.field, &item.kind) {
             (Field::Tag, ItemKind::Media { hash, .. }) => {
                 let hash = hash.clone();
@@ -3272,14 +3297,24 @@ mod tests {
             a.set_video_status(hash.clone(), VideoStatus { time: t, duration: 8.0, playing: false, speed: 1.0 });
             a.key(Key::Char('m'));
         }
-        assert_eq!(a.video_markers(&hash), vec![1000, 4000]);
+        assert_eq!(a.video_markers(&hash).iter().map(|m| m.ms).collect::<Vec<_>>(), vec![1000, 4000]);
         a.take_video_commands();
         a.set_video_status(hash.clone(), VideoStatus { time: 2.0, duration: 8.0, playing: false, speed: 1.0 });
         a.key(Key::Char('\''));
         a.key(Key::Char(';'));
         assert_eq!(a.take_video_commands(), vec![(hash.clone(), VideoCommand::Seek(4.0)), (hash.clone(), VideoCommand::Seek(1.0))]);
         a.panel_open = true;
-        assert!(a.panel_info().unwrap().rows.contains(&("Markers".into(), "0:01.0  0:04.0".into())));
+        assert_eq!(a.panel_info().unwrap().video.unwrap().markers, vec![(1.0, String::new()), (4.0, String::new())]);
+        // Naming the second one in the side panel.
+        a.panel_action(panel::Action::Edit(panel::Field::Marker(1)));
+        a.text_input("Contact");
+        a.key(Key::Enter);
+        assert_eq!(a.video_markers(&hash)[1].label, "Contact");
+        a.take_video_commands();
+        a.panel_action(panel::Action::SeekMarker(1));
+        assert_eq!(a.take_video_commands(), vec![(hash.clone(), VideoCommand::Pause), (hash.clone(), VideoCommand::Seek(4.0))]);
+        a.panel_action(panel::Action::RemoveMarker(0));
+        assert_eq!(a.video_markers(&hash).len(), 1);
     }
 
     #[test]

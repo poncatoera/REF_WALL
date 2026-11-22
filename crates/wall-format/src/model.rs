@@ -81,14 +81,50 @@ pub struct ItemSidecar {
     /// Video in and out points: playback loops between them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<ClipRange>,
-    /// Marked moments in a video, in milliseconds from the start, sorted.
+    /// Marked moments in a video, sorted by time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub markers: Vec<u64>,
+    pub markers: Vec<Marker>,
     /// Loop back and forth instead of jumping back to the start.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pingpong: bool,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// A marked moment in a video, with an optional name ("Contact").
+/// Reads plain numbers too (milliseconds), as written before names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "MarkerRepr")]
+pub struct Marker {
+    pub ms: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+}
+
+impl Marker {
+    pub fn at(ms: u64) -> Self {
+        Marker { ms, label: String::new() }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MarkerRepr {
+    Ms(u64),
+    Full {
+        ms: u64,
+        #[serde(default)]
+        label: String,
+    },
+}
+
+impl From<MarkerRepr> for Marker {
+    fn from(r: MarkerRepr) -> Self {
+        match r {
+            MarkerRepr::Ms(ms) => Marker::at(ms),
+            MarkerRepr::Full { ms, label } => Marker { ms, label },
+        }
+    }
 }
 
 /// A part of a video, in milliseconds from the start.
@@ -325,5 +361,17 @@ impl Board {
     /// The result is the same whichever order replicas are merged in.
     pub fn merge(&mut self, other: &Board) -> usize {
         other.items.values().filter(|i| self.merge_item((*i).clone())).count()
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn markers_read_bare_numbers_and_named_ones() {
+        let m: Vec<Marker> = serde_json::from_str(r#"[500, {"ms": 1200, "label": "Contact"}, {"ms": 3000}]"#).unwrap();
+        assert_eq!(m, vec![Marker::at(500), Marker { ms: 1200, label: "Contact".into() }, Marker::at(3000)]);
+        assert_eq!(serde_json::to_string(&m[0]).unwrap(), r#"{"ms":500}"#);
     }
 }

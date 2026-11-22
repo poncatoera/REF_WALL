@@ -413,11 +413,16 @@ fn import_media(lib: &Library, old: &Path, it: &Value, now: u64, done: &mut Hash
             sc.range = Some(ClipRange { in_ms: a, out_ms: b.min(dur) });
         }
     }
-    // Markers are frame numbers in the old Wall; labels stay in extra below.
+    // Markers are frame numbers with labels in the old Wall.
     if let (Some(list), Some(fps)) = (it["markers"].as_array(), sc.fps.filter(|f| *f > 0.0)) {
-        let mut ms: Vec<u64> = list.iter().filter_map(|m| m["f"].as_f64()).filter(|f| *f >= 0.0).map(|f| (f / fps as f64 * 1000.0).round() as u64).collect();
-        ms.sort_unstable();
-        ms.dedup();
+        let mut ms: Vec<wall_format::Marker> = list
+            .iter()
+            .filter_map(|m| Some((m["f"].as_f64()?, m["label"].as_str().unwrap_or("").to_owned())))
+            .filter(|(f, _)| *f >= 0.0)
+            .map(|(f, label)| wall_format::Marker { ms: (f / fps as f64 * 1000.0).round() as u64, label })
+            .collect();
+        ms.sort_by_key(|m| m.ms);
+        ms.dedup_by_key(|m| m.ms);
         sc.markers = ms;
     }
     // What the new format has no field for yet, kept for later.

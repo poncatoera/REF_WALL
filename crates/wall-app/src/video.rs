@@ -3,6 +3,8 @@
 //! the shell's player carries them out and reports back its status, which
 //! the app draws as a scrub bar.
 
+pub use wall_format::Marker;
+
 /// Something the shell's player should do.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VideoCommand {
@@ -46,21 +48,27 @@ pub fn mark(range: Option<(f64, f64)>, t: f64, duration: f64, set_in: bool) -> O
 
 /// Markers after pressing M at `t` seconds: removes a marker within a
 /// tenth of a second of `t`, otherwise adds one there. Kept sorted.
-pub fn toggle_marker(markers: &[u64], t: f64) -> Vec<u64> {
+pub fn toggle_marker(markers: &[Marker], t: f64) -> Vec<Marker> {
     let ms = (t.max(0.0) * 1000.0).round() as u64;
-    let mut out: Vec<u64> = markers.iter().copied().filter(|m| m.abs_diff(ms) > 100).collect();
+    let mut out: Vec<Marker> = markers.iter().filter(|m| m.ms.abs_diff(ms) > 100).cloned().collect();
     if out.len() == markers.len() {
-        out.push(ms);
-        out.sort_unstable();
+        out.push(Marker::at(ms));
+        out.sort_by_key(|m| m.ms);
     }
     out
 }
 
+/// The marker shown at `t` seconds (within half a frame at 25 fps).
+pub fn marker_at(markers: &[Marker], t: f64) -> Option<usize> {
+    let ms = (t.max(0.0) * 1000.0).round() as u64;
+    markers.iter().position(|m| m.ms.abs_diff(ms) <= 20)
+}
+
 /// The marker to jump to from `t` seconds: the next one after it
 /// (`forward`) or the one before it, in seconds.
-pub fn next_marker(markers: &[u64], t: f64, forward: bool) -> Option<f64> {
+pub fn next_marker(markers: &[Marker], t: f64, forward: bool) -> Option<f64> {
     let ms = (t.max(0.0) * 1000.0).round() as i64;
-    let mut it = markers.iter().map(|m| *m as i64);
+    let mut it = markers.iter().map(|m| m.ms as i64);
     let found = if forward { it.find(|m| *m > ms + 30) } else { it.rev().find(|m| *m < ms - 30) };
     found.map(|m| m as f64 / 1000.0)
 }
@@ -120,8 +128,10 @@ mod tests {
     fn markers_toggle_and_jump() {
         let m = toggle_marker(&[], 2.0);
         let m = toggle_marker(&m, 0.5);
-        assert_eq!(m, vec![500, 2000]);
-        assert_eq!(toggle_marker(&m, 2.05), vec![500], "pressing M near one removes it");
+        assert_eq!(m, vec![Marker::at(500), Marker::at(2000)]);
+        assert_eq!(toggle_marker(&m, 2.05), vec![Marker::at(500)], "pressing M near one removes it");
+        assert_eq!(marker_at(&m, 2.01), Some(1));
+        assert_eq!(marker_at(&m, 1.0), None);
         assert_eq!(next_marker(&m, 1.0, true), Some(2.0));
         assert_eq!(next_marker(&m, 2.0, true), None, "already on the last one");
         assert_eq!(next_marker(&m, 2.0, false), Some(0.5));
