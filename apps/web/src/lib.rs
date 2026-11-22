@@ -602,6 +602,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                         wall_app::VideoCommand::PingPong(_) => {
                             reversing.remove(&hash);
                         }
+                        // Not in the browser yet (it needs the frames around this one).
+                        wall_app::VideoCommand::Onion(_) => {}
                     }
                 }
                 // Only videos on screen (and big enough) play; the rest keep their last frame.

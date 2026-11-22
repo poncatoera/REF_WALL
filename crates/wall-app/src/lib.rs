@@ -15,7 +15,7 @@ pub mod toolbar;
 mod grid;
 pub mod video;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 use wall_format::{ArrowEnd, Board, BoardItem, Frame, ItemKind, Rect, ItemSidecar, Library, MediaKind};
@@ -247,6 +247,8 @@ pub struct App {
     videos: HashMap<ContentHash, (String, u32, u32)>,
     video_status: HashMap<ContentHash, VideoStatus>,
     video_commands: Vec<(ContentHash, VideoCommand)>,
+    /// Videos showing onion skin (not saved: a study aid for now).
+    onion: HashSet<ContentHash>,
     /// Fit the view to the board once the real window size is known.
     fit_on_resize: bool,
     /// Boards opened before (with their undo history and view), by id.
@@ -335,6 +337,7 @@ impl App {
             videos: HashMap::new(),
             video_status: HashMap::new(),
             video_commands: Vec::new(),
+            onion: HashSet::new(),
             fit_on_resize: false,
             parked: HashMap::new(),
             board_names: [(board_id, board_name)].into(),
@@ -605,6 +608,13 @@ impl App {
                     self.update_sidecar(&hash, |sc| sc.pingpong = on);
                     VideoCommand::PingPong(on)
                 }
+                'u' => {
+                    let on = !self.onion.remove(&hash);
+                    if on {
+                        self.onion.insert(hash.clone());
+                    }
+                    VideoCommand::Onion(on)
+                }
                 'm' => {
                     let Some(st) = self.video_status.get(&hash).copied() else { continue };
                     let markers = video::toggle_marker(&self.video_markers(&hash), st.time);
@@ -693,6 +703,11 @@ impl App {
     /// A video's in and out points in seconds, if it has them.
     pub fn video_range(&self, hash: &ContentHash) -> Option<(f64, f64)> {
         self.sidecars.get(hash)?.range.map(|r| (r.in_ms as f64 / 1000.0, r.out_ms as f64 / 1000.0))
+    }
+
+    /// True when a video shows onion skin.
+    pub fn video_onion(&self, hash: &ContentHash) -> bool {
+        self.onion.contains(hash)
     }
 
     /// True when a video loops back and forth.
@@ -2312,6 +2327,9 @@ impl App {
                 }
                 if sc.is_some_and(|s| s.pingpong) {
                     info.rows.push(("Loop".into(), "Back and forth".into()));
+                }
+                if self.onion.contains(hash) {
+                    info.rows.push(("Onion skin".into(), "On  ·  U".into()));
                 }
                 let video = self.videos.contains_key(hash);
                 info.kind = if video { "Video" } else { "Image" }.into();

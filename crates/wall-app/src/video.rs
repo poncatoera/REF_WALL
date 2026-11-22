@@ -20,6 +20,8 @@ pub enum VideoCommand {
     Range(Option<(f64, f64)>),
     /// Play the loop forwards then backwards, again and again.
     PingPong(bool),
+    /// Onion skin: show the frames just before and after, faintly.
+    Onion(bool),
 }
 
 /// "0:01.2": minutes, seconds and tenths, for in and out points.

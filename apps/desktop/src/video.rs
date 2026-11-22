@@ -100,6 +100,15 @@ pub struct Player {
     too_big: bool,
     /// Playing backwards: the time shown, and the cached frame shown last.
     back: Option<(f64, usize)>,
+    /// Onion skin: blend the frames before and after into the one shown.
+    onion: bool,
+    /// The frame shown now, unblended, and the one shown before it.
+    current: Option<Vec<u8>>,
+    previous: Option<Vec<u8>>,
+    /// The picture must be sent again (onion skin turned on or off).
+    redraw: bool,
+    /// The last picture sent had the frame after blended in.
+    showed_after: bool,
 }
 
 /// Most memory one video's back-and-forth loop may hold.
@@ -134,6 +143,11 @@ impl Player {
             cache_ready: false,
             too_big: false,
             back: None,
+            onion: false,
+            current: None,
+            previous: None,
+            redraw: false,
+            showed_after: false,
         })
     }
 
@@ -146,6 +160,10 @@ impl Player {
             C::Seek(t) => {
                 self.forget_loop();
                 self.seek(t);
+            }
+            C::Onion(on) => {
+                self.onion = on;
+                self.redraw = true;
             }
             C::PingPong(on) => {
                 self.forget_loop();
@@ -192,6 +210,9 @@ impl Player {
         self.gen += 1;
         self.clock = t;
         self.pending = None;
+        // The frames around the old time say nothing about the new one.
+        self.current = None;
+        self.previous = None;
         let _ = self.seek_tx.send((self.gen, t));
     }
 
@@ -207,8 +228,28 @@ impl Player {
         wall_app::VideoStatus { time, duration: self.duration, playing: self.playing, speed: self.speed }
     }
 
-    /// Advances the clock and returns the frame to show now, if it changed.
+    /// Advances the clock and returns the picture to show now, if it changed
+    /// (the frame, with onion skin blended in when that's on).
     pub fn tick(&mut self) -> Option<Vec<u8>> {
+        let frame = self.next_frame();
+        let after_ready = self.onion && self.back.is_none() && self.pending.as_ref().is_some_and(|p| p.0 == self.gen);
+        match frame {
+            Some(f) => self.previous = self.current.replace(f),
+            // The frame after turned up late: show it too.
+            None if self.redraw || (after_ready && !self.showed_after) => {}
+            None => return None,
+        }
+        self.redraw = false;
+        let cur = self.current.as_ref()?;
+        if !self.onion {
+            return Some(cur.clone());
+        }
+        let after = self.pending.as_ref().filter(|_| after_ready).map(|p| p.2.as_slice());
+        self.showed_after = after.is_some();
+        Some(onion_skin(cur, self.previous.as_deref(), after))
+    }
+
+    fn next_frame(&mut self) -> Option<Vec<u8>> {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
@@ -281,6 +322,34 @@ impl Player {
 }
 
 /// The `gpu_video_decode` setting, read once.
+/// Blends the frame before (warm) and after (cool) faintly into `cur`, so
+/// movement shows as coloured edges. All three are RGBA of the same size.
+pub fn onion_skin(cur: &[u8], before: Option<&[u8]>, after: Option<&[u8]>) -> Vec<u8> {
+    const GHOST: u32 = 72; // of 256, for each neighbour
+    const WARM: [u32; 3] = [256, 150, 110];
+    const COOL: [u32; 3] = [110, 190, 256];
+    let before = before.filter(|b| b.len() == cur.len());
+    let after = after.filter(|a| a.len() == cur.len());
+    let mut out = cur.to_vec();
+    for (i, px) in out.chunks_exact_mut(4).enumerate() {
+        let o = i * 4;
+        for c in 0..3 {
+            let mut keep = 256u32;
+            let mut sum = 0u32;
+            if let Some(b) = before {
+                keep -= GHOST;
+                sum += GHOST * ((b[o + c] as u32 * WARM[c]) >> 8);
+            }
+            if let Some(a) = after {
+                keep -= GHOST;
+                sum += GHOST * ((a[o + c] as u32 * COOL[c]) >> 8);
+            }
+            px[c] = ((keep * cur[o + c] as u32 + sum) >> 8).min(255) as u8;
+        }
+    }
+    out
+}
+
 pub fn gpu_decode() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(crate::settings::gpu_video_decode)
@@ -476,6 +545,57 @@ mod tests {
     }
 
     #[test]
+    fn onion_skin_shows_once_paused_with_both_neighbours() {
+        if ffmpeg().is_none() {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("c.mp4");
+        let ok = command(ffmpeg().unwrap())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-t", "2", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let mut player = Player::start(clip, 160, 90, 2.0, 25.0, 1280).unwrap();
+        let wait = |p: &mut Player, ms: u64| {
+            let mut last = None;
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                if let Some(f) = p.tick() {
+                    last = Some(f);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            last
+        };
+        wait(&mut player, 400);
+        player.command(wall_app::VideoCommand::Pause);
+        player.command(wall_app::VideoCommand::Step(1));
+        wait(&mut player, 200);
+        player.command(wall_app::VideoCommand::Onion(true));
+        let shown = wait(&mut player, 200).expect("turning onion skin on redraws");
+        assert!(player.previous.is_some() && player.showed_after, "blends the frame before and after");
+        assert_ne!(&shown, player.current.as_ref().unwrap());
+        player.command(wall_app::VideoCommand::Onion(false));
+        assert_eq!(&wait(&mut player, 50).unwrap(), player.current.as_ref().unwrap(), "off again: the plain frame");
+    }
+
+    #[test]
+    fn onion_skin_tints_the_neighbours_into_the_frame() {
+        let cur = [100u8, 100, 100, 255];
+        assert_eq!(onion_skin(&cur, None, None), cur.to_vec());
+        let white = [255u8; 4];
+        let out = onion_skin(&cur, Some(&white), None);
+        assert!(out[0] > out[2], "the frame before shows warm: {out:?}");
+        let out = onion_skin(&cur, None, Some(&white));
+        assert!(out[2] > out[0], "the frame after shows cool: {out:?}");
+        assert_eq!(out[3], 255);
+        assert_eq!(onion_skin(&cur, Some(&[0u8; 8]), None), cur.to_vec(), "a frame of another size is ignored");
+    }
+
+    #[test]
     fn video_extensions() {
         assert!(is_video(Path::new("a/B.MOV")));
         assert!(!is_video(Path::new("a/b.png")));
@@ -596,6 +716,7 @@ impl Videos {
                         p.command(wall_app::VideoCommand::Speed(slot.saved.speed));
                         p.command(wall_app::VideoCommand::Range(app.video_range(&slot.hash)));
                         p.command(wall_app::VideoCommand::PingPong(app.video_pingpong(&slot.hash)));
+                        p.command(wall_app::VideoCommand::Onion(app.video_onion(&slot.hash)));
                         if !slot.saved.playing {
                             p.command(wall_app::VideoCommand::Pause);
                         }
@@ -619,7 +740,7 @@ impl Videos {
                     wall_app::VideoCommand::Pause => slot.saved.playing = false,
                     wall_app::VideoCommand::Speed(s) => slot.saved.speed = s,
                     wall_app::VideoCommand::Seek(t) => slot.saved.time = t,
-                    wall_app::VideoCommand::Step(_) | wall_app::VideoCommand::Range(_) | wall_app::VideoCommand::PingPong(_) => {}
+                    wall_app::VideoCommand::Step(_) | wall_app::VideoCommand::Range(_) | wall_app::VideoCommand::PingPong(_) | wall_app::VideoCommand::Onion(_) => {}
                 },
             }
         }
