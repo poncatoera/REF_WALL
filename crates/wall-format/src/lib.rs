@@ -10,6 +10,7 @@
 //!   boards/<uuid>.json     one file per board
 //!   cache/                 previews and thumbnails, safe to delete
 //!   trash/                 nothing is hard-deleted
+//!   history/<uuid>/<ms>.json.gz  earlier versions of each board (see `history`)
 //! ```
 //!
 //! Every JSON object keeps fields it does not know about (`extra`), so a file
@@ -17,11 +18,13 @@
 
 mod error;
 mod hash;
+pub mod history;
 mod library;
 mod model;
 
 pub use error::{Error, Result};
 pub use hash::ContentHash;
+pub use history::{TrashedBoard, VERSION_EVERY_MS};
 pub use library::{ImportOutcome, Library};
 pub use model::*;
 

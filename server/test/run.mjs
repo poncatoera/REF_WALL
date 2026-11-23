@@ -4,6 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -561,6 +562,50 @@ test("a revoked link stops at once; a deleted board's link shows nothing", async
   assert.equal((await call(edit.secret, `media/${hPub}`)).status, 404);
 });
 
+test("history: a board's earlier version is kept, and only editors may read it", async () => {
+  const H = randomUUID(), K = randomUUID(), h1 = randomUUID(), card = randomUUID();
+  const cardItem = (rev, deleted = false) => ({ id: card, frame: { x: 0, y: 0, w: 1, h: 1 }, type: "board", board_id: K, rev, updated_ms: rev, updated_by: "pc", ...(deleted ? { deleted: true } : {}) });
+  await sync(owner, { since: 0, boards: [board(H)], items: [{ board: H, item: note(h1, 1, "one") }] });
+  // The next change keeps the board as it was.
+  await sync(owner, { since: 0, items: [{ board: H, item: note(h1, 2, "two") }] });
+  const times = (await call(owner, `history?board=${H}`)).data.times;
+  assert.equal(times.length, 1);
+  const v = await call(owner, `history?board=${H}&at=${times[0]}`);
+  assert.equal(v.headers.get("content-type"), "application/gzip");
+  const kept = JSON.parse(gunzipSync(v.data).toString());
+  assert.deepEqual([kept.id, kept.version, kept.items[h1].text], [H, 1, "one"]);
+  // Changes within 15 minutes don't make another.
+  await sync(owner, { since: 0, items: [{ board: H, item: note(h1, 3, "three") }] });
+  assert.equal((await call(owner, `history?board=${H}`)).data.times.length, 1);
+  assert.equal((await call(owner, `history?board=${H}&at=1`)).status, 404);
+
+  const hEdit = (await call(owner, "links", { method: "POST", json: { role: "edit", board: H } })).data.secret;
+  const hView = (await call(owner, "links", { method: "POST", json: { role: "view", board: H } })).data.secret;
+  assert.equal((await call(hEdit, `history?board=${H}`)).data.times.length, 1);
+  assert.equal((await call(hView, `history?board=${H}`)).status, 403, "view links only look at now");
+  assert.equal((await call(hEdit, `history?board=${A}`)).status, 404, "not a board it reaches");
+
+  // A board inside H is deleted, with its card: it can be brought back.
+  await sync(owner, { since: 0, boards: [board(K, H, "Inner")], items: [{ board: H, item: cardItem(1) }, { board: K, item: note(randomUUID(), 1, "inside") }] });
+  await sync(owner, { since: 0, boards: [board(K, H, "Inner", { deleted: true })], items: [{ board: H, item: cardItem(2, true) }] });
+  const before = (await call(owner, "me")).data.seq;
+  assert.equal((await call(hView, "deleted")).status, 403);
+  const listed = (await call(hEdit, "deleted")).data;
+  assert.deepEqual(listed.map((d) => [d.id, d.name, d.items, d.inside]), [[K, "Inner", 1, 0]]);
+  assert.ok(Date.now() - listed[0].deleted_ms < 60_000);
+  assert.equal((await call(hView, "undelete", { method: "POST", json: { board: K } })).status, 403);
+  assert.equal((await call(hEdit, "undelete", { method: "POST", json: { board: A } })).status, 404);
+  assert.equal((await call(hEdit, "undelete", { method: "POST", json: { board: K } })).status, 200);
+  // Everyone pulls it again: the board, its items, and its card, newer.
+  const r = (await sync(owner, { since: before })).data;
+  assert.deepEqual(r.boards.map((b) => [b.id, !!b.deleted]), [[K, false]]);
+  assert.ok(r.items.some((e) => e.board === K && e.item.text === "inside"));
+  const back = r.items.find((e) => e.item.id === card).item;
+  assert.deepEqual([back.deleted, back.rev], [undefined, 3]);
+  assert.deepEqual((await call(hEdit, "deleted")).data, []);
+  assert.ok((await sync(hEdit, { since: 0 })).data.scope.includes(K), "the link reaches it again");
+});
+
 let failed = 0;
 try {
   for (let k = 0; ; k++) {
@@ -581,7 +626,7 @@ try {
       console.log("FAIL ", name, "\n      ", String(e.stack || e).split("\n").slice(0, 12).join("\n       "));
     }
   }
-  if (failed) console.log("--- server log\n" + log.split("\n").slice(-25).join("\n"));
+  if (failed) console.log("--- server log\n" + log.split("\n").filter((l) => !l.startsWith("[wrangler:info]")).slice(-40).join("\n"));
 } finally {
   // wrangler starts workerd as a child; end only this run's process tree.
   if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], { stdio: "ignore" });

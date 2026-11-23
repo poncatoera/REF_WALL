@@ -206,6 +206,7 @@ impl App {
             self.doc.version += 1;
             return;
         }
+        self.keep_history(b.id);
         if let Some(lib) = &self.library {
             if let Err(e) = lib.write_board(&b) {
                 eprintln!("wall: could not save board: {e}");

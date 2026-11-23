@@ -313,6 +313,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::Cloud(_) => {}
         wall_app::ShellCommand::SetName(name) => cloud::set_name(&name),
         wall_app::ShellCommand::SetColor(c) => cloud::set_color(c),
+        wall_app::ShellCommand::History(ask) => cloud::history(s.clone(), ask),
         wall_app::ShellCommand::CopyText(text) => {
             let _ = window.navigator().clipboard().write_text(&text);
         }
@@ -430,6 +431,9 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     let saved_ui = stored("wall.ui").unwrap_or_default();
     app.set_ui_setting(&saved_ui);
+    app.set_utc_offset(-(js_sys::Date::new_0().get_timezone_offset() as i32));
+    // A shared board's history is kept in the cloud.
+    app.set_history_remote(share.is_some());
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
     let state = Rc::new(RefCell::new(State { players: Default::default(), app, renderer, canvas: canvas.clone(),

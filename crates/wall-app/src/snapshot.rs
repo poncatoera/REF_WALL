@@ -46,7 +46,7 @@ impl App {
     /// True while a drag or typing is in progress: save after it ends, so
     /// a half-finished edit is never what comes back.
     pub fn busy_editing(&self) -> bool {
-        !matches!(self.gesture, Gesture::Idle) || self.editing.is_some()
+        !matches!(self.gesture, Gesture::Idle) || self.editing.is_some() || self.history_previewing()
     }
 
     /// Every board (the open one and the others visited or made) and every

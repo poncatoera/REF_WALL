@@ -12,6 +12,13 @@
 // `rev` wins, then the larger `updated_by`. Every accepted row gets the next
 // `seq`; clients ask for rows after the last seq they have.
 //
+// History: before a push changes a board, the board as it is is kept as a
+// version (at most every 15 minutes per board, thinned like the desktop's:
+// all of the last day, hourly for a week, daily for 90 days, weekly after).
+// Owners and edit links can list and fetch versions, list deleted boards and
+// bring one back (/api/history, /api/deleted, /api/undelete). Bringing a
+// version back is done by the app as ordinary item edits.
+//
 // Live (/api/live, a WebSocket): who else is on a board and where their
 // pointer is, and a "poke" after every accepted push so the others pull at
 // once instead of at their next poll. The key comes in the first message,
@@ -35,6 +42,14 @@ const HELLO_MS = 10_000; // and how long they get to
 const MAX_MESSAGE = 1000; // characters in one live message
 const CURSOR_MS = 80; // pointer updates closer together than this are dropped
 const MAX_NAME = 40;
+// Versions (see keepVersions): a board as it was, at most this often while
+// it changes, gzipped, in rows of PIECE bytes. Not kept once the database is
+// this full, so they never crowd out the boards themselves.
+const VERSION_EVERY_MS = 15 * 60 * 1000;
+const MAX_VERSION = 8_000_000;
+const VERSIONS_UNTIL_DB = 500_000_000;
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -109,6 +124,15 @@ export default {
       if (path === "sync" && request.method === "POST") return await call("sync", await body(request));
       if (path === "items" && request.method === "GET") return await call("boardItems", url.searchParams.get("board"), url.searchParams.get("after") || "");
       if (path === "me" && request.method === "GET") return await call("me");
+      if (path === "history" && request.method === "GET") {
+        const at = url.searchParams.get("at");
+        if (at === null) return await call("versions", url.searchParams.get("board"));
+        const r = await lib.version(who, url.searchParams.get("board"), at);
+        if (r.error) throw new Refuse(r.status, r.error);
+        return new Response(r.bytes, { headers: { "content-type": "application/gzip", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+      }
+      if (path === "deleted" && request.method === "GET") return await call("deletedBoards");
+      if (path === "undelete" && request.method === "POST") return await call("undelete", await body(request));
       if (path === "links" && request.method === "GET") return await call("listLinks");
       if (path === "links" && request.method === "POST") return await call("makeLink", await body(request));
       const link = /^links\/([0-9a-f-]{36})$/.exec(path);
@@ -228,6 +252,25 @@ function viewMayWrite(old, i, person) {
   return now.length >= was.length && was.every((m, k) => JSON.stringify(m) === JSON.stringify(now[k])) && now.slice(was.length).every((m) => messageOk(m, person));
 }
 
+// Which of these version times to drop (newest first wins each bucket).
+function thin(times, now) {
+  const seen = new Set();
+  const out = [];
+  for (const t of [...times].sort((a, b) => b - a)) {
+    const age = now - t;
+    if (age < DAY) continue;
+    const bucket = age < 7 * DAY ? `h${Math.floor(t / HOUR)}` : age < 90 * DAY ? `d${Math.floor(t / DAY)}` : `w${Math.floor(t / (7 * DAY))}`;
+    if (seen.has(bucket)) out.push(t);
+    else seen.add(bucket);
+  }
+  return out;
+}
+
+async function gzip(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
 function cleanColor(v) {
   return Number.isInteger(v) && v >= 0 && v < 8 ? v : null;
 }
@@ -256,6 +299,11 @@ export class LibraryDO extends DurableObject {
         -- Files a board link has shown it has (uploaded, or sent the same
         -- bytes as a file already here), so it may put them on its boards.
         CREATE TABLE IF NOT EXISTS grants (link TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (link, hash)) WITHOUT ROWID;
+        -- Versions of boards: gzipped board JSON in pieces; seq is the
+        -- board's newest item seq then, so an unchanged board isn't kept twice.
+        CREATE TABLE IF NOT EXISTS versions (board TEXT NOT NULL, at INTEGER NOT NULL, part INTEGER NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (board, at, part)) WITHOUT ROWID;
+        -- When each deleted board was deleted.
+        CREATE TABLE IF NOT EXISTS deleted_at (board TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
       `);
       // Added later: the person a link is for ("Mia"); empty for anyone.
       if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'person'").length) {
@@ -264,6 +312,8 @@ export class LibraryDO extends DurableObject {
     });
     // Hashes a board-only link may read, kept while nothing changes.
     this.readable = new Map();
+    // When a version of each board was last looked at (see keepVersions).
+    this.taken = new Map();
     // Keep-alives are answered without waking the object (and aren't billed).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
@@ -517,6 +567,10 @@ export class LibraryDO extends DurableObject {
     if (pushing && this.sql.databaseSize > MAX_LIBRARY_DB) return no(507, "the library is full");
     let refused = [];
     if (pushing) {
+      // Boards about to change: kept as they are first (now and then).
+      const touched = new Set();
+      for (const e of items) if (typeof e?.board === "string" && UUID.test(e.board)) touched.add(e.board);
+      await this.keepVersions(touched);
       try {
         const before = this.seq();
         refused = this.ctx.storage.transactionSync(() => this.accept(a, boards, items, sidecars));
@@ -586,7 +640,7 @@ export class LibraryDO extends DurableObject {
       const meta = { ...b, items: undefined };
       const text = JSON.stringify(meta);
       if (text.length > MAX_ROW) throw new Refuse(413, "board too big");
-      const old = this.rows("SELECT parent, json FROM boards WHERE id = ?", b.id)[0];
+      const old = this.rows("SELECT parent, deleted, json FROM boards WHERE id = ?", b.id)[0];
       if (scope) {
         // Inside the shared board only: new boards under it, renames, moves
         // within it. The shared board itself can't be moved or deleted.
@@ -614,6 +668,8 @@ export class LibraryDO extends DurableObject {
         continue;
       }
       this.sql.exec("INSERT INTO boards VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET parent = excluded.parent, deleted = excluded.deleted, json = excluded.json, seq = excluded.seq", b.id, b.parent ?? null, b.deleted ? 1 : 0, text, next());
+      if (b.deleted && !old?.deleted) this.sql.exec("INSERT OR REPLACE INTO deleted_at VALUES (?, ?)", b.id, Date.now());
+      if (!b.deleted && old?.deleted) this.sql.exec("DELETE FROM deleted_at WHERE board = ?", b.id);
       if (scope) scope = this.scope(a);
     }
     const topRev = new Map(); // board -> highest rev on it, for links
@@ -753,6 +809,163 @@ export class LibraryDO extends DurableObject {
 
   async release(hash, ticket) {
     this.sql.exec("DELETE FROM media WHERE hash = ? AND ticket = ? AND done = 0", hash, ticket);
+  }
+
+  // ---- history ------------------------------------------------------------
+
+  // Keeps each of these boards as it is now as a version, if its last one
+  // was looked at VERSION_EVERY_MS ago. Item rows are joined as they're
+  // stored (not parsed), so this costs little CPU.
+  async keepVersions(boards) {
+    const now = Date.now();
+    if (this.sql.databaseSize > VERSIONS_UNTIL_DB) return;
+    for (const id of boards) {
+      if (now - (this.taken.get(id) || 0) < VERSION_EVERY_MS) continue;
+      const b = this.rows("SELECT json FROM boards WHERE id = ? AND deleted = 0", id)[0];
+      if (!b) continue;
+      const parts = [];
+      let seq = 0;
+      for (const r of this.sql.exec("SELECT id, json, seq FROM items WHERE board = ? AND deleted = 0", id)) {
+        parts.push(`${JSON.stringify(r.id)}:${r.json}`);
+        if (r.seq > seq) seq = r.seq;
+      }
+      // A new or empty board: nothing to go back to yet.
+      if (!parts.length) continue;
+      if (this.taken.size > 2000) this.taken.clear();
+      this.taken.set(id, now);
+      const last = this.rows("SELECT seq FROM versions WHERE board = ? ORDER BY at DESC LIMIT 1", id)[0];
+      if (last && last.seq === seq) continue;
+      const meta = JSON.parse(b.json);
+      const head = { version: 1, id, name: typeof meta.name === "string" ? meta.name : "", ...(meta.parent ? { parent: meta.parent } : {}), created_ms: Number(meta.created_ms) || 0, updated_ms: now };
+      const text = `${JSON.stringify(head).slice(0, -1)},"items":{${parts.join(",")}}}`;
+      const gz = await gzip(text);
+      if (gz.length > MAX_VERSION) continue;
+      this.ctx.storage.transactionSync(() => {
+        for (let k = 0; k * PIECE < gz.length; k++) this.sql.exec("INSERT OR REPLACE INTO versions VALUES (?, ?, ?, ?, ?)", id, now, k, seq, gz.subarray(k * PIECE, (k + 1) * PIECE));
+        const times = this.rows("SELECT DISTINCT at FROM versions WHERE board = ?", id).map((r) => r.at);
+        for (const t of thin(times, now)) this.sql.exec("DELETE FROM versions WHERE board = ? AND at = ?", id, t);
+      });
+    }
+  }
+
+  // Owners and edit links only, on boards they reach.
+  historyAccess(who, board) {
+    const a = this.access(who);
+    if (!a) return [null, no(403, "this link doesn't work (any more)")];
+    if (a.role === "view") return [null, no(403, "this link can only look")];
+    if (board !== undefined && (!UUID.test(board || "") || !this.reaches(a, board))) return [null, no(404, "no such board here")];
+    return [a, null];
+  }
+
+  async versions(who, board) {
+    const [, err] = this.historyAccess(who, board);
+    if (err) return err;
+    return { times: this.rows("SELECT DISTINCT at FROM versions WHERE board = ? ORDER BY at DESC", board).map((r) => r.at) };
+  }
+
+  async version(who, board, at) {
+    const [, err] = this.historyAccess(who, board);
+    if (err) return err;
+    const parts = this.rows("SELECT data FROM versions WHERE board = ? AND at = ? ORDER BY part", board, Number(at)).map((r) => new Uint8Array(r.data));
+    if (!parts.length) return no(404, "no such version");
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let k = 0;
+    for (const p of parts) {
+      out.set(p, k);
+      k += p.length;
+    }
+    return { bytes: out };
+  }
+
+  // Deleted boards this access could bring back: those whose parent it
+  // reaches (or, for the whole library, whose parent is still there). Boards
+  // deleted inside another deleted one come back with it and are counted.
+  restorable(a) {
+    const scope = this.scope(a);
+    const all = this.rows("SELECT b.id, b.parent, b.json, COALESCE(d.at, 0) AS at FROM boards b LEFT JOIN deleted_at d ON d.board = b.id WHERE b.deleted = 1");
+    const gone = new Map(all.map((r) => [r.id, r]));
+    const out = [];
+    for (const r of all) {
+      const ok = scope ? r.parent != null && scope.has(r.parent) : r.parent == null || !gone.has(r.parent);
+      if (!ok) continue;
+      out.push({ ...r, inside: this.deletedInside(r, gone) });
+    }
+    return out;
+  }
+
+  // Deleted boards inside `top` deleted at about the same time (within a
+  // minute; any time if that isn't known).
+  deletedInside(top, gone) {
+    const inside = [];
+    const todo = [top.id];
+    while (todo.length) {
+      const p = todo.pop();
+      for (const r of gone.values()) {
+        if (r.parent !== p || inside.includes(r) || r.id === top.id) continue;
+        if (top.at && r.at && Math.abs(r.at - top.at) > 60_000) continue;
+        inside.push(r);
+        todo.push(r.id);
+      }
+    }
+    return inside;
+  }
+
+  async deletedBoards(who) {
+    const [a, err] = this.historyAccess(who);
+    if (err) return err;
+    const list = this.restorable(a)
+      .sort((x, y) => y.at - x.at)
+      .slice(0, 100)
+      .map((r) => {
+        const meta = JSON.parse(r.json);
+        const items = this.rows("SELECT COUNT(*) AS n FROM items WHERE board = ? AND deleted = 0", r.id)[0].n;
+        return { id: r.id, name: typeof meta.name === "string" ? meta.name : "", parent: r.parent, deleted_ms: r.at, items, inside: r.inside.length };
+      });
+    return list;
+  }
+
+  // Brings a deleted board back, with the boards deleted inside it and its
+  // card on the board it was on. Its items get new seqs so everyone pulls
+  // them again.
+  async undelete(who, req) {
+    const [a, err] = this.historyAccess(who);
+    if (err) return err;
+    const id = req?.board;
+    if (!UUID.test(id || "")) return no(400, "bad board");
+    const top = this.restorable(a).find((r) => r.id === id);
+    if (!top) return no(404, "that board can't be brought back from here");
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      const next = () => {
+        this.sql.exec("UPDATE counter SET seq = seq + 1");
+        return this.seq();
+      };
+      for (const r of [top, ...top.inside]) {
+        const meta = JSON.parse(r.json);
+        delete meta.deleted;
+        this.sql.exec("UPDATE boards SET deleted = 0, json = ?, seq = ? WHERE id = ?", JSON.stringify(meta), next(), r.id);
+        this.sql.exec("DELETE FROM deleted_at WHERE board = ?", r.id);
+        for (const i of this.rows("SELECT id FROM items WHERE board = ?", r.id)) this.sql.exec("UPDATE items SET seq = ? WHERE board = ? AND id = ?", next(), r.id, i.id);
+      }
+      // Its card, deleted with it, comes back as a newer revision.
+      if (top.parent) {
+        const card = this.rows("SELECT id, rev, json FROM items WHERE board = ? AND deleted = 1 AND instr(json, ?) > 0 ORDER BY rev DESC LIMIT 1", top.parent, `"board_id":"${id}"`)[0];
+        if (card) {
+          const i = JSON.parse(card.json);
+          if (i.type === "board" && i.board_id === id) {
+            delete i.deleted;
+            i.rev = card.rev + 1;
+            i.updated_ms = now;
+            i.updated_by = "~restore";
+            this.sql.exec("UPDATE items SET rev = ?, updated_by = ?, deleted = 0, json = ?, seq = ? WHERE board = ? AND id = ?", i.rev, i.updated_by, JSON.stringify(i), next(), top.parent, card.id);
+          }
+        }
+      }
+    });
+    this.readable.clear();
+    this.recheck();
+    this.poke();
+    return { restored: [id, ...top.inside.map((r) => r.id)] };
   }
 
   async listLinks(who) {

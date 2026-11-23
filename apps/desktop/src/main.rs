@@ -352,6 +352,7 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
     let mut app = App::open_library(path, &device_name(), now_ms())?;
     lock::keep(lock);
     app.desktop = true;
+    app.set_utc_offset(local_offset_min());
     settings::remember_library(path);
     Ok(app)
 }
@@ -445,6 +446,53 @@ mod settings {
             eprintln!("wall: could not save settings {}: {e}", f.display());
         }
     }
+}
+
+/// Minutes to add to UTC for local time, for the dates Wall shows.
+#[cfg(windows)]
+fn local_offset_min() -> i32 {
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: [u16; 8],
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: [u16; 8],
+        daylight_bias: i32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTimeZoneInformation(tz: *mut TimeZoneInformation) -> u32;
+    }
+    // SAFETY: a plain struct of numbers that the call fills in.
+    let mut tz: TimeZoneInformation = unsafe { std::mem::zeroed() };
+    let kind = unsafe { GetTimeZoneInformation(&mut tz) };
+    // UTC = local + bias; 1 is standard time, 2 daylight saving time.
+    let bias = tz.bias + match kind {
+        1 => tz.standard_bias,
+        2 => tz.daylight_bias,
+        _ => 0,
+    };
+    -bias
+}
+
+#[cfg(not(windows))]
+fn local_offset_min() -> i32 {
+    // `date +%z` prints "+0800".
+    let out = std::process::Command::new("date").arg("+%z").output().ok();
+    let s = out.and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+    let s = s.trim();
+    let (sign, digits) = match s.strip_prefix('-') {
+        Some(d) => (-1, d),
+        None => (1, s.trim_start_matches('+')),
+    };
+    if digits.len() != 4 {
+        return 0;
+    }
+    let h: i32 = digits[..2].parse().unwrap_or(0);
+    let m: i32 = digits[2..].parse().unwrap_or(0);
+    sign * (h * 60 + m)
 }
 
 fn now_ms() -> u64 {
@@ -841,6 +889,8 @@ impl ApplicationHandler for Shell {
                                 }
                             }
                         }
+                        // The library answers history questions itself.
+                        wall_app::ShellCommand::History(_) => {}
                         wall_app::ShellCommand::SetColor(c) => {
                             if let Some(live) = self.cloud.as_ref().and_then(|c| c.live.as_ref()) {
                                 live.color(Some(c));
@@ -1132,6 +1182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     app.desktop = true;
+    app.set_utc_offset(local_offset_min());
     // Theme and grid from settings; WALL_THEME=light|dark overrides (tests).
     let light = match std::env::var("WALL_THEME").ok().as_deref() {
         Some("light") => true,
@@ -1156,6 +1207,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // WALL_OPEN_SHARE=1 starts with the share card open (screenshots).
     if std::env::var_os("WALL_OPEN_SHARE").is_some() {
         app.open_share();
+    }
+    // WALL_OPEN_HISTORY=1 starts with File > Version history open, =2 also
+    // shows the newest version, =deleted the deleted boards (screenshots).
+    match std::env::var("WALL_OPEN_HISTORY").ok().as_deref() {
+        Some("deleted") => app.run_command(wall_app::menu::Command::DeletedBoards),
+        Some(v) => {
+            app.run_command(wall_app::menu::Command::History);
+            if v == "2" {
+                app.history_show(0);
+            }
+        }
+        None => {}
     }
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {

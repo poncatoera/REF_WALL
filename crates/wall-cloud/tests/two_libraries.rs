@@ -240,6 +240,12 @@ fn libraries_stay_the_same_through_the_cloud() {
     assert!(b.app.delete_board(third));
     until("deleted on a", &mut [&mut a, &mut b], |p| !p[0].boards().contains(&third));
     assert!(std::fs::read_dir(a.root.join("trash")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(&third.to_string())));
+    // Brought back from the trash on b: back on a too, card and all.
+    assert!(b.app.restore_deleted_board(third));
+    b.app.save_if_dirty().unwrap();
+    until("restored on a", &mut [&mut a, &mut b], |p| p[0].boards().contains(&third));
+    assert!(b.app.delete_board(third));
+    until("deleted again on a", &mut [&mut a, &mut b], |p| !p[0].boards().contains(&third));
 
     // A link to one board, to look at: that board and its files only.
     let view = me.make_link(Some(shared), false, "client", "").unwrap();

@@ -46,6 +46,8 @@ pub enum Command {
     ImportOldWall,
     ExportImage,
     Share,
+    History,
+    DeletedBoards,
     NewNote,
     NewBoard,
     NewTodo,
@@ -108,6 +110,9 @@ pub enum ShellCommand {
     SetName(String),
     /// The colour others see for this person (one of 8).
     SetColor(u8),
+    /// Versions and deleted boards, when there's no library folder; answer
+    /// with `App::history_answer`.
+    History(crate::history::HistoryAsk),
 }
 
 impl Command {
@@ -137,6 +142,8 @@ pub const MENUS: &[Menu] = &[
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
             ("Share this board…", "", Some(Command::Share)),
+            ("Version history…", "", Some(Command::History)),
+            ("Deleted boards…", "", Some(Command::DeletedBoards)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),
