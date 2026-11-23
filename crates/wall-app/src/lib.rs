@@ -3,6 +3,7 @@
 //! Shells (apps/desktop, apps/web) only create the window or canvas, forward
 //! input here and call [`App::render`].
 
+pub mod arrange;
 pub mod brush;
 pub mod share;
 pub mod comments;
@@ -1606,6 +1607,8 @@ impl App {
             Key::Char('s' | 'S') => self.toggle_sidebar(sidebar::Tab::Boards),
             Key::Char('d' | 'D') => self.toggle_drawing(),
             Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
+            Key::Char('a') => self.run_command(menu::Command::TidyRows),
+            Key::Char('A') => self.run_command(menu::Command::TidySameHeight),
             Key::Char('r' | 'R') => self.run_command(menu::Command::RotateRight),
             Key::Char('h' | 'H') => self.run_command(menu::Command::Mirror),
             Key::Char('v' | 'V') => self.run_command(menu::Command::FlipVertical),
@@ -3236,6 +3239,10 @@ impl App {
             C::FlipVertical => self.change_look(|l| l.flip_v = !l.flip_v),
             C::BlackAndWhite => self.change_look(|l| l.grayscale = !l.grayscale),
             C::GoUp => self.go_up(),
+            C::TidyRows => _ = self.arrange(arrange::Arrange::Rows),
+            C::TidySameHeight => _ = self.arrange(arrange::Arrange::SameHeight),
+            C::TidyPack => _ = self.arrange(arrange::Arrange::Pack),
+            C::TidyColour => _ = self.arrange(arrange::Arrange::Colour),
         }
     }
 

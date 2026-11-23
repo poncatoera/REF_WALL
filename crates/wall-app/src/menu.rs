@@ -76,6 +76,10 @@ pub enum Command {
     Mirror,
     FlipVertical,
     BlackAndWhite,
+    TidyRows,
+    TidySameHeight,
+    TidyPack,
+    TidyColour,
 }
 
 /// Commands the shell carries out, because they need the system.
@@ -166,6 +170,11 @@ pub const MENUS: &[Menu] = &[
             ("Mirror", "H", Some(Command::Mirror)),
             ("Flip upside down", "V", Some(Command::FlipVertical)),
             ("Black and white", "", Some(Command::BlackAndWhite)),
+            SEP,
+            ("Tidy into rows", "A", Some(Command::TidyRows)),
+            ("Tidy into rows of one height", "Shift A", Some(Command::TidySameHeight)),
+            ("Pack tightly, biggest first", "", Some(Command::TidyPack)),
+            ("Tidy by colour", "", Some(Command::TidyColour)),
             SEP,
             ("Move without snapping", "Ctrl-drag", None),
             ("Draw an arrow", "Alt-drag", None),
