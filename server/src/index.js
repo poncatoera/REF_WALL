@@ -180,18 +180,52 @@ const no = (status, error) => ({ status, error });
 // What a view link may put on a board.
 const MARKS = new Set(["comment", "stamp"]);
 
+// Revs at or past this are dropped by every copy (see wall-sync).
+const MAX_REV = 2 ** 52;
+// How far past a board's highest rev a link's item may go.
+const REV_STEP = 1_000_000;
+const STAMP_MARKS = new Set(["+1", "♥", "★", "✓", "?", "!"]);
+const MAX_STAMP = 5000; // board units; a stamp is 40 px on screen when made
+const MAX_COORD = 1e9;
+
+const onlyKeys = (o, keys) => o && typeof o === "object" && !Array.isArray(o) && Object.keys(o).every((k) => keys.includes(k));
+const shortText = (v, max) => typeof v === "string" && v.length <= max;
+const num = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= MAX_COORD;
+const ITEM_KEYS = ["id", "frame", "type", "rev", "updated_ms", "updated_by", "deleted"];
+const FRAME_KEYS = ["x", "y", "w", "h", "rotation", "z", "text_scale"];
+
+function frameOk(f, stamp) {
+  if (!onlyKeys(f, FRAME_KEYS) || !FRAME_KEYS.filter((k) => k in f).every((k) => num(f[k]))) return false;
+  if (!num(f.x) || !num(f.y)) return false;
+  // A comment is a point; a stamp a small square.
+  return stamp ? f.w > 0 && f.h > 0 && f.w <= MAX_STAMP && f.h <= MAX_STAMP : (f.w ?? 0) === 0 && (f.h ?? 0) === 0;
+}
+
+function messageOk(m, person) {
+  return onlyKeys(m, ["by", "text", "at_ms"]) && shortText(m.by, 40) && shortText(m.text, 2000) && Number.isSafeInteger(m.at_ms) && m.at_ms >= 0 && (!person || m.by === person);
+}
+
 // A view link may start a comment, reply to one, resolve or reopen it, and
 // put down, move or take away stamps. It can't change what anyone wrote,
-// delete a thread, or turn something else into a comment.
-function viewMayWrite(old, i) {
-  if (!MARKS.has(i.type)) return false;
-  if (!old) return !i.deleted;
-  if (old.type !== i.type) return false;
-  if (i.type === "stamp") return true;
-  if (i.deleted && !old.deleted) return false;
+// move a pin, delete or bring back a thread, or turn something else into a
+// comment. A link made for one person writes under that person's name.
+function viewMayWrite(old, i, person) {
+  if (!MARKS.has(i.type) || (old && old.type !== i.type)) return false;
+  if (old?.deleted) return false;
+  if (i.type === "stamp") {
+    if (!onlyKeys(i, [...ITEM_KEYS, "mark", "by"]) || !STAMP_MARKS.has(i.mark) || !frameOk(i.frame, true)) return false;
+    if (!old && i.deleted) return false;
+    // Only its maker's name, and only when it's made.
+    const by = i.by ?? "";
+    return old ? by === (old.by ?? "") : shortText(by, 40) && (!person || by === person);
+  }
+  if (!onlyKeys(i, [...ITEM_KEYS, "messages", "resolved"]) || !Array.isArray(i.messages) || i.messages.length > 500) return false;
+  if (i.deleted || ("resolved" in i && typeof i.resolved !== "boolean")) return false;
+  if (!old) return frameOk(i.frame, false) && i.messages.length > 0 && i.messages.every((m) => messageOk(m, person));
+  if (!onlyKeys(i.frame, FRAME_KEYS) || FRAME_KEYS.some((k) => (old.frame?.[k] ?? null) !== (i.frame?.[k] ?? null))) return false;
   const was = Array.isArray(old.messages) ? old.messages : [];
-  const now = Array.isArray(i.messages) ? i.messages : [];
-  return now.length >= was.length && was.every((m, k) => JSON.stringify(m) === JSON.stringify(now[k]));
+  const now = i.messages;
+  return now.length >= was.length && was.every((m, k) => JSON.stringify(m) === JSON.stringify(now[k])) && now.slice(was.length).every((m) => messageOk(m, person));
 }
 
 function cleanColor(v) {
@@ -411,8 +445,8 @@ export class LibraryDO extends DurableObject {
   access(who) {
     const owner = this.env.OWNER_HASH;
     if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null, link: null };
-    const l = this.rows("SELECT id, role, board FROM links WHERE secret = ? AND revoked = 0", who)[0];
-    return l ? { role: l.role, board: l.board, link: l.id } : null;
+    const l = this.rows("SELECT id, role, board, person FROM links WHERE secret = ? AND revoked = 0", who)[0];
+    return l ? { role: l.role, board: l.board, link: l.id, person: l.person || "" } : null;
   }
 
   // The boards a link reaches: null for all, else a Set of ids.
@@ -582,6 +616,7 @@ export class LibraryDO extends DurableObject {
       this.sql.exec("INSERT INTO boards VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET parent = excluded.parent, deleted = excluded.deleted, json = excluded.json, seq = excluded.seq", b.id, b.parent ?? null, b.deleted ? 1 : 0, text, next());
       if (scope) scope = this.scope(a);
     }
+    const topRev = new Map(); // board -> highest rev on it, for links
     for (const e of items) {
       const i = e && e.item;
       if (!i || !UUID.test(e.board) || !UUID.test(i.id) || !Number.isSafeInteger(i.rev) || i.rev < 0) throw new Refuse(400, "bad item");
@@ -589,11 +624,23 @@ export class LibraryDO extends DurableObject {
         refused.push(i.id);
         continue;
       }
+      // Every copy drops revs from 2^52 up, and nothing could ever replace
+      // such an item. A link's revs may only run a little ahead of the
+      // board's, so it can't make an item nobody else can change.
+      let tooFar = i.rev >= MAX_REV || (typeof i.updated_by === "string" && i.updated_by.length > 200);
+      if (!tooFar && a.role !== "owner") {
+        if (!topRev.has(e.board)) topRev.set(e.board, this.rows("SELECT COALESCE(MAX(rev), 0) AS r FROM items WHERE board = ?", e.board)[0].r);
+        tooFar = i.rev > topRev.get(e.board) + REV_STEP;
+      }
+      if (tooFar) {
+        refused.push(i.id);
+        continue;
+      }
       const by = typeof i.updated_by === "string" ? i.updated_by : "";
       const hash = i.type === "media" && HASH.test(i.hash) ? i.hash : null;
       const old = this.rows("SELECT rev, updated_by, hash, json FROM items WHERE board = ? AND id = ?", e.board, i.id)[0];
       if (old && !(i.rev > old.rev || (i.rev === old.rev && by > old.updated_by))) continue;
-      if (a.role === "view" && !viewMayWrite(old && JSON.parse(old.json), i)) {
+      if (a.role === "view" && !viewMayWrite(old && JSON.parse(old.json), i, a.person)) {
         refused.push(i.id);
         continue;
       }
@@ -605,6 +652,7 @@ export class LibraryDO extends DurableObject {
       }
       const text = JSON.stringify(i);
       if (text.length > MAX_ROW) throw new Refuse(413, "item too big");
+      if (a.role !== "owner") topRev.set(e.board, Math.max(topRev.get(e.board) ?? 0, i.rev));
       this.sql.exec("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (board, id) DO UPDATE SET rev = excluded.rev, updated_by = excluded.updated_by, hash = excluded.hash, deleted = excluded.deleted, json = excluded.json, seq = excluded.seq", e.board, i.id, i.rev, by, hash, i.deleted ? 1 : 0, text, next());
     }
     for (const s of sidecars) {

@@ -182,6 +182,23 @@ test("a view link can comment and stamp, and not change what others wrote", asyn
   assert.deepEqual(await ok(stamp(1)), []);
   assert.deepEqual(await ok(stamp(2, { frame: { x: 9, y: 9, w: 40, h: 40 } })), []);
   assert.deepEqual(await ok(stamp(3, { deleted: true })), []);
+  // Nothing that covers the board, can't be replaced, moves a pin, signs as
+  // someone else on a named link, or brings back a deleted thread.
+  const s2 = randomUUID();
+  assert.deepEqual(await ok({ ...stamp(1), id: s2, frame: { x: 0, y: 0, w: 1e6, h: 1e6 } }), [s2], "a huge stamp");
+  assert.deepEqual(await ok({ ...stamp(1), id: s2, mark: "x".repeat(50000) }), [s2], "an unknown mark");
+  assert.deepEqual(await ok({ ...stamp(1), id: s2, extra: "x" }), [s2], "unknown fields");
+  assert.deepEqual(await ok({ ...stamp(2 ** 53 - 1), id: s2 }), [s2], "a rev nobody could beat");
+  assert.deepEqual(await ok({ ...stamp(3_000_000), id: s2 }), [s2], "a rev far ahead");
+  assert.deepEqual(await ok(comment(9, [msg("Mia", "Love it"), msg("Mia", "More of this")], { frame: { x: 1e9, y: 1e9, w: 0, h: 0 } })), [c], "a moved pin");
+  const named = (await call(owner, "links", { method: "POST", json: { role: "view", board: A, person: "Ana" } })).data.secret;
+  const c2 = randomUUID();
+  const asAna = async (by) => (await sync(named, { since: 0, items: [{ board: A, item: { ...comment(1, [msg(by, "hi")]), id: c2 } }] })).data.refused;
+  assert.deepEqual(await asAna("Paul"), [c2], "Ana's link can't sign as Paul");
+  assert.deepEqual(await asAna("Ana"), []);
+  const gone = randomUUID();
+  await sync(owner, { since: 0, items: [{ board: A, item: { ...comment(1, [msg("Paul", "old")]), id: gone, deleted: true } }] });
+  assert.deepEqual(await ok({ ...comment(2, [msg("Paul", "old")]), id: gone }), [gone], "a deleted thread stays deleted");
   // Not someone's note turned into a stamp, nor a comment on another board.
   assert.deepEqual(await ok({ ...stamp(100), id: n1 }), [n1]);
   assert.deepEqual(await ok({ ...comment(1, [msg("x", "y")]), id: randomUUID() }).then(() => "same board"), "same board");
