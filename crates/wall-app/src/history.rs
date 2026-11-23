@@ -305,7 +305,7 @@ fn layout(i: &Inputs, hover: [f32; 2], viewport: [f32; 2], tw: &mut dyn FnMut(&s
             }
             if let Some(at) = c.selected {
                 y += 8.0;
-                let shown = when(at, i.now_ms, i.offset);
+                let shown = lower_first(&when(at, i.now_ms, i.offset));
                 if c.preview.is_none() {
                     wrap(tw, &mut texts, &mut y, &format!("Fetching {shown}…"), t.dim);
                 } else {
@@ -316,7 +316,7 @@ fn layout(i: &Inputs, hover: [f32; 2], viewport: [f32; 2], tw: &mut dyn FnMut(&s
                     l.hits.push(([x0 + PAD + bw + 10.0, y, bw, 32.0], Hit::Copy));
                     y += 32.0;
                 }
-                l.banner = Some(([0.0; 4], format!("Looking at “{}” as it was {}  ·  Esc goes back to now  ·  ← → older and newer", i.board_name, lower_first(&shown))));
+                l.banner = Some(([0.0; 4], format!("Looking at “{}” as it was {shown}  ·  Esc goes back to now  ·  ← → older and newer", i.board_name)));
             }
         }
         Tab::Deleted => {
