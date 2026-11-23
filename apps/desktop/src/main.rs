@@ -64,6 +64,10 @@ struct Shell {
     title: String,
     /// An old-Wall import running in the background.
     old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
+    /// Keeps the library and its cloud copy the same, when it has one.
+    cloud: Option<Cloud>,
+    /// The library [`Self::cloud`] was last tried for.
+    cloud_for: Option<std::path::PathBuf>,
     /// The pictures of the drop in progress (one undo step).
     batch: Option<ImportBatch>,
     /// Light mode and grid as last saved to settings.
@@ -433,6 +437,73 @@ fn device_name() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "desktop".into())
 }
 
+/// Cloud sync of the open library (see `wall_cloud`).
+struct Cloud {
+    worker: wall_cloud::Worker,
+    stamp: u64,
+    root: std::path::PathBuf,
+}
+
+/// How often the window looks whether the cloud brought something.
+const CLOUD_LOOK: std::time::Duration = std::time::Duration::from_millis(300);
+
+impl Cloud {
+    /// Starts syncing if this library is connected.
+    fn start(app: &App) -> Option<Self> {
+        let root = app.library_root()?.to_owned();
+        let dir = wall_cloud::settings_dir()?;
+        let lib = wall_format::Library::open(&root).ok()?;
+        let account = wall_cloud::Accounts::load(&dir).find(&lib)?;
+        match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
+            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root }),
+            Err(e) => {
+                eprintln!("wall: cloud: {e}");
+                None
+            }
+        }
+    }
+
+    fn pump(&mut self, app: &mut App, window_title: &str, window: &Window) {
+        use wall_cloud::{Event, Status};
+        if app.busy_editing() {
+            return; // merged when the drag or typing is over
+        }
+        while let Some(e) = self.worker.try_event() {
+            match e {
+                Event::Incoming(x) => {
+                    let Some(kept) = app.sync_apply(&x.0, &x.1) else { return };
+                    if let Err(e) = app.save_if_dirty() {
+                        eprintln!("wall: could not save: {e}");
+                    }
+                    self.stamp = app.sync_stamp();
+                    self.worker.applied(kept, app.sync_boards().unwrap_or_default());
+                }
+                Event::Media(s) => app.sync_media_arrived(*s),
+                Event::Status(s) => {
+                    let note = match &s {
+                        Status::UpToDate => "",
+                        Status::Working => "  —  syncing…",
+                        Status::Offline(_) => "  —  cloud: offline, trying again",
+                        Status::Full => "  —  cloud: full, new files stay on this computer",
+                        Status::Stopped(_) => "  —  cloud: stopped, the key or link doesn't work",
+                    };
+                    if let Status::Offline(e) | Status::Stopped(e) = &s {
+                        eprintln!("wall: cloud: {e}");
+                    }
+                    window.set_title(&format!("{window_title}{note}"));
+                }
+            }
+        }
+        let stamp = app.sync_stamp();
+        if stamp != self.stamp {
+            if let Some(b) = app.sync_boards() {
+                self.stamp = stamp;
+                self.worker.boards(b);
+            }
+        }
+    }
+}
+
 /// Saves the open board and opens another library in its place.
 fn switch_library(app: &mut App, videos: &mut video::Videos, posters: &mut LibraryPosters, window: &Window, path: &std::path::Path) {
     match open_library(path) {
@@ -705,6 +776,25 @@ impl ApplicationHandler for Shell {
             eprintln!("wall: could not save: {e}");
         }
     }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gfx) = &self.gfx else { return };
+        // Another library was opened: its own sync, or none.
+        if self.cloud.as_ref().is_some_and(|c| Some(c.root.as_path()) != self.app.library_root()) || (self.cloud.is_none() && self.cloud_for.as_deref() != self.app.library_root()) {
+            self.cloud = Cloud::start(&self.app);
+            self.cloud_for = self.app.library_root().map(|p| p.to_owned());
+        }
+        let Some(cloud) = &mut self.cloud else {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            return;
+        };
+        self.app.set_time(now_ms());
+        cloud.pump(&mut self.app, &self.title, &gfx.window);
+        if self.app.needs_redraw {
+            gfx.window.request_redraw();
+        }
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(Instant::now() + CLOUD_LOOK));
+    }
 }
 
 /// Use ANGLE (EGL + OpenGL ES 3.0 on Direct3D / Metal) when its libraries
@@ -870,6 +960,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         title,
         old_import: None,
         batch: None,
+        cloud: None,
+        cloud_for: None,
         saved_look: (light, grid),
         saved_ui: settings::get_str("ui").unwrap_or_default(),
     };

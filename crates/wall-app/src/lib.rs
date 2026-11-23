@@ -27,6 +27,7 @@ use wall_text::Font;
 
 pub use doc::Document;
 mod snapshot;
+pub mod sync;
 mod batch;
 pub use batch::grid_layout;
 pub use snapshot::NewMedia;

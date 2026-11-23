@@ -1,0 +1,12 @@
+[package]
+name = "wall-sync"
+description = "Keeps a Wall library and the cloud copy the same. No network or files here: shells do those."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wall-format.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

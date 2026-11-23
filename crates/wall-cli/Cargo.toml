@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wall-format.workspace = true
 wall-media.workspace = true
+wall-cloud.workspace = true
 image.workspace = true
 uuid.workspace = true
 serde_json.workspace = true

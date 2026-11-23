@@ -1,0 +1,20 @@
+[package]
+name = "wall-cloud"
+description = "Talks to Wall's sync server from the desktop: changes, files and share links."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wall-format.workspace = true
+wall-sync.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+ureq = "3"
+sha2 = "0.10"
+
+[dev-dependencies]
+wall-app.workspace = true
+image = { workspace = true, features = ["png"] }
+tempfile.workspace = true

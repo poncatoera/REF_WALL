@@ -22,3 +22,5 @@ wall-media = { path = "crates/wall-media" }
 wall-render = { path = "crates/wall-render" }
 wall-app = { path = "crates/wall-app" }
 wall-text = { path = "crates/wall-text" }
+wall-sync = { path = "crates/wall-sync" }
+wall-cloud = { path = "crates/wall-cloud" }

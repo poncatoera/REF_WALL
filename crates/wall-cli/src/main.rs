@@ -29,7 +29,12 @@ const USAGE: &str = "usage:
   wall-cli export <library> <board> <folder>
   wall-cli import <library> <file>... [--board <board>]
   wall-cli check  <library>
-  wall-cli import-old <old Wall library folder> <library>";
+  wall-cli import-old <old Wall library folder> <library>
+  wall-cli cloud-key     <library>            (prints OWNER_HASH for the server)
+  wall-cli cloud-connect <library> <server>
+  wall-cli share   <library> <board|all> <view|edit> [label]
+  wall-cli links   <library>
+  wall-cli unshare <library> <link id>";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -64,8 +69,82 @@ fn run(args: &[String]) -> Res<String> {
             import(&lib, files, board, now_ms())
         }
         "check" => check(&lib),
+        "cloud-key" if rest.is_empty() => cloud_key(&lib),
+        "cloud-connect" if rest.len() == 1 => cloud_connect(&lib, &rest[0]),
+        "share" if rest.len() >= 2 => share(&lib, &rest[0], &rest[1], rest.get(2).map_or("", String::as_str)),
+        "links" if rest.is_empty() => links(&lib),
+        "unshare" if rest.len() == 1 => unshare(&lib, &rest[0]),
         _ => Err(USAGE.into()),
     }
+}
+
+// ---- cloud ----------------------------------------------------------------
+
+fn cloud_dir() -> Res<std::path::PathBuf> {
+    wall_cloud::settings_dir().ok_or_else(|| "no settings folder".into())
+}
+
+/// Makes the owner key of a library, once, and prints what the server is
+/// given instead of it (OWNER_HASH). The key stays on this computer.
+fn cloud_key(lib: &Library) -> Res<String> {
+    let dir = cloud_dir()?;
+    let mut all = wall_cloud::Accounts::load(&dir);
+    let a = all.libraries.entry(lib.manifest().id).or_insert_with(|| wall_cloud::Account { server: String::new(), key: wall_cloud::new_key(), root: Some(full(lib.root())) });
+    let hash = wall_cloud::key_hash(&a.key);
+    all.save(&dir).map_err(|e| e.to_string())?;
+    Ok(format!("{hash}\n"))
+}
+
+fn full(p: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned())
+}
+
+/// Connects a library to its server, after checking the key works there.
+fn cloud_connect(lib: &Library, server: &str) -> Res<String> {
+    let dir = cloud_dir()?;
+    let mut all = wall_cloud::Accounts::load(&dir);
+    let a = all.libraries.get_mut(&lib.manifest().id).ok_or("run cloud-key first")?;
+    if a.root.as_deref().is_some_and(|r| !wall_cloud::same_folder(r, lib.root())) {
+        return Err(format!("this is a copy; the library that syncs is {}", a.root.as_ref().unwrap().display()));
+    }
+    let tried = wall_cloud::Account { server: server.trim_end_matches('/').to_owned(), ..a.clone() };
+    let me = wall_cloud::Client::new(tried.clone()).and_then(|c| c.me()).map_err(|e| e.to_string())?;
+    *a = tried;
+    all.save(&dir).map_err(|e| e.to_string())?;
+    Ok(format!("connected as {}; Wall syncs when it opens this library\n", me.role))
+}
+
+fn cloud_client(lib: &Library) -> Res<wall_cloud::Client> {
+    let a = wall_cloud::Accounts::load(&cloud_dir()?).find(lib).ok_or("this library isn't connected")?;
+    wall_cloud::Client::new(a).map_err(|e| e.to_string())
+}
+
+fn share(lib: &Library, board: &str, how: &str, label: &str) -> Res<String> {
+    let edit = match how {
+        "view" => false,
+        "edit" => true,
+        _ => return Err("view or edit?".into()),
+    };
+    let board = if board == "all" { None } else { Some(pick_board(&all_boards(lib)?, board)?.id) };
+    let c = cloud_client(lib)?;
+    let l = c.make_link(board, edit, label).map_err(|e| e.to_string())?;
+    let secret = l.secret.ok_or("the server gave no link")?;
+    Ok(format!("{}\nAnyone with this address can {} it until: wall-cli unshare <library> {}\n", c.link_address(&secret), if edit { "change" } else { "look at" }, l.id))
+}
+
+fn links(lib: &Library) -> Res<String> {
+    let all = cloud_client(lib)?.links().map_err(|e| e.to_string())?;
+    if all.is_empty() {
+        return Ok("no links\n".into());
+    }
+    let name = |b: uuid::Uuid| lib.read_board(b).map_or_else(|_| b.to_string(), |b| b.name);
+    Ok(all.iter().map(|l| format!("{}  {:4}  {}  {}\n", l.id, l.role, l.board.map_or("whole library".into(), name), l.label)).collect())
+}
+
+fn unshare(lib: &Library, id: &str) -> Res<String> {
+    let id = id.parse().map_err(|_| "a link's id, from: wall-cli links")?;
+    cloud_client(lib)?.revoke_link(id).map_err(|e| e.to_string())?;
+    Ok("that link is off\n".into())
 }
 
 fn now_ms() -> u64 {
