@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 uuid.workspace = true
 wall-app.workspace = true
 wall-format.workspace = true
+wall-media.workspace = true
 wall-sync.workspace = true
 serde.workspace = true
 serde_json.workspace = true

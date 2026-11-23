@@ -12,6 +12,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingContext, WheelEvent};
 
 mod cloud;
+mod shrink;
 
 struct State {
     /// Playing `<video>` elements and the textures their frames go to.
@@ -788,14 +789,25 @@ fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
 
 /// Plays a dropped video in a hidden `<video>` element (the browser
 /// decodes), stores its bytes, and copies each frame into a texture.
+/// Big videos are made smaller first (see `shrink`).
 async fn import_video(s: Rc<RefCell<State>>, file: &web_sys::File) -> Result<(), JsValue> {
-    import_video_blob(s, file, &file.name(), &file.type_()).await.map(|_| ())
+    let name = file.name();
+    match shrink::prepare(file, &name).await.map_err(|e| JsValue::from_str(&e))? {
+        shrink::Verdict::Keep => import_video_blob(s, file, &name, &file.type_()).await.map(|_| ()),
+        shrink::Verdict::Shrunk(bytes) => {
+            let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&bytes[..]));
+            let bag = web_sys::BlobPropertyBag::new();
+            bag.set_type("video/mp4");
+            let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
+            import_video_blob(s, &blob, &name, "video/mp4").await.map(|_| ())
+        }
+    }
 }
 
 async fn import_video_blob(s: Rc<RefCell<State>>, file: &web_sys::Blob, name: &str, mime: &str) -> Result<uuid::Uuid, JsValue> {
     const MAX_BYTES: f64 = 20_000_000.0;
     if file.size() > MAX_BYTES {
-        // Converting in the browser (WebCodecs) comes with the cloud library.
+        // Dropped videos are made smaller before they get here.
         return Err(format!("{:.1} MB is over the 20 MB limit here; the desktop app makes it smaller", file.size() / 1e6).into());
     }
     let video = video_element(file).await?;

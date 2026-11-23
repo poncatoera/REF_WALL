@@ -10,6 +10,7 @@ pub mod autotag;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffmpeg;
 pub mod image_rules;
+pub mod mp4;
 pub mod video_rules;
 
 pub use image_rules::{prepare_image, PreparedImage};
