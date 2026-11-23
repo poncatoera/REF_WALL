@@ -40,12 +40,14 @@ void fs_main_1() {
     vec2 _e26 = ((abs(_e21) - _e22) + vec2(_e20));
     float _e34 = ((length(max(_e26, vec2(0.0, 0.0))) + min(max(_e26.x, _e26.y), 0.0)) - _e20);
     float _e36 = _group_0_binding_0.pixel;
-    float _e37 = (_e36 * -0.5);
-    float _e38 = (_e36 * 0.5);
     vec2 _e41 = i_u002e_shape_1;
+    float _soft = max(-(_e41.y), 0.0);
+    float _k = step(0.0001, _soft);
+    float _e37 = mix((_e36 * -0.5), (-2.0 * _soft), _k);
+    float _e38 = mix((_e36 * 0.5), 0.0, _k);
     vec4 _e45 = i_u002e_fill_1;
     vec4 _e46 = i_u002e_stroke_1;
-    entryPointParam_fs_main = (mix(_e45, _e46, vec4(smoothstep(_e37, _e38, (_e34 + _e41.y)))) * (1.0 - smoothstep(_e37, _e38, _e34)));
+    entryPointParam_fs_main = (mix(_e45, _e46, vec4(smoothstep(_e37, _e38, (_e34 + max(_e41.y, 0.0))))) * (1.0 - smoothstep(_e37, _e38, _e34)));
     return;
 }
 

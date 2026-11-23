@@ -141,7 +141,8 @@ pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: b
     };
     let tile_h = image_h + 24.0;
     if !compact {
-        l.rect(area, BG(), LINE(), 10.0);
+        l.boxes.push(crate::theme::shadow(area, crate::theme::radius::PANEL));
+        l.rect(area, BG(), LINE(), crate::theme::radius::PANEL);
     }
 
     // Header: tabs, hint, close.
@@ -150,16 +151,17 @@ pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: b
     let mut tab = |l: &mut Layout, label: String, t: Tab, x: &mut f32| {
         let on = view.tab == t;
         let tw = panel::text_width(font, &label, 12.5);
-        l.text(label, [*x, ty], 12.5, if on { INK() } else { DIM() });
+        let r = [*x - 10.0, y0 + 9.0, tw + 20.0, 26.0];
         if on {
-            l.rect([*x, ty + 6.0, tw, 2.0], ACCENT(), [0.0; 4], 1.0);
+            l.rect(r, crate::theme::t().accent_soft, [0.0; 4], crate::theme::radius::INNER);
         }
-        l.hits.push(([*x - 6.0, y0 + 6.0, tw + 12.0, 30.0], Action::Tab(t)));
-        *x += tw + 24.0;
+        l.text(label, [*x, ty], 12.5, if on { crate::theme::t().accent_text } else { DIM() });
+        l.hits.push((r, Action::Tab(t)));
+        *x += tw + 26.0;
     };
-    tab(&mut l, format!("LIBRARY  {}", view.items.len()), Tab::All, &mut x);
+    tab(&mut l, format!("Library  {}", view.items.len()), Tab::All, &mut x);
     if view.has_trash {
-        tab(&mut l, format!("TRASH  {}", view.trashed.len()), Tab::Trash, &mut x);
+        tab(&mut l, format!("Trash  {}", view.trashed.len()), Tab::Trash, &mut x);
     }
     if !compact {
         let hint = match view.tab {
@@ -421,10 +423,6 @@ fn INK() -> [f32; 4] {
 #[allow(non_snake_case)]
 fn DIM() -> [f32; 4] {
     crate::theme::t().dim
-}
-#[allow(non_snake_case)]
-fn ACCENT() -> [f32; 4] {
-    crate::theme::t().accent
 }
 
 impl App {
