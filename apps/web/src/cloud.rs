@@ -250,6 +250,17 @@ async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, u
         if view {
             uploads.clear();
         }
+        // Files before the pictures that show them: a board link may only
+        // put a file on its board once it has sent it (or the same bytes).
+        while let Some((hash, bytes)) = uploads.first() {
+            let body = js_sys::Uint8Array::from(&bytes[..]);
+            match call(key, "PUT", &format!("media/{hash}"), &body).await {
+                Ok(_) => moved = true,
+                Err(Fail::Other(e)) => web_sys::console::warn_1(&format!("wall: {hash}: {e}").into()),
+                Err(e) => return Err(e),
+            }
+            uploads.remove(0);
+        }
         let mut push = if view { sync.collect([], &[], &[]) } else { sync.collect(&boards, &sidecars, &[]) };
         let more_to_send = push.more;
         moved |= !push.is_empty();
@@ -312,15 +323,6 @@ async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, u
         if !more_to_send {
             break;
         }
-    }
-    while let Some((hash, bytes)) = uploads.first() {
-        let body = js_sys::Uint8Array::from(&bytes[..]);
-        match call(key, "PUT", &format!("media/{hash}"), &body).await {
-            Ok(_) => moved = true,
-            Err(Fail::Other(e)) => web_sys::console::warn_1(&format!("wall: {hash}: {e}").into()),
-            Err(e) => return Err(e),
-        }
-        uploads.remove(0);
     }
     Ok(moved)
 }

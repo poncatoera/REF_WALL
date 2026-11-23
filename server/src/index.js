@@ -145,6 +145,15 @@ async function mediaRequest(request, env, who, hash, url) {
     const r = await lib.reserve(who, hash, size, replace);
     if (r.error) throw new Refuse(r.status, r.error);
     if (r.have) return json({ have: true });
+    if (r.prove) {
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      const stored = await shard(env, hash).read(hash);
+      let same = bytes.byteLength === r.size && stored.byteLength === r.size;
+      for (let i = 0; same && i < stored.byteLength; i++) same = bytes[i] === stored[i];
+      if (!same) throw new Refuse(409, "not the same file");
+      await lib.grant(who, hash);
+      return json({ have: true });
+    }
     const bytes = await request.arrayBuffer();
     if (bytes.byteLength !== size) {
       await lib.release(hash, r.ticket);
@@ -156,7 +165,7 @@ async function mediaRequest(request, env, who, hash, url) {
       await lib.release(hash, r.ticket);
       throw e;
     }
-    await lib.commit(hash, r.ticket);
+    await lib.commit(who, hash, r.ticket);
     return json({ stored: true });
   }
   throw new Refuse(405, "not allowed");
@@ -184,6 +193,9 @@ export class LibraryDO extends DurableObject {
         CREATE TABLE IF NOT EXISTS sidecars (hash TEXT PRIMARY KEY, json TEXT NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS media (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, done INTEGER NOT NULL, ticket TEXT NOT NULL, at INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, secret TEXT NOT NULL UNIQUE, role TEXT NOT NULL, board TEXT, label TEXT NOT NULL, created INTEGER NOT NULL, revoked INTEGER NOT NULL) WITHOUT ROWID;
+        -- Files a board link has shown it has (uploaded, or sent the same
+        -- bytes as a file already here), so it may put them on its boards.
+        CREATE TABLE IF NOT EXISTS grants (link TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (link, hash)) WITHOUT ROWID;
       `);
     });
     // Hashes a board-only link may read, kept while nothing changes.
@@ -327,12 +339,12 @@ export class LibraryDO extends DurableObject {
     return this.rows("SELECT seq FROM counter")[0].seq;
   }
 
-  // { role: "owner" | "edit" | "view", board: root board or null for all }
+  // { role: "owner" | "edit" | "view", board: root board or null for all, link: id }
   access(who) {
     const owner = this.env.OWNER_HASH;
-    if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null };
-    const l = this.rows("SELECT role, board FROM links WHERE secret = ? AND revoked = 0", who)[0];
-    return l ? { role: l.role, board: l.board } : null;
+    if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null, link: null };
+    const l = this.rows("SELECT id, role, board FROM links WHERE secret = ? AND revoked = 0", who)[0];
+    return l ? { role: l.role, board: l.board, link: l.id } : null;
   }
 
   // The boards a link reaches: null for all, else a Set of ids.
@@ -537,7 +549,7 @@ export class LibraryDO extends DurableObject {
   // May this link put `hash` on a board? Yes if it can read it already, or
   // the server doesn't have it yet (then the link has to upload it).
   mayUse(a, scope, hash) {
-    if (this.hashes(a, scope).has(hash)) return true;
+    if (this.hashes(a, scope).has(hash) || this.granted(a, hash)) return true;
     return !this.rows("SELECT 1 FROM media WHERE hash = ? AND done = 1", hash)[0];
   }
 
@@ -583,7 +595,13 @@ export class LibraryDO extends DurableObject {
     if (a.role === "view") return no(403, "this link can only look");
     if (replace && a.role !== "owner") return no(403, "only the owner can replace a file");
     const old = this.rows("SELECT size, done, at FROM media WHERE hash = ?", hash)[0];
-    if (old && old.done && !replace) return { have: true };
+    if (old && old.done && !replace) {
+      // A board link that can't see this file must send the same bytes
+      // before it may use it: naming a hash gives nothing away.
+      const reads = this.hashes(a, this.scope(a));
+      if (reads && !reads.has(hash) && !this.granted(a, hash)) return size === old.size ? { prove: true, size: old.size } : no(409, "not the same file");
+      return { have: true };
+    }
     if (old && !old.done && old.at > Date.now() - 60_000) return no(409, "being uploaded already");
     const used = this.used() - (old && (old.done || old.at > Date.now() - PENDING_MS) ? old.size : 0);
     if (used + size > this.max()) return no(507, "the cloud space Wall may use is full");
@@ -592,8 +610,21 @@ export class LibraryDO extends DurableObject {
     return { ticket };
   }
 
-  async commit(hash, ticket) {
+  async commit(who, hash, ticket) {
     this.sql.exec("UPDATE media SET done = 1 WHERE hash = ? AND ticket = ?", hash, ticket);
+    return this.grant(who, hash);
+  }
+
+  // The link `who` has this file: it may put it on its boards (reading it
+  // still needs a picture on one of them).
+  async grant(who, hash) {
+    const a = this.access(who);
+    if (!a || !a.link) return;
+    this.sql.exec("INSERT OR IGNORE INTO grants VALUES (?, ?)", a.link, hash);
+  }
+
+  granted(a, hash) {
+    return !!a.link && !!this.rows("SELECT 1 FROM grants WHERE link = ? AND hash = ?", a.link, hash)[0];
   }
 
   async release(hash, ticket) {
@@ -622,6 +653,7 @@ export class LibraryDO extends DurableObject {
     if (this.access(who)?.role !== "owner") return no(403, "owner only");
     const secret = this.rows("SELECT secret FROM links WHERE id = ?", id)[0]?.secret;
     this.sql.exec("UPDATE links SET revoked = 1 WHERE id = ?", id);
+    this.sql.exec("DELETE FROM grants WHERE link = ?", id);
     // Whoever is connected with it is gone too.
     for (const [ws, a] of this.live()) {
       if (secret && a.who === secret) {

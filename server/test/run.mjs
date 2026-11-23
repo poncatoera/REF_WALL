@@ -196,6 +196,40 @@ test("an edit link can't read a private file by naming its hash", async () => {
   assert.equal((await call(k, `media/${hPriv}?replace=1`, { method: "PUT", body: priv })).status, 403);
 });
 
+test("an edit link that has the same file may use it; wrong bytes give nothing", async () => {
+  const k = edit.secret;
+  // Same length, other bytes: refused, still unreadable, still unusable.
+  const fake = Buffer.from(priv);
+  fake[123] ^= 1;
+  assert.equal((await call(k, `media/${hPriv}`, { method: "PUT", body: fake })).status, 409);
+  assert.equal((await call(k, `media/${hPriv}`, { method: "PUT", body: priv.subarray(1) })).status, 409);
+  assert.equal((await call(k, `media/${hPriv}`)).status, 404);
+  const pic = randomUUID();
+  assert.equal((await sync(k, { since: 0, items: [{ board: A, item: picture(pic, hPriv) }] })).data.refused.length, 1);
+  // The same bytes: the link may now put the file on its board.
+  assert.equal((await call(k, `media/${hPriv}`, { method: "PUT", body: priv })).data.have, true);
+  const r = await sync(k, { since: 0, items: [{ board: A, item: picture(pic, hPriv) }], sidecars: [details(hPriv)] });
+  assert.equal(r.data.refused.length, 0);
+  assert.equal((await call(k, `media/${hPriv}`)).status, 200);
+  // Only for that link: the view link of the same board sees it because
+  // it's on the board now, the whole-library one always could, a new
+  // board link elsewhere can't.
+  assert.equal((await call(view.secret, `media/${hPriv}`)).status, 200);
+  const other = (await call(owner, "links", { method: "POST", json: { role: "edit", board: C } })).data;
+  if (other.secret) assert.equal((await call(other.secret, `media/${hPriv}`)).status, 404);
+  // Tidy up for the tests after: the picture goes again.
+  await sync(owner, { since: 0, items: [{ board: A, item: { ...picture(pic, hPriv, 2), deleted: true } }] });
+});
+
+test("a new file uploaded through a board link may go on its board after", async () => {
+  const k = edit.secret;
+  const bytes = randomBytes(5000);
+  const h = hashOf(bytes);
+  assert.equal((await call(k, `media/${h}`, { method: "PUT", body: bytes })).data.stored, true);
+  const r = await sync(k, { since: 0, items: [{ board: A, item: picture(randomUUID(), h) }], sidecars: [details(h)] });
+  assert.equal(r.data.refused.length, 0, "upload first, then the picture");
+});
+
 test("a board can't be put inside itself", async () => {
   for (const b of [board(A, B, "loop"), board(A, C, "loop"), board(B, B, "self")]) {
     const r = await sync(owner, { since: 0, boards: [b] });
