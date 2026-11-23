@@ -12,16 +12,11 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingContext, WheelEvent};
 
 mod cloud;
+mod players;
 mod shrink;
 
 struct State {
-    /// Playing `<video>` elements and the textures their frames go to.
-    videos: Vec<(web_sys::HtmlVideoElement, wall_app::ContentHash, wall_render::ImageId)>,
-    /// Videos the person paused (others pause only while off screen).
-    user_paused: std::collections::HashSet<wall_app::ContentHash>,
-    /// Back-and-forth videos on their way back: paused, stepped backwards
-    /// by hand each frame (browsers don't play backwards).
-    reversing: std::collections::HashSet<wall_app::ContentHash>,
+    players: players::Players,
     app: App,
     renderer: Renderer,
     canvas: HtmlCanvasElement,
@@ -437,7 +432,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_ui_setting(&saved_ui);
     web_sys::console::log_1(&format!("wall: WebGL2 ready, {} items", app.item_count()).into());
 
-    let state = Rc::new(RefCell::new(State { videos: Vec::new(), user_paused: Default::default(), reversing: Default::default(), app, renderer, canvas: canvas.clone(),
+    let state = Rc::new(RefCell::new(State { players: Default::default(), app, renderer, canvas: canvas.clone(),
         saved_look: (light, grid),
         saved_ui,
         // `?demo` shows the demo as it ships, without saving.
@@ -659,79 +654,9 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         {
             let mut s = state.borrow_mut();
             let size = s.sync_size();
-            if !s.videos.is_empty() {
-                let State { videos, renderer, app, user_paused, reversing, .. } = &mut *s;
-                use glow::HasContext;
-                for (hash, cmd) in app.take_video_commands() {
-                    let Some((v, _, _)) = videos.iter().find(|(_, h, _)| *h == hash) else { continue };
-                    match cmd {
-                        wall_app::VideoCommand::Play => {
-                            user_paused.remove(&hash);
-                            drop(v.play());
-                        }
-                        wall_app::VideoCommand::Pause => {
-                            user_paused.insert(hash.clone());
-                            v.pause().unwrap_or(());
-                        }
-                        wall_app::VideoCommand::Seek(t) => v.set_current_time(t),
-                        wall_app::VideoCommand::Step(n) => {
-                            user_paused.insert(hash.clone());
-                            v.pause().unwrap_or(());
-                            // The browser doesn't expose the frame rate; assume 30.
-                            v.set_current_time((v.current_time() + n as f64 / 30.0).max(0.0));
-                        }
-                        wall_app::VideoCommand::Speed(r) => v.set_playback_rate(r as f64),
-                        wall_app::VideoCommand::Range(Some((a, _))) => v.set_current_time(a),
-                        wall_app::VideoCommand::Range(None) => {}
-                        wall_app::VideoCommand::PingPong(_) => {
-                            reversing.remove(&hash);
-                        }
-                        // Not in the browser yet (it needs the frames around this one).
-                        wall_app::VideoCommand::Onion(_) => {}
-                    }
-                }
-                // Only videos on screen (and big enough) play; the rest keep their last frame.
-                let playable = app.playable_videos();
-                for (v, hash, _) in videos.iter() {
-                    let (a, b) = app.video_range(hash).unwrap_or((0.0, v.duration()));
-                    let t = v.current_time();
-                    if reversing.contains(hash) {
-                        if !user_paused.contains(hash) && playable.contains(hash) {
-                            let back = t - v.playback_rate() / 60.0;
-                            if back <= a {
-                                reversing.remove(hash);
-                                v.set_current_time(a);
-                            } else {
-                                v.set_current_time(back);
-                            }
-                        }
-                    } else if app.video_pingpong(hash) && b.is_finite() && t >= b - 1.0 / 30.0 {
-                        reversing.insert(hash.clone());
-                        v.pause().unwrap_or(());
-                    } else if app.video_range(hash).is_some() && (t >= b || t < a - 0.25) {
-                        // Loop between in and out points.
-                        v.set_current_time(a);
-                    }
-                    let want = playable.contains(hash) && !user_paused.contains(hash) && !reversing.contains(hash);
-                    if want && v.paused() {
-                        drop(v.play());
-                    } else if !want && !v.paused() {
-                        v.pause().unwrap_or(());
-                    }
-                    let status = wall_app::VideoStatus { time: v.current_time(), duration: v.duration(), playing: !user_paused.contains(hash), speed: v.playback_rate() as f32 };
-                    app.set_video_status(hash.clone(), status);
-                }
-                for (v, _, tex) in videos.iter() {
-                    if v.ready_state() >= 2 {
-                        unsafe {
-                            let gl = renderer.gl();
-                            gl.bind_texture(glow::TEXTURE_2D, Some(renderer.texture(*tex)));
-                            gl.tex_image_2d_with_html_video(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, glow::RGBA, glow::UNSIGNED_BYTE, v);
-                            gl.bind_texture(glow::TEXTURE_2D, None);
-                        }
-                    }
-                }
-                app.needs_redraw = true;
+            {
+                let State { players, renderer, app, .. } = &mut *s;
+                players.tick(app, renderer);
             }
             cloud::tick(&mut s.app);
             if s.app.needs_redraw {
@@ -840,7 +765,7 @@ async fn import_video_blob(s: Rc<RefCell<State>>, file: &web_sys::Blob, name: &s
     let tex = st.renderer.create_video_texture(meta.width, meta.height).map_err(|e| e.to_string())?;
     st.app.attach_texture(hash.clone(), tex);
     let _ = video.play();
-    st.videos.push((video, hash, tex));
+    st.players.add(video, hash, tex);
     Ok(id)
 }
 
@@ -869,7 +794,7 @@ async fn attach_player(s: Rc<RefCell<State>>, blob: &web_sys::Blob, hash: wall_a
     let tex = st.renderer.create_video_texture(w, h).map_err(|e| e.to_string())?;
     st.app.attach_texture(hash.clone(), tex);
     let _ = video.play();
-    st.videos.push((video, hash, tex));
+    st.players.add(video, hash, tex);
     Ok(())
 }
 
