@@ -55,6 +55,17 @@ struct Run {
     glyphs: Vec<GlyphInstance>,
     /// Spatial hash of the run's item rects, for the overlap test.
     cells: HashMap<(i32, i32), Vec<[f32; 4]>>,
+    /// The same for items other than solid lines and pictures: what a line
+    /// can't share a run with. (A line's curves draw after every box,
+    /// picture and solid curve of its run, which is right for those, but
+    /// before see-through lines and text.)
+    hard: HashMap<(i32, i32), Vec<[f32; 4]>>,
+    /// Everything the run draws, for skipping it when off screen.
+    bounds: Option<[f32; 4]>,
+    /// Per line: its bounds and its curves (in `curves` or `see_through`),
+    /// for skipping lines off screen.
+    curve_spans: Vec<([f32; 4], std::ops::Range<usize>)>,
+    see_spans: Vec<([f32; 4], std::ops::Range<usize>)>,
 }
 
 const CELL: f32 = 512.0;
@@ -66,18 +77,29 @@ impl Run {
         (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
     }
 
-    fn overlaps(&self, r: [f32; 4]) -> bool {
+    fn overlaps(&self, r: [f32; 4], line: bool) -> bool {
+        let cells = if line { &self.hard } else { &self.cells };
         Self::cell_range(r).any(|c| {
-            self.cells.get(&c).is_some_and(|rs| {
+            cells.get(&c).is_some_and(|rs| {
                 rs.iter().any(|o| r[0] < o[0] + o[2] && o[0] < r[0] + r[2] && r[1] < o[1] + o[3] && o[1] < r[1] + r[3])
             })
         })
     }
 
-    fn claim(&mut self, r: [f32; 4]) {
+    fn claim(&mut self, r: [f32; 4], hard: bool) {
         for c in Self::cell_range(r) {
             self.cells.entry(c).or_default().push(r);
+            if hard {
+                self.hard.entry(c).or_default().push(r);
+            }
         }
+        self.bounds = Some(match self.bounds {
+            None => r,
+            Some(b) => {
+                let (x0, y0) = (b[0].min(r[0]), b[1].min(r[1]));
+                [x0, y0, (b[0] + b[2]).max(r[0] + r[2]) - x0, (b[1] + b[3]).max(r[1] + r[3]) - y0]
+            }
+        });
     }
 }
 
@@ -141,9 +163,18 @@ impl Scene {
                 _ => None,
             };
             let is_group = matches!(item.kind, ItemKind::Group { .. });
+            let solid_line = match &item.kind {
+                ItemKind::Stroke { brush, .. } => crate::brush::Brush::from_name(brush.as_deref()).profile().alpha >= 1.0,
+                ItemKind::Arrow { .. } => true,
+                _ => false,
+            };
+            let soft = solid_line || matches!(item.kind, ItemKind::Media { .. });
             if !is_group {
                 // Start a new run if this item overlaps one already in the current run.
-                if self.runs.last().is_none_or(|r| r.overlaps(rect)) {
+                // Lines (solid or see-through) only clash with what draws after
+                // their curves: see-through lines and text.
+                let line = matches!(item.kind, ItemKind::Stroke { .. } | ItemKind::Arrow { .. });
+                if self.runs.last().is_none_or(|r| r.overlaps(rect, line)) {
                     let mut run = Run::default();
                     if self.runs.is_empty() {
                         // Most boards are one run: size it like last time so
@@ -153,7 +184,7 @@ impl Scene {
                     }
                     self.runs.push(run);
                 }
-                self.runs.last_mut().unwrap().claim(rect);
+                self.runs.last_mut().unwrap().claim(rect, !soft);
             }
             // Cards with a text scale are laid out at their unscaled size,
             // then everything drawn for them is scaled up around the corner.
@@ -318,6 +349,15 @@ impl Scene {
                     c.p2w = [e[0], e[1], c.p2w[2] * scale, c.p2w[3] * scale];
                 }
             }
+            let cull = if scaled { [rect[0], rect[1], rect[2] * scale, rect[3] * scale] } else { rect };
+            if run.curves.len() > marks.2 {
+                let n = run.curves.len();
+                run.curve_spans.push((cull, marks.2..n));
+            }
+            if run.see_through.len() > marks.3 {
+                let n = run.see_through.len();
+                run.see_spans.push((cull, marks.3..n));
+            }
         }
         self.text_cache.retain(|_, e| e.gen == gen);
         self.last_counts = self.runs.first().map_or((0, 0), |r| (r.boxes.len(), r.glyphs.len()));
@@ -333,7 +373,31 @@ impl Scene {
         let ys = [(-1.0 - view.offset[1]) / view.scale[1], (1.0 - view.offset[1]) / view.scale[1]];
         let (x0, x1, y0, y1) = (xs[0].min(xs[1]), xs[0].max(xs[1]), ys[0].min(ys[1]), ys[0].max(ys[1]));
         let zoom = 1.0 / view.pixel.max(1e-9);
+        // With a margin for anything drawn just outside its frame (labels, soft edges).
+        let m = 64.0 * view.pixel;
+        let on_screen = |r: &[f32; 4]| r[0] - m < x1 && r[0] + r[2] + m > x0 && r[1] - m < y1 && r[1] + r[3] + m > y0;
+        // Lines off screen are left out (boards with many drawings).
+        let visible = |all: &[CurveInstance], spans: &[([f32; 4], std::ops::Range<usize>)]| -> Option<Vec<CurveInstance>> {
+            if spans.iter().all(|(r, _)| on_screen(r)) {
+                return None; // all of them: draw the slice as it is
+            }
+            let mut out = Vec::new();
+            let mut covered = 0;
+            for (r, span) in spans {
+                // Curves that aren't part of a line (to-do ticks) always draw.
+                out.extend_from_slice(&all[covered.min(span.start)..span.start]);
+                if on_screen(r) {
+                    out.extend_from_slice(&all[span.clone()]);
+                }
+                covered = span.end;
+            }
+            out.extend_from_slice(&all[covered.min(all.len())..]);
+            Some(out)
+        };
         for run in std::iter::once(&self.back).chain(&self.runs) {
+            if run.bounds.is_some_and(|b| !on_screen(&b)) {
+                continue;
+            }
             renderer.draw_boxes(view, &run.boxes);
             let images: Vec<(ImageId, ImageInstance)> = run
                 .images
@@ -349,8 +413,14 @@ impl Scene {
                 })
                 .collect();
             renderer.draw_images(view, &images);
-            renderer.draw_curves(view, &run.curves);
-            renderer.draw_curves_once(view, &run.see_through);
+            match visible(&run.curves, &run.curve_spans) {
+                Some(v) => renderer.draw_curves(view, &v),
+                None => renderer.draw_curves(view, &run.curves),
+            }
+            match visible(&run.see_through, &run.see_spans) {
+                Some(v) => renderer.draw_curves_once(view, &v),
+                None => renderer.draw_curves_once(view, &run.see_through),
+            }
             renderer.draw_glyphs(view, &run.glyphs);
         }
     }

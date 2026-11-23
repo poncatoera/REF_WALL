@@ -282,10 +282,62 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|source| Error::Json { path: path.to_path_buf(), source })?;
+    let mut bytes = to_json(value).map_err(|source| Error::Json { path: path.to_path_buf(), source })?;
     bytes.push(b'\n');
     write_atomic(path, &bytes)
+}
+
+/// JSON with objects indented (readable, diffable) and arrays on one line,
+/// so a drawn line's hundreds of numbers don't take a line each.
+pub fn to_json<T: Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, Readable::default());
+    value.serialize(&mut ser)?;
+    Ok(out)
+}
+
+#[derive(Default)]
+struct Readable {
+    depth: usize,
+    /// Per open object: whether it has a field yet.
+    filled: Vec<bool>,
+}
+
+impl Readable {
+    fn newline<W: ?Sized + std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        w.write_all(b"\n")?;
+        for _ in 0..self.depth {
+            w.write_all(b"  ")?;
+        }
+        Ok(())
+    }
+}
+
+impl serde_json::ser::Formatter for Readable {
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.depth += 1;
+        self.filled.push(false);
+        w.write_all(b"{")
+    }
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.depth -= 1;
+        if self.filled.pop().unwrap_or(false) {
+            self.newline(w)?;
+        }
+        w.write_all(b"}")
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
+        if let Some(f) = self.filled.last_mut() {
+            *f = true;
+        }
+        if !first {
+            w.write_all(b",")?;
+        }
+        self.newline(w)
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        w.write_all(b": ")
+    }
 }
 
 /// Writes to a temp file next to `path`, then renames, so a crash or a sync
@@ -294,4 +346,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
     fs::write(&tmp, bytes).at(&tmp)?;
     fs::rename(&tmp, path).at(path)
+}
+
+#[cfg(test)]
+mod json_tests {
+    #[test]
+    fn objects_are_indented_and_arrays_stay_on_one_line() {
+        let v = serde_json::json!({"a": 1, "points": [[0.5, 0.25], [1.0, 0.0]], "o": {}, "list": [{"x": 1}]});
+        let s = String::from_utf8(super::to_json(&v).unwrap()).unwrap();
+        assert_eq!(s, "{\n  \"a\": 1,\n  \"list\": [{\n    \"x\": 1\n  }],\n  \"o\": {},\n  \"points\": [[0.5,0.25],[1.0,0.0]]\n}");
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, v);
+    }
 }

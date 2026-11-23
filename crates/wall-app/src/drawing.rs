@@ -133,7 +133,9 @@ pub fn stroke_item(line: &[[f32; 2]], factors: &[f32], width: f32, color: Option
     // Pad so a straight line still has a box with some size.
     let pad = width;
     let (x, y, w, h) = (b[0] - pad, b[1] - pad, b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad);
-    let points = line.iter().map(|p| [(p[0] - x) / w, (p[1] - y) / h]).collect();
+    // 4 decimals of the frame: finer than a pixel on any line under 10,000 px.
+    let r4 = |v: f32| (v * 10000.0).round() / 10000.0;
+    let points = line.iter().map(|p| [r4((p[0] - x) / w), r4((p[1] - y) / h)]).collect();
     let widths = if factors.iter().all(|f| (*f - 1.0).abs() < 1e-3) { Vec::new() } else { factors.iter().map(|f| (f * 1000.0).round() / 1000.0).collect() };
     let brush = (brush != Brush::Pen).then(|| brush.name().to_owned());
     let frame = Frame { x: x as f64, y: y as f64, w: w as f64, h: h as f64, z: top_z + 1.0, ..Default::default() };
@@ -567,6 +569,31 @@ mod tests {
         a.key(Key::Delete);
         assert!(a.doc.item(&s[0].id).is_none_or(|i| i.deleted));
         assert!(a.doc.item(&s[1].id).is_some_and(|i| !i.deleted));
+    }
+
+    #[test]
+    fn crossing_solid_lines_over_a_picture_draw_in_one_batch_but_markers_and_notes_split() {
+        let mut a = app();
+        let frame = Frame { x: 100.0, y: 100.0, w: 800.0, h: 500.0, ..Default::default() };
+        a.doc.add(vec![(frame, ItemKind::Media { hash: wall_format::ContentHash::of(b"pic"), crop: None, look: Default::default() })]);
+        a.key(Key::Char('d'));
+        for k in 0..50 {
+            let y = 150.0 + (k % 10) as f32 * 30.0;
+            drag(&mut a, [150.0 + k as f32 * 5.0, y], [700.0, 550.0 - y / 2.0], Mods::default());
+        }
+        a.scene.update(&a.doc, &mut a.font, &a.board_names);
+        assert_eq!(a.scene.run_count(), 1, "pen lines crossing each other and the picture");
+        // Two crossing marker lines must blend separately: two batches more at most.
+        a.key(Key::Char('4'));
+        drag(&mut a, [200.0, 200.0], [600.0, 400.0], Mods::default());
+        drag(&mut a, [200.0, 400.0], [600.0, 200.0], Mods::default());
+        a.scene.update(&a.doc, &mut a.font, &a.board_names);
+        assert_eq!(a.scene.run_count(), 2, "the second marker crosses the first");
+        // A pen line over a marker goes above it: a new batch.
+        a.key(Key::Char('1'));
+        drag(&mut a, [400.0, 150.0], [400.0, 450.0], Mods::default());
+        a.scene.update(&a.doc, &mut a.font, &a.board_names);
+        assert_eq!(a.scene.run_count(), 3);
     }
 
     #[test]
