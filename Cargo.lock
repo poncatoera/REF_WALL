@@ -2843,6 +2843,7 @@ dependencies = [
  "uuid",
  "wall-app",
  "wall-format",
+ "wall-media",
  "wall-render",
  "wall-sync",
  "wasm-bindgen",
