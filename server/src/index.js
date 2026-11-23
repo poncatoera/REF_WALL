@@ -1,0 +1,503 @@
+// Wall's sync server: one Worker, one library.
+//
+//   LibraryDO  boards, items, sidecars, share links (one object)
+//   MediaDO    picture and video bytes, in 1 MB pieces (8 objects)
+//
+// Who may do what: a request carries a 256-bit secret as a Bearer token. The
+// owner's key matches OWNER_HASH; a share link's secret matches a row in
+// `links` (only hashes are stored). A link opens the whole library or one
+// board with the boards inside it, to view or to edit, until it's revoked.
+//
+// Merging is the file format's rule (BoardItem::supersedes): the higher
+// `rev` wins, then the larger `updated_by`. Every accepted row gets the next
+// `seq`; clients ask for rows after the last seq they have.
+import { DurableObject } from "cloudflare:workers";
+
+const SHARDS = 8;
+const PIECE = 1_000_000; // bytes per media row
+const MAX_FILE = 25_000_000;
+const MAX_BODY = 4_000_000; // bytes in one JSON request
+const MAX_ROW = 900_000; // characters in one item, board or sidecar
+const MAX_PUSH = 500; // rows in one push
+const PAGE = 500; // rows in one pull
+const PAGE_CHARS = 3_000_000;
+const PENDING_MS = 60 * 60 * 1000; // an upload that never finished is forgotten
+const MAX_LIBRARY_DB = 700_000_000;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const HASH = /^[0-9a-f]{64}$/;
+// File kinds Wall stores. The extension ends up in a file name on disk.
+const EXT = /^(jpg|jpeg|png|webp|gif|mp4|webm|mov|m4v|mkv|avi)$/;
+
+class Refuse extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const json = (value, status = 200) =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" },
+  });
+
+async function sha256(text) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function newSecret() {
+  const b = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const library = (env) => env.LIBRARY.get(env.LIBRARY.idFromName("library"));
+const shard = (env, hash) => env.MEDIA.get(env.MEDIA.idFromName(`media-${parseInt(hash[0], 16) % SHARDS}`));
+
+async function bearer(request) {
+  const h = request.headers.get("authorization") || "";
+  const m = /^Bearer ([A-Za-z0-9_-]{20,200})$/.exec(h);
+  if (!m) throw new Refuse(401, "no key");
+  return sha256(m[1]);
+}
+
+async function body(request) {
+  if (Number(request.headers.get("content-length") || 0) > MAX_BODY) throw new Refuse(413, "too much at once");
+  const text = await request.text();
+  if (text.length > MAX_BODY) throw new Refuse(413, "too much at once");
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Refuse(400, "not JSON");
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    try {
+      if (!url.pathname.startsWith("/api/")) return new Response("Not found", { status: 404 });
+      const who = await bearer(request);
+      const path = url.pathname.slice(5);
+      const media = /^media\/([0-9a-f]{64})$/.exec(path);
+      if (media) return await mediaRequest(request, env, who, media[1], url);
+      const lib = library(env);
+      const call = async (name, ...args) => {
+        const r = await lib[name](who, ...args);
+        if (r.error) throw new Refuse(r.status, r.error);
+        return json(r);
+      };
+      if (path === "sync" && request.method === "POST") return await call("sync", await body(request));
+      if (path === "items" && request.method === "GET") return await call("boardItems", url.searchParams.get("board"), url.searchParams.get("after") || "");
+      if (path === "me" && request.method === "GET") return await call("me");
+      if (path === "links" && request.method === "GET") return await call("listLinks");
+      if (path === "links" && request.method === "POST") return await call("makeLink", await body(request));
+      const link = /^links\/([0-9a-f-]{36})$/.exec(path);
+      if (link && request.method === "DELETE") return await call("revokeLink", link[1]);
+      return json({ error: "not found" }, 404);
+    } catch (e) {
+      if (e instanceof Refuse) return json({ error: e.message }, e.status);
+      console.error(e);
+      return json({ error: "server error" }, 500);
+    }
+  },
+};
+
+async function mediaRequest(request, env, who, hash, url) {
+  const lib = library(env);
+  if (request.method === "GET" || request.method === "HEAD") {
+    const ok = await lib.mayRead(who, hash);
+    if (ok.error) throw new Refuse(ok.status, ok.error);
+    const headers = {
+      // Never a type a browser would run: these bytes come from people.
+      "content-type": "application/octet-stream",
+      "content-disposition": "attachment",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'",
+      "cache-control": "private, max-age=31536000, immutable",
+      "content-length": String(ok.size),
+    };
+    if (request.method === "HEAD") return new Response(null, { headers });
+    return new Response(await shard(env, hash).read(hash), { headers });
+  }
+  if (request.method === "PUT") {
+    const size = Number(request.headers.get("content-length"));
+    if (!Number.isInteger(size) || size <= 0) throw new Refuse(411, "size missing");
+    if (size > MAX_FILE) throw new Refuse(413, "file too big");
+    const replace = url.searchParams.get("replace") === "1";
+    const r = await lib.reserve(who, hash, size, replace);
+    if (r.error) throw new Refuse(r.status, r.error);
+    if (r.have) return json({ have: true });
+    const bytes = await request.arrayBuffer();
+    if (bytes.byteLength !== size) {
+      await lib.release(hash, r.ticket);
+      throw new Refuse(400, "size mismatch");
+    }
+    try {
+      await shard(env, hash).write(hash, bytes);
+    } catch (e) {
+      await lib.release(hash, r.ticket);
+      throw e;
+    }
+    await lib.commit(hash, r.ticket);
+    return json({ stored: true });
+  }
+  throw new Refuse(405, "not allowed");
+}
+
+const no = (status, error) => ({ status, error });
+
+export class LibraryDO extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    ctx.blockConcurrencyWhile(async () => {
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);
+        INSERT OR IGNORE INTO counter VALUES (1, 0);
+        CREATE TABLE IF NOT EXISTS boards (id TEXT PRIMARY KEY, parent TEXT, deleted INTEGER NOT NULL, json TEXT NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS items (board TEXT NOT NULL, id TEXT NOT NULL, rev INTEGER NOT NULL, updated_by TEXT NOT NULL, hash TEXT, deleted INTEGER NOT NULL, json TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (board, id)) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS items_seq ON items (seq);
+        CREATE TABLE IF NOT EXISTS sidecars (hash TEXT PRIMARY KEY, json TEXT NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS media (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, done INTEGER NOT NULL, ticket TEXT NOT NULL, at INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, secret TEXT NOT NULL UNIQUE, role TEXT NOT NULL, board TEXT, label TEXT NOT NULL, created INTEGER NOT NULL, revoked INTEGER NOT NULL) WITHOUT ROWID;
+      `);
+    });
+    // Hashes a board-only link may read, kept while nothing changes.
+    this.readable = new Map();
+  }
+
+  rows(q, ...args) {
+    return this.sql.exec(q, ...args).toArray();
+  }
+
+  seq() {
+    return this.rows("SELECT seq FROM counter")[0].seq;
+  }
+
+  // { role: "owner" | "edit" | "view", board: root board or null for all }
+  access(who) {
+    const owner = this.env.OWNER_HASH;
+    if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null };
+    const l = this.rows("SELECT role, board FROM links WHERE secret = ? AND revoked = 0", who)[0];
+    return l ? { role: l.role, board: l.board } : null;
+  }
+
+  // The boards a link reaches: null for all, else a Set of ids.
+  scope(a) {
+    if (!a.board) return null;
+    const children = new Map();
+    const live = new Set();
+    for (const b of this.rows("SELECT id, parent FROM boards WHERE deleted = 0")) {
+      live.add(b.id);
+      if (!children.has(b.parent)) children.set(b.parent, []);
+      children.get(b.parent).push(b.id);
+    }
+    const set = new Set();
+    const todo = live.has(a.board) ? [a.board] : [];
+    while (todo.length) {
+      const id = todo.pop();
+      if (set.has(id)) continue;
+      set.add(id);
+      todo.push(...(children.get(id) || []));
+    }
+    return set;
+  }
+
+  // Media hashes on the boards in `scope`.
+  hashes(a, scope) {
+    if (!scope) return null;
+    const key = `${a.board}`;
+    const seq = this.seq();
+    const kept = this.readable.get(key);
+    if (kept && kept.seq === seq) return kept.set;
+    const set = new Set();
+    for (const id of scope) {
+      for (const r of this.sql.exec("SELECT hash FROM items WHERE board = ? AND deleted = 0 AND hash IS NOT NULL", id)) set.add(r.hash);
+    }
+    if (this.readable.size > 50) this.readable.clear();
+    this.readable.set(key, { seq, set });
+    return set;
+  }
+
+  async me(who) {
+    const a = this.access(who);
+    if (!a) return no(403, "this link doesn't work (any more)");
+    const used = this.used();
+    return { role: a.role, board: a.board, seq: this.seq(), ...(a.role === "owner" ? { media_bytes: used, max_media_bytes: this.max() } : {}) };
+  }
+
+  max() {
+    return Math.min(Number(this.env.MAX_MEDIA_BYTES) || 0, 4_000_000_000);
+  }
+
+  used() {
+    return this.rows("SELECT COALESCE(SUM(size), 0) AS n FROM media WHERE done = 1 OR at > ?", Date.now() - PENDING_MS)[0].n;
+  }
+
+  // Push and pull in one go. `since` is the last seq the client has.
+  async sync(who, req) {
+    const a = this.access(who);
+    if (!a) return no(403, "this link doesn't work (any more)");
+    if (!req || typeof req !== "object") return no(400, "bad request");
+    const since = Number.isSafeInteger(req.since) && req.since >= 0 ? req.since : 0;
+    const boards = Array.isArray(req.boards) ? req.boards : [];
+    const items = Array.isArray(req.items) ? req.items : [];
+    const sidecars = Array.isArray(req.sidecars) ? req.sidecars : [];
+    const pushing = boards.length + items.length + sidecars.length;
+    if (pushing > MAX_PUSH) return no(413, "too much at once");
+    if (pushing && a.role === "view") return no(403, "this link can only look");
+    if (pushing && this.sql.databaseSize > MAX_LIBRARY_DB) return no(507, "the library is full");
+    let refused = [];
+    if (pushing) {
+      try {
+        refused = this.ctx.storage.transactionSync(() => this.accept(a, boards, items, sidecars));
+      } catch (e) {
+        if (e instanceof Refuse) return no(e.status, e.message);
+        throw e;
+      }
+    }
+    const scope = this.scope(a);
+    const reads = this.hashes(a, scope);
+    const out = { seq: since, more: false, boards: [], items: [], sidecars: [], refused };
+    // Everything after `since`, oldest first, in pages.
+    const found = [];
+    for (const r of this.sql.exec("SELECT id, json, seq FROM boards WHERE seq > ? ORDER BY seq LIMIT ?", since, PAGE + 1)) {
+      found.push({ seq: r.seq, kind: "boards", ok: !scope || scope.has(r.id), json: r.json });
+    }
+    for (const r of this.sql.exec("SELECT board, json, seq FROM items WHERE seq > ? ORDER BY seq LIMIT ?", since, PAGE + 1)) {
+      found.push({ seq: r.seq, kind: "items", ok: !scope || scope.has(r.board), board: r.board, json: r.json });
+    }
+    for (const r of this.sql.exec("SELECT hash, json, seq FROM sidecars WHERE seq > ? ORDER BY seq LIMIT ?", since, PAGE + 1)) {
+      found.push({ seq: r.seq, kind: "sidecars", ok: !reads || reads.has(r.hash), json: r.json });
+    }
+    found.sort((x, y) => x.seq - y.seq);
+    let chars = 0;
+    let n = 0;
+    for (const f of found) {
+      if (n >= PAGE || (n > 0 && chars + f.json.length > PAGE_CHARS)) {
+        out.more = true;
+        break;
+      }
+      n += 1;
+      chars += f.json.length;
+      out.seq = f.seq;
+      if (!f.ok) continue;
+      const value = JSON.parse(f.json);
+      out[f.kind].push(f.kind === "items" ? { board: f.board, item: value } : value);
+    }
+    if (!out.more) out.seq = Math.max(out.seq, this.seq());
+    // A board-only link learns which boards it has, so it can fetch one that
+    // was moved in and drop one that was moved out.
+    if (scope) {
+      out.scope = [...scope];
+      // Details of pictures that became visible without changing themselves.
+      const known = new Set(Array.isArray(req.known) ? req.known : []);
+      for (const id of scope) {
+        if (known.has(id) || out.boards.some((b) => b.id === id)) continue;
+        const b = this.rows("SELECT json FROM boards WHERE id = ?", id)[0];
+        if (b) out.boards.push(JSON.parse(b.json));
+      }
+    }
+    return out;
+  }
+
+  accept(a, boards, items, sidecars) {
+    const refused = [];
+    const next = () => {
+      this.sql.exec("UPDATE counter SET seq = seq + 1");
+      return this.seq();
+    };
+    let scope = this.scope(a);
+    for (const b of boards) {
+      if (!b || !UUID.test(b.id) || (b.parent != null && !UUID.test(b.parent)) || b.parent === b.id || typeof b.name !== "string") throw new Refuse(400, "bad board");
+      const meta = { ...b, items: undefined };
+      const text = JSON.stringify(meta);
+      if (text.length > MAX_ROW) throw new Refuse(413, "board too big");
+      const old = this.rows("SELECT parent, json FROM boards WHERE id = ?", b.id)[0];
+      if (scope) {
+        // Inside the shared board only: new boards under it, renames, moves
+        // within it. The shared board itself can't be moved or deleted.
+        const inside = old ? scope.has(b.id) : true;
+        const root = b.id === a.board;
+        const parentOk = root ? (b.parent ?? null) === (old?.parent ?? null) : b.parent != null && scope.has(b.parent);
+        if (!inside || !parentOk || (root && b.deleted)) {
+          refused.push(b.id);
+          continue;
+        }
+      }
+      if (old && old.json === text) continue;
+      // A board inside itself would vanish from every list.
+      const seen = new Set([b.id]);
+      for (let up = b.parent ?? null; up; up = this.rows("SELECT parent FROM boards WHERE id = ?", up)[0]?.parent ?? null) {
+        if (seen.has(up)) {
+          up = null;
+          seen.add("loop");
+          break;
+        }
+        seen.add(up);
+      }
+      if (seen.has("loop")) {
+        refused.push(b.id);
+        continue;
+      }
+      this.sql.exec("INSERT INTO boards VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET parent = excluded.parent, deleted = excluded.deleted, json = excluded.json, seq = excluded.seq", b.id, b.parent ?? null, b.deleted ? 1 : 0, text, next());
+      if (scope) scope = this.scope(a);
+    }
+    for (const e of items) {
+      const i = e && e.item;
+      if (!i || !UUID.test(e.board) || !UUID.test(i.id) || !Number.isSafeInteger(i.rev) || i.rev < 0) throw new Refuse(400, "bad item");
+      if (scope && !scope.has(e.board)) {
+        refused.push(i.id);
+        continue;
+      }
+      const by = typeof i.updated_by === "string" ? i.updated_by : "";
+      const hash = i.type === "media" && HASH.test(i.hash) ? i.hash : null;
+      const old = this.rows("SELECT rev, updated_by, hash FROM items WHERE board = ? AND id = ?", e.board, i.id)[0];
+      if (old && !(i.rev > old.rev || (i.rev === old.rev && by > old.updated_by))) continue;
+      // A link mustn't reach a file by naming its hash in a new item: it may
+      // only use files it can already read or that it uploads itself.
+      if (scope && hash && hash !== old?.hash && !this.mayUse(a, scope, hash)) {
+        refused.push(i.id);
+        continue;
+      }
+      const text = JSON.stringify(i);
+      if (text.length > MAX_ROW) throw new Refuse(413, "item too big");
+      this.sql.exec("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (board, id) DO UPDATE SET rev = excluded.rev, updated_by = excluded.updated_by, hash = excluded.hash, deleted = excluded.deleted, json = excluded.json, seq = excluded.seq", e.board, i.id, i.rev, by, hash, i.deleted ? 1 : 0, text, next());
+    }
+    for (const s of sidecars) {
+      if (!s || !HASH.test(s.hash) || !EXT.test(s.ext)) throw new Refuse(400, "bad picture details");
+      if (scope && !this.mayUse(a, scope, s.hash)) {
+        refused.push(s.hash);
+        continue;
+      }
+      const text = JSON.stringify(s);
+      if (text.length > MAX_ROW) throw new Refuse(413, "details too big");
+      const old = this.rows("SELECT json FROM sidecars WHERE hash = ?", s.hash)[0];
+      if (old && old.json === text) continue;
+      this.sql.exec("INSERT INTO sidecars VALUES (?, ?, ?) ON CONFLICT (hash) DO UPDATE SET json = excluded.json, seq = excluded.seq", s.hash, text, next());
+    }
+    return refused;
+  }
+
+  // May this link put `hash` on a board? Yes if it can read it already, or
+  // the server doesn't have it yet (then the link has to upload it).
+  mayUse(a, scope, hash) {
+    if (this.hashes(a, scope).has(hash)) return true;
+    return !this.rows("SELECT 1 FROM media WHERE hash = ? AND done = 1", hash)[0];
+  }
+
+  // Every item of one board, for a board a link has just come to see.
+  async boardItems(who, board, after) {
+    const a = this.access(who);
+    if (!a) return no(403, "this link doesn't work (any more)");
+    if (!UUID.test(board || "")) return no(400, "bad board");
+    const scope = this.scope(a);
+    if (scope && !scope.has(board)) return no(404, "no such board here");
+    const reads = this.hashes(a, scope);
+    const out = { items: [], sidecars: [], after: "", more: false };
+    let chars = 0;
+    for (const r of this.sql.exec("SELECT id, hash, json FROM items WHERE board = ? AND id > ? ORDER BY id LIMIT ?", board, after, PAGE + 1)) {
+      if (out.items.length >= PAGE || (out.items.length && chars + r.json.length > PAGE_CHARS)) {
+        out.more = true;
+        break;
+      }
+      chars += r.json.length;
+      out.items.push({ board, item: JSON.parse(r.json) });
+      out.after = r.id;
+      if (r.hash && (!reads || reads.has(r.hash))) {
+        const s = this.rows("SELECT json FROM sidecars WHERE hash = ?", r.hash)[0];
+        if (s) out.sidecars.push(JSON.parse(s.json));
+      }
+    }
+    return out;
+  }
+
+  async mayRead(who, hash) {
+    const a = this.access(who);
+    if (!a) return no(403, "this link doesn't work (any more)");
+    const reads = this.hashes(a, this.scope(a));
+    const m = this.rows("SELECT size FROM media WHERE hash = ? AND done = 1", hash)[0];
+    // The same answer whether it's missing or merely not theirs.
+    if (!m || (reads && !reads.has(hash))) return no(404, "no such file here");
+    return { size: m.size };
+  }
+
+  async reserve(who, hash, size, replace) {
+    const a = this.access(who);
+    if (!a) return no(403, "this link doesn't work (any more)");
+    if (a.role === "view") return no(403, "this link can only look");
+    if (replace && a.role !== "owner") return no(403, "only the owner can replace a file");
+    const old = this.rows("SELECT size, done, at FROM media WHERE hash = ?", hash)[0];
+    if (old && old.done && !replace) return { have: true };
+    if (old && !old.done && old.at > Date.now() - 60_000) return no(409, "being uploaded already");
+    const used = this.used() - (old && (old.done || old.at > Date.now() - PENDING_MS) ? old.size : 0);
+    if (used + size > this.max()) return no(507, "the cloud space Wall may use is full");
+    const ticket = crypto.randomUUID();
+    this.sql.exec("INSERT INTO media VALUES (?, ?, 0, ?, ?) ON CONFLICT (hash) DO UPDATE SET size = excluded.size, done = 0, ticket = excluded.ticket, at = excluded.at", hash, size, ticket, Date.now());
+    return { ticket };
+  }
+
+  async commit(hash, ticket) {
+    this.sql.exec("UPDATE media SET done = 1 WHERE hash = ? AND ticket = ?", hash, ticket);
+  }
+
+  async release(hash, ticket) {
+    this.sql.exec("DELETE FROM media WHERE hash = ? AND ticket = ? AND done = 0", hash, ticket);
+  }
+
+  async listLinks(who) {
+    if (this.access(who)?.role !== "owner") return no(403, "owner only");
+    return { links: this.rows("SELECT id, role, board, label, created FROM links WHERE revoked = 0 ORDER BY created") };
+  }
+
+  async makeLink(who, req) {
+    if (this.access(who)?.role !== "owner") return no(403, "owner only");
+    const role = req?.role;
+    const board = req?.board ?? null;
+    if (role !== "view" && role !== "edit") return no(400, "view or edit");
+    if (board !== null && !UUID.test(board)) return no(400, "bad board");
+    if (board !== null && !this.rows("SELECT 1 FROM boards WHERE id = ? AND deleted = 0", board)[0]) return no(404, "sync that board first");
+    const secret = newSecret();
+    const id = crypto.randomUUID();
+    this.sql.exec("INSERT INTO links VALUES (?, ?, ?, ?, ?, ?, 0)", id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), Date.now());
+    return { id, secret, role, board };
+  }
+
+  async revokeLink(who, id) {
+    if (this.access(who)?.role !== "owner") return no(403, "owner only");
+    this.sql.exec("UPDATE links SET revoked = 1 WHERE id = ?", id);
+    return { revoked: true };
+  }
+}
+
+export class MediaDO extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    ctx.blockConcurrencyWhile(async () => {
+      this.sql.exec("CREATE TABLE IF NOT EXISTS pieces (hash TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (hash, n)) WITHOUT ROWID");
+    });
+  }
+
+  async write(hash, bytes) {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM pieces WHERE hash = ?", hash);
+      for (let n = 0; n * PIECE < bytes.byteLength; n++) {
+        this.sql.exec("INSERT INTO pieces VALUES (?, ?, ?)", hash, n, bytes.slice(n * PIECE, (n + 1) * PIECE));
+      }
+    });
+  }
+
+  async read(hash) {
+    const parts = this.sql.exec("SELECT bytes FROM pieces WHERE hash = ? ORDER BY n", hash).toArray().map((r) => new Uint8Array(r.bytes));
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+      out.set(p, at);
+      at += p.length;
+    }
+    return out;
+  }
+}

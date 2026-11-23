@@ -1,0 +1,28 @@
+# Wall's sync server. Free Workers plan only: no R2, no KV, no paid bindings.
+# Past a free limit Cloudflare returns errors; there is nothing here to bill.
+name = "wall"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+send_metrics = false
+workers_dev = true
+preview_urls = false
+
+[vars]
+# SHA-256 (hex) of the owner key that Wall on the owner's PC keeps. The key
+# itself is never on the server. Empty: nobody is the owner, nothing works.
+OWNER_HASH = ""
+# Uploads stop here (bytes). The free plan stores 5 GB in all.
+MAX_MEDIA_BYTES = "4000000000"
+
+[[durable_objects.bindings]]
+name = "LIBRARY"
+class_name = "LibraryDO"
+
+[[durable_objects.bindings]]
+name = "MEDIA"
+class_name = "MediaDO"
+
+# SQLite storage: the only kind the free plan has.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LibraryDO", "MediaDO"]
