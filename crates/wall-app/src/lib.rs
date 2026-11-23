@@ -3,6 +3,7 @@
 //! Shells (apps/desktop, apps/web) only create the window or canvas, forward
 //! input here and call [`App::render`].
 
+pub mod arrange;
 pub mod brush;
 pub mod share;
 pub mod history;
@@ -1615,6 +1616,8 @@ impl App {
             Key::Char('s' | 'S') => self.toggle_sidebar(sidebar::Tab::Boards),
             Key::Char('d' | 'D') => self.toggle_drawing(),
             Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
+            Key::Char('a') => self.run_command(menu::Command::TidyRows),
+            Key::Char('A') => self.run_command(menu::Command::TidySameHeight),
             Key::Char('r' | 'R') => self.run_command(menu::Command::RotateRight),
             Key::Char('h' | 'H') => self.run_command(menu::Command::Mirror),
             Key::Char('v' | 'V') => self.run_command(menu::Command::FlipVertical),
@@ -2411,7 +2414,7 @@ impl App {
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
             let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, menu::BAR + 12.0], self.viewport);
-            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: theme::t().search_bg, stroke: theme::t().accent, shape: [8.0 * px, 1.5 * px] };
+            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: theme::t().search_bg, stroke: theme::t().accent, shape: [theme::radius::CONTROL * px, 1.5 * px] };
             renderer.draw_boxes(&view, &[bx]);
             let shown = if query.is_empty() { "Search this board".to_owned() } else { query.clone() };
             let colour = if query.is_empty() { theme::t().dim } else { theme::t().ink };
@@ -3253,6 +3256,10 @@ impl App {
             C::FlipVertical => self.change_look(|l| l.flip_v = !l.flip_v),
             C::BlackAndWhite => self.change_look(|l| l.grayscale = !l.grayscale),
             C::GoUp => self.go_up(),
+            C::TidyRows => _ = self.arrange(arrange::Arrange::Rows),
+            C::TidySameHeight => _ = self.arrange(arrange::Arrange::SameHeight),
+            C::TidyPack => _ = self.arrange(arrange::Arrange::Pack),
+            C::TidyColour => _ = self.arrange(arrange::Arrange::Colour),
         }
     }
 

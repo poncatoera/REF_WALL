@@ -45,51 +45,106 @@ pub struct Theme {
     pub tile: C,
     /// The search box over the board.
     pub search_bg: C,
+    /// A faint wash of the accent: the chosen tool, the open board, a
+    /// highlighted menu entry. Text on it uses `accent_text`.
+    pub accent_soft: C,
+    pub accent_text: C,
+    /// Text on a solid `accent` fill (primary buttons, picked chips).
+    pub accent_ink: C,
+    /// A button or row under the pointer.
+    pub hover: C,
+    /// Drop shadow under floating panels (see [`shadow`]).
+    pub shadow: C,
 }
 
+/// Corner radii shared by all the chrome, in screen pixels.
+pub mod radius {
+    /// Floating panels, menus' drop-downs, cards over the board.
+    pub const PANEL: f32 = 6.0;
+    /// Fields, buttons, segmented controls.
+    pub const CONTROL: f32 = 4.0;
+    /// Rows and items inside a control.
+    pub const INNER: f32 = 3.0;
+    /// Tags and badges.
+    pub const PILL: f32 = 999.0;
+}
+
+/// Premultiplied colour from 0-255 sRGB and alpha.
+const fn rgb(r: u8, g: u8, b: u8, a: f32) -> C {
+    [r as f32 / 255.0 * a, g as f32 / 255.0 * a, b as f32 / 255.0 * a, a]
+}
+
+/// Graphite: the dark look. Quiet chrome, hairline edges, one blue accent.
 pub const DARK: Theme = Theme {
-    background: [0.075, 0.078, 0.086, 1.0],
-    grid_dot: [0.24, 0.25, 0.29, 1.0],
-    card_fill: [0.13, 0.135, 0.15, 1.0],
-    card_stroke: [0.24, 0.25, 0.28, 1.0],
-    text: [0.92, 0.92, 0.94, 1.0],
-    text_done: [0.5, 0.52, 0.57, 1.0],
-    todo_box: [0.45, 0.47, 0.52, 1.0],
-    arrow: [0.62, 0.64, 0.7, 1.0],
-    accent: [0.36, 0.62, 1.0, 1.0],
-    panel_bg: [0.105, 0.11, 0.125, 1.0],
-    line: [0.2, 0.21, 0.24, 1.0],
-    field: [0.075, 0.078, 0.086, 1.0],
-    ink: [0.92, 0.92, 0.94, 1.0],
-    dim: [0.56, 0.58, 0.64, 1.0],
-    chip: [0.17, 0.19, 0.24, 1.0],
-    menu_bar: [0.09, 0.094, 0.105, 1.0],
-    menu_drop: [0.125, 0.13, 0.148, 1.0],
-    tile: [0.075, 0.078, 0.086, 1.0],
-    search_bg: [0.1, 0.105, 0.12, 0.97],
+    background: rgb(0x12, 0x13, 0x15, 1.0),
+    grid_dot: rgb(0x2a, 0x2c, 0x31, 1.0),
+    card_fill: rgb(0x1c, 0x1d, 0x21, 1.0),
+    card_stroke: rgb(0x2b, 0x2d, 0x32, 1.0),
+    text: rgb(0xec, 0xed, 0xf0, 1.0),
+    text_done: rgb(0x80, 0x84, 0x8d, 1.0),
+    todo_box: rgb(0x74, 0x78, 0x82, 1.0),
+    arrow: rgb(0x8d, 0x91, 0x9b, 1.0),
+    accent: rgb(0x6e, 0xa8, 0xff, 1.0),
+    panel_bg: rgb(0x1b, 0x1c, 0x1f, 1.0),
+    line: rgb(0x2b, 0x2d, 0x32, 1.0),
+    field: rgb(0x13, 0x14, 0x16, 1.0),
+    ink: rgb(0xec, 0xed, 0xf0, 1.0),
+    dim: rgb(0x9a, 0x9e, 0xa8, 1.0),
+    chip: rgb(0x26, 0x28, 0x2e, 1.0),
+    menu_bar: rgb(0x16, 0x17, 0x1a, 1.0),
+    menu_drop: rgb(0x1f, 0x20, 0x24, 1.0),
+    tile: rgb(0x13, 0x14, 0x16, 1.0),
+    search_bg: rgb(0x1b, 0x1c, 0x1f, 0.97),
+    accent_soft: rgb(0x6e, 0xa8, 0xff, 0.16),
+    accent_text: rgb(0xa9, 0xca, 0xff, 1.0),
+    accent_ink: rgb(0x08, 0x16, 0x2e, 1.0),
+    hover: rgb(0xff, 0xff, 0xff, 0.05),
+    shadow: rgb(0x00, 0x00, 0x00, 0.38),
 };
 
+/// Paper: the light look. Warm off-white board, white panels, vermilion.
 pub const LIGHT_THEME: Theme = Theme {
-    background: [0.955, 0.955, 0.962, 1.0],
-    grid_dot: [0.76, 0.77, 0.8, 1.0],
-    card_fill: [1.0, 1.0, 1.0, 1.0],
-    card_stroke: [0.82, 0.83, 0.86, 1.0],
-    text: [0.11, 0.115, 0.13, 1.0],
-    text_done: [0.55, 0.57, 0.62, 1.0],
-    todo_box: [0.6, 0.62, 0.67, 1.0],
-    arrow: [0.42, 0.44, 0.5, 1.0],
-    accent: [0.2, 0.47, 0.95, 1.0],
-    panel_bg: [0.99, 0.99, 0.995, 1.0],
-    line: [0.86, 0.87, 0.9, 1.0],
-    field: [0.955, 0.955, 0.962, 1.0],
-    ink: [0.11, 0.115, 0.13, 1.0],
-    dim: [0.45, 0.47, 0.53, 1.0],
-    chip: [0.9, 0.92, 0.96, 1.0],
-    menu_bar: [0.93, 0.93, 0.945, 1.0],
-    menu_drop: [1.0, 1.0, 1.0, 1.0],
-    tile: [0.93, 0.93, 0.945, 1.0],
-    search_bg: [1.0, 1.0, 1.0, 0.97],
+    background: rgb(0xf3, 0xf1, 0xec, 1.0),
+    grid_dot: rgb(0xd3, 0xce, 0xc3, 1.0),
+    card_fill: rgb(0xff, 0xfe, 0xfb, 1.0),
+    card_stroke: rgb(0xe3, 0xdf, 0xd6, 1.0),
+    text: rgb(0x1b, 0x1a, 0x18, 1.0),
+    text_done: rgb(0x8f, 0x8a, 0x80, 1.0),
+    todo_box: rgb(0x9a, 0x95, 0x8b, 1.0),
+    arrow: rgb(0x67, 0x63, 0x5b, 1.0),
+    accent: rgb(0xd9, 0x47, 0x2f, 1.0),
+    panel_bg: rgb(0xff, 0xff, 0xff, 1.0),
+    line: rgb(0xe3, 0xdf, 0xd6, 1.0),
+    field: rgb(0xfa, 0xf9, 0xf6, 1.0),
+    ink: rgb(0x1b, 0x1a, 0x18, 1.0),
+    dim: rgb(0x67, 0x63, 0x5b, 1.0),
+    chip: rgb(0xec, 0xe9, 0xe2, 1.0),
+    menu_bar: rgb(0xfb, 0xfa, 0xf7, 1.0),
+    menu_drop: rgb(0xff, 0xff, 0xff, 1.0),
+    tile: rgb(0xf3, 0xf1, 0xec, 1.0),
+    search_bg: rgb(0xff, 0xff, 0xff, 0.97),
+    accent_soft: rgb(0xd9, 0x47, 0x2f, 0.12),
+    accent_text: rgb(0xa8, 0x33, 0x1f, 1.0),
+    accent_ink: rgb(0xff, 0xff, 0xff, 1.0),
+    hover: rgb(0x3c, 0x2d, 0x14, 0.05),
+    shadow: rgb(0x3c, 0x2d, 0x14, 0.13),
 };
+
+/// A soft drop shadow for a floating panel at `rect` (screen pixels) with
+/// corner `radius`: one feathered box, drawn before the panel. Cheap: a
+/// single quad, no blur pass.
+pub fn shadow(rect: [f32; 4], radius: f32) -> crate::panel::PanelBox {
+    const SPREAD: f32 = 14.0;
+    const DROP: f32 = 6.0;
+    let c = t().shadow;
+    crate::panel::PanelBox {
+        rect: [rect[0] - SPREAD, rect[1] - SPREAD + DROP, rect[2] + 2.0 * SPREAD, rect[3] + 2.0 * SPREAD],
+        fill: c,
+        stroke: c,
+        radius: radius + SPREAD,
+        stroke_w: -SPREAD,
+    }
+}
 
 /// The colours in use.
 pub fn t() -> &'static Theme {

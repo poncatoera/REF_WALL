@@ -96,8 +96,8 @@ const ROW: f32 = 34.0;
 fn button(l: &mut ShareLayout, r: [f32; 4], label: &str, primary: bool, hover: [f32; 2], hit: ShareHit, text_width: &mut dyn FnMut(&str, f32) -> f32) {
     let t = theme::t();
     let over = panel::inside(r, hover);
-    let (fill, stroke, ink) = if primary { (t.accent, [0.0; 4], t.panel_bg) } else { (if over { t.field } else { [0.0; 4] }, t.line, t.ink) };
-    l.boxes.push(PanelBox { rect: r, fill, stroke, radius: 7.0, stroke_w: if primary { 0.0 } else { 1.0 } });
+    let (fill, stroke, ink) = if primary { (t.accent, [0.0; 4], t.accent_ink) } else { (if over { t.hover } else { [0.0; 4] }, t.line, t.ink) };
+    l.boxes.push(PanelBox { rect: r, fill, stroke, radius: crate::theme::radius::CONTROL, stroke_w: if primary { 0.0 } else { 1.0 } });
     let w = text_width(label, 12.5);
     l.texts.push(TextRun { text: label.into(), at: [r[0] + (r[2] - w) / 2.0, r[1] + r[3] / 2.0 + 4.5], size: 12.5, color: ink });
     l.hits.push((r, hit));
@@ -140,7 +140,7 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
         texts.push(TextRun { text: "FOR (OPTIONAL)".into(), at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
         y += 14.0;
         let field = [x0 + PAD, y, inner, 30.0];
-        l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: if card.typing { t.accent } else { t.line }, radius: 6.0, stroke_w: if card.typing { 1.5 } else { 1.0 } });
+        l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: if card.typing { t.accent } else { t.line }, radius: crate::theme::radius::CONTROL, stroke_w: if card.typing { 1.5 } else { 1.0 } });
         let (shown, ink) = if card.person.is_empty() && !card.typing { ("Anyone: they type their own name".to_owned(), t.dim) } else { (panel::fit_with(text_width, &card.person, 13.0, inner - 20.0), t.ink) };
         let tw = if card.person.is_empty() { 0.0 } else { text_width(&shown, 13.0) };
         texts.push(TextRun { text: if card.person.is_empty() && card.typing { String::new() } else { shown }, at: [field[0] + 9.0, field[1] + 20.0], size: 13.0, color: ink });
@@ -202,7 +202,8 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
     }
     y += PAD;
     l.rect = [x0, y0, W, y - y0];
-    l.boxes.insert(0, PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
+    l.boxes.insert(0, PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
+    l.boxes.insert(0, crate::theme::shadow(l.rect, crate::theme::radius::PANEL));
     l.texts = texts;
     for (r, label, primary, hit) in buttons {
         button(&mut l, r, label, primary, hover, hit, text_width);

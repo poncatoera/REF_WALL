@@ -109,7 +109,7 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         let name = panel::fit_with(width, &p.name, 12.0, 160.0);
         let w = width(&name, 12.0);
         let tag = [s[0] + 9.0, s[1] + 9.0, w + 14.0, 20.0];
-        boxes.push(PanelBox { rect: tag, fill: color, stroke: [0.0; 4], radius: 6.0, stroke_w: 0.0 });
+        boxes.push(PanelBox { rect: tag, fill: color, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         texts.push(TextRun { text: name, at: [tag[0] + 7.0, tag[1] + 14.0], size: 12.0, color: WHITE });
     }
 
@@ -120,28 +120,30 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
     if let Some(me) = &me {
         let r = [right - BADGE, y, BADGE, BADGE];
         let fill = pick(me.color).unwrap_or([0.16, 0.17, 0.2, 1.0]);
-        boxes.push(PanelBox { rect: r, fill, stroke: [0.85, 0.86, 0.9, 1.0], radius: BADGE / 2.0, stroke_w: 1.5 });
+        boxes.push(PanelBox { rect: r, fill, stroke: crate::theme::t().menu_bar, radius: BADGE / 2.0, stroke_w: 2.0 });
         let i = initial(me.name);
         texts.push(TextRun { at: [r[0] + (BADGE - width(&i, 13.0)) / 2.0, y + 16.5], text: i, size: 13.0, color: WHITE });
         me_rect = Some(r);
         right = r[0] - 10.0;
         if let Some(text) = me.editing {
             let c = [(r[0] + BADGE - CARD_W).max(8.0), menu::BAR + 6.0, CARD_W, 128.0];
-            let dim = [0.65, 0.67, 0.72, 1.0];
-            boxes.push(PanelBox { rect: c, fill: panel::BG(), stroke: [0.3, 0.31, 0.36, 1.0], radius: 10.0, stroke_w: 1.0 });
+            let th = crate::theme::t();
+            let dim = th.dim;
+            boxes.push(crate::theme::shadow(c, crate::theme::radius::PANEL));
+            boxes.push(PanelBox { rect: c, fill: th.panel_bg, stroke: th.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
             let field = [c[0] + 12.0, c[1] + 32.0, c[2] - 24.0, 28.0];
             if me.fixed {
                 texts.push(TextRun { text: "Your name comes with your link".into(), at: [c[0] + 14.0, c[1] + 22.0], size: 12.0, color: dim });
                 let t = panel::fit_with(width, me.name, 14.0, field[2] - 8.0);
-                texts.push(TextRun { text: t, at: [field[0] + 2.0, field[1] + 19.0], size: 14.0, color: WHITE });
+                texts.push(TextRun { text: t, at: [field[0] + 2.0, field[1] + 19.0], size: 14.0, color: th.ink });
             } else {
                 texts.push(TextRun { text: "Your name, as others see it".into(), at: [c[0] + 14.0, c[1] + 22.0], size: 12.0, color: dim });
-                boxes.push(PanelBox { rect: field, fill: [0.09, 0.09, 0.11, 1.0], stroke: [0.48, 0.64, 0.97, 1.0], radius: 6.0, stroke_w: 1.5 });
+                boxes.push(PanelBox { rect: field, fill: th.field, stroke: th.accent, radius: crate::theme::radius::CONTROL, stroke_w: 1.5 });
                 let shown_text = panel::fit_with(width, text, 14.0, field[2] - 20.0);
                 let tw = width(&shown_text, 14.0);
-                texts.push(TextRun { text: shown_text, at: [field[0] + 8.0, field[1] + 19.0], size: 14.0, color: WHITE });
+                texts.push(TextRun { text: shown_text, at: [field[0] + 8.0, field[1] + 19.0], size: 14.0, color: th.ink });
                 if me.caret {
-                    boxes.push(PanelBox { rect: [field[0] + 9.0 + tw, field[1] + 6.0, 1.5, 16.0], fill: WHITE, stroke: [0.0; 4], radius: 0.0, stroke_w: 0.0 });
+                    boxes.push(PanelBox { rect: [field[0] + 9.0 + tw, field[1] + 6.0, 1.5, 16.0], fill: th.ink, stroke: [0.0; 4], radius: 0.0, stroke_w: 0.0 });
                 }
             }
             // Colour: 8 swatches; the picked one has a ring.
@@ -150,11 +152,11 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
             for i in 0..COLOR_COUNT {
                 let rr = [field[0] + i as f32 * (sw + gap), c[1] + 72.0, sw, sw];
                 let on = me.color == Some(i);
-                boxes.push(PanelBox { rect: rr, fill: COLORS[i as usize], stroke: if on { WHITE } else { [0.0; 4] }, radius: sw / 2.0, stroke_w: if on { 2.5 } else { 0.0 } });
+                boxes.push(PanelBox { rect: rr, fill: COLORS[i as usize], stroke: if on { th.ink } else { [0.0; 4] }, radius: sw / 2.0, stroke_w: if on { 2.5 } else { 0.0 } });
                 swatches.push((rr, i));
             }
             let hint = if me.fixed { "Pick a colour. Esc to close" } else { "Enter to keep, Esc to cancel" };
-            texts.push(TextRun { text: hint.into(), at: [c[0] + 14.0, c[1] + 116.0], size: 11.0, color: [0.55, 0.57, 0.62, 1.0] });
+            texts.push(TextRun { text: hint.into(), at: [c[0] + 14.0, c[1] + 116.0], size: 11.0, color: th.dim });
             card = Some(c);
         }
     }
@@ -163,12 +165,12 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         let more = format!("+{}", peers.len() - shown);
         let w = width(&more, 12.0).max(BADGE - 10.0) + 10.0;
         let r = [right - w, y, w, BADGE];
-        boxes.push(PanelBox { rect: r, fill: [0.2, 0.21, 0.24, 0.95], stroke: WHITE, radius: BADGE / 2.0, stroke_w: 2.0 });
-        texts.push(TextRun { text: more.clone(), at: [r[0] + (w - width(&more, 12.0)) / 2.0, y + 16.5], size: 12.0, color: WHITE });
+        boxes.push(PanelBox { rect: r, fill: crate::theme::t().chip, stroke: crate::theme::t().menu_bar, radius: BADGE / 2.0, stroke_w: 2.0 });
+        texts.push(TextRun { text: more.clone(), at: [r[0] + (w - width(&more, 12.0)) / 2.0, y + 16.5], size: 12.0, color: crate::theme::t().ink });
         x = r[0] - BADGE + 6.0;
     }
     for p in peers.iter().take(shown) {
-        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: p.paint(), stroke: WHITE, radius: BADGE / 2.0, stroke_w: 2.0 });
+        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: p.paint(), stroke: crate::theme::t().menu_bar, radius: BADGE / 2.0, stroke_w: 2.0 });
         let i = initial(&p.name);
         texts.push(TextRun { at: [x + (BADGE - width(&i, 13.0)) / 2.0, y + 16.5], text: i, size: 13.0, color: WHITE });
         // Overlap a little, like a stack of people.

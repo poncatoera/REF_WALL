@@ -174,7 +174,8 @@ pub fn layout(
     let t = theme::t();
     let mut l = Layout::default();
     l.rect = rect(place, viewport, left_inset);
-    l.rect(l.rect, t.panel_bg, t.line, 10.0);
+    l.boxes.push(theme::shadow(l.rect, theme::radius::PANEL));
+    l.rect(l.rect, t.panel_bg, t.line, theme::radius::PANEL);
     let [x0, y0, _, _] = l.rect;
     // Position along the run -> a rectangle across it.
     let horiz = place.horizontal;
@@ -197,11 +198,11 @@ pub fn layout(
     l.side = r;
     let over = inside(r, hover);
     if side_open {
-        l.fill(r, t.chip, 7.0);
+        l.fill(r, t.accent_soft, theme::radius::CONTROL);
     } else if over {
-        l.fill(r, t.field, 7.0);
+        l.fill(r, t.hover, theme::radius::CONTROL);
     }
-    let ink = if side_open { t.accent } else { t.ink };
+    let ink = if side_open { t.accent_text } else if over { t.ink } else { t.dim };
     let c = [r[0] + BUTTON / 2.0, r[1] + BUTTON / 2.0];
     l.outline([c[0] - 9.0, c[1] - 7.0, 18.0, 14.0], ink, 2.5);
     l.fill([c[0] - 9.0, c[1] - 7.0, 6.0, 14.0], ink, 1.5);
@@ -221,11 +222,11 @@ pub fn layout(
             let on = *tool == active;
             let over = inside(r, hover);
             if on {
-                l.fill(r, t.chip, 7.0);
+                l.fill(r, t.accent_soft, theme::radius::CONTROL);
             } else if over {
-                l.fill(r, t.field, 7.0);
+                l.fill(r, t.hover, theme::radius::CONTROL);
             }
-            let ink = if on { t.accent } else { t.ink };
+            let ink = if on { t.accent_text } else if over { t.ink } else { t.dim };
             icon(&mut l, *tool, [r[0] + BUTTON / 2.0, r[1] + BUTTON / 2.0], ink);
             l.hits.push((r, *tool));
             if over && dragging.is_none() {
@@ -241,11 +242,11 @@ pub fn layout(
     l.fold = r;
     let over = inside(r, hover);
     if over {
-        l.fill(r, t.field, 7.0);
+        l.fill(r, t.hover, theme::radius::CONTROL);
     }
     let c = [r[0] + BUTTON / 2.0, r[1] + BUTTON / 2.0];
     if place.collapsed {
-        icon(&mut l, active, c, t.accent);
+        icon(&mut l, active, c, t.accent_text);
         l.fill([r[0] + BUTTON - 9.0, r[1] + BUTTON - 9.0, 5.0, 5.0], t.dim, 2.5);
         if over {
             tip = Some(("Show tools".into(), r));
@@ -271,7 +272,8 @@ pub fn layout(
             let x = if l.rect[0] + W + 8.0 + w > viewport[0] { l.rect[0] - 8.0 - w } else { l.rect[0] + W + 8.0 };
             [x, r[1] + r[3] / 2.0 - 12.0, w, 24.0]
         };
-        l.rect(b, t.menu_drop, t.line, 6.0);
+        l.boxes.push(theme::shadow(b, theme::radius::INNER));
+        l.rect(b, t.menu_drop, t.line, theme::radius::INNER);
         l.texts.push(TextRun { text: label, at: [b[0] + 10.0, b[1] + 16.0], size: 12.0, color: t.ink });
     }
     if let Some(tool) = dragging.filter(|_| !inside(l.rect, hover)) {
@@ -280,7 +282,7 @@ pub fn layout(
         let g = [hover[0] - 20.0, hover[1] - 20.0, w, h];
         let mut fill = t.card_fill;
         fill[3] = 0.75;
-        l.rect(g, fill, t.accent, 8.0);
+        l.rect(g, fill, t.accent, crate::theme::radius::CONTROL);
         icon(&mut l, tool, [g[0] + 22.0, g[1] + 20.0], t.dim);
     }
     l

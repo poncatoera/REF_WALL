@@ -172,7 +172,8 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
     let y0 = (p[1] - PIN).min(vp[1] - h - 8.0).max(BAR + 8.0);
     let c = [x0, y0, CARD_W, h];
     l.card = Some(c);
-    l.boxes.push(PanelBox { rect: c, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
+    l.boxes.push(crate::theme::shadow(c, crate::theme::radius::PANEL));
+    l.boxes.push(PanelBox { rect: c, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
 
     // Header: what it is, and its buttons on the right.
     let title = match (card.id, resolved) {
@@ -190,7 +191,7 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
         *bx -= w + 6.0;
         let r = [*bx, y0 + 10.0, w, 22.0];
         let fill = if panel::inside(r, i.hover) { t.field } else { [0.0; 4] };
-        l.boxes.push(PanelBox { rect: r, fill, stroke: t.line, radius: 6.0, stroke_w: 1.0 });
+        l.boxes.push(PanelBox { rect: r, fill, stroke: t.line, radius: crate::theme::radius::CONTROL, stroke_w: 1.0 });
         l.texts.push(TextRun { text: label.into(), at: [r[0] + 8.0, r[1] + 15.5], size: 12.0, color: t.ink });
         l.hits.push((r, hit));
     };
@@ -208,7 +209,7 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
     // The field, with the caret after the last line.
     let fy = y0 + head + y + 8.0;
     let field = [x0 + pad, fy, inner, field_h];
-    l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: t.accent, radius: 7.0, stroke_w: 1.5 });
+    l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: t.accent, radius: crate::theme::radius::CONTROL, stroke_w: 1.5 });
     l.hits.push((field, CardHit::Field));
     if card.text.is_empty() {
         let hint = if thread.is_empty() { "Add a comment" } else { "Reply" };
@@ -232,9 +233,9 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
     let send = [x0 + CARD_W - pad - 70.0, by, 70.0, 30.0];
     let empty = card.text.trim().is_empty();
     let fill = if empty { t.field } else { t.accent };
-    l.boxes.push(PanelBox { rect: send, fill, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
+    l.boxes.push(PanelBox { rect: send, fill, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
     let sw = width("Send", 12.5);
-    l.texts.push(TextRun { text: "Send".into(), at: [send[0] + (70.0 - sw) / 2.0, send[1] + 19.5], size: 12.5, color: if empty { t.dim } else { t.panel_bg } });
+    l.texts.push(TextRun { text: "Send".into(), at: [send[0] + (70.0 - sw) / 2.0, send[1] + 19.5], size: 12.5, color: if empty { t.dim } else { t.accent_ink } });
     l.hits.push((send, CardHit::Send));
     l
 }
@@ -258,14 +259,15 @@ pub fn stamp_bar(picked: usize, hover: [f32; 2], left: f32, right: f32, width: &
     let x0 = (left + (right - left - w) / 2.0).max(left + 8.0);
     let y0 = BAR + 8.0;
     b.rect = [x0, y0, w, cell + 12.0];
-    b.boxes.push(PanelBox { rect: b.rect, fill: t.panel_bg, stroke: t.line, radius: 10.0, stroke_w: 1.0 });
+    b.boxes.push(crate::theme::shadow(b.rect, crate::theme::radius::PANEL));
+    b.boxes.push(PanelBox { rect: b.rect, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
     let mut x = x0 + 8.0;
     for (k, (mark, color)) in MARKS.iter().enumerate() {
         let r = [x, y0 + 6.0, cell, cell];
         if k == picked {
-            b.boxes.push(PanelBox { rect: r, fill: t.chip, stroke: t.accent, radius: 8.0, stroke_w: 1.5 });
+            b.boxes.push(PanelBox { rect: r, fill: t.chip, stroke: t.accent, radius: crate::theme::radius::CONTROL, stroke_w: 1.5 });
         } else if panel::inside(r, hover) {
-            b.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: 8.0, stroke_w: 0.0 });
+            b.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         }
         let d = [r[0] + 5.0, r[1] + 5.0, cell - 10.0, cell - 10.0];
         b.boxes.push(PanelBox { rect: d, fill: *color, stroke: [0.0; 4], radius: d[2] / 2.0, stroke_w: 0.0 });
@@ -277,7 +279,7 @@ pub fn stamp_bar(picked: usize, hover: [f32; 2], left: f32, right: f32, width: &
     }
     let r = [x + 2.0, y0 + 8.0, done_w, cell - 4.0];
     let fill = if panel::inside(r, hover) { t.field } else { [0.0; 4] };
-    b.boxes.push(PanelBox { rect: r, fill, stroke: t.line, radius: 7.0, stroke_w: 1.0 });
+    b.boxes.push(PanelBox { rect: r, fill, stroke: t.line, radius: crate::theme::radius::CONTROL, stroke_w: 1.0 });
     b.texts.push(TextRun { text: "Done".into(), at: [r[0] + 11.0, r[1] + 19.0], size: 12.5, color: t.ink });
     b.hits.push((r, None));
     b

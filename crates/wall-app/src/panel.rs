@@ -264,7 +264,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     if let Some(title) = &info.title {
         let r = [left, y, inner, 34.0];
         let typing = edit.filter(|e| e.field == Field::Title);
-        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
+        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, crate::theme::radius::CONTROL);
         let (shown, colour) = match typing {
             Some(e) => (e.text.clone(), INK()),
             None if title.is_empty() => (info.title_hint.clone(), DIM()),
@@ -308,7 +308,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         l.text("PLAYBACK", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let play = [left, y, 64.0, 28.0];
-        l.rect(play, FIELD(), LINE(), 6.0);
+        l.rect(play, FIELD(), LINE(), crate::theme::radius::CONTROL);
         l.text(if v.playing { "Pause" } else { "Play" }, [play[0] + 12.0, play[1] + 19.0], 13.0, INK());
         l.hits.push((play, Action::PlayPause));
         let mut x = left + 72.0;
@@ -316,10 +316,10 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         for s in SPEEDS {
             let r = [x, y, bw, 28.0];
             let on = (s - v.speed).abs() < 1e-3;
-            l.rect(r, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
+            l.rect(r, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, crate::theme::radius::CONTROL);
             let t = format!("{}×", trim_float(s));
             let tw = text_width(font, &t, 12.0);
-            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { [1.0; 4] } else { INK() });
+            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((r, Action::Speed(s)));
             x += bw + 4.0;
         }
@@ -329,7 +329,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
                 let t = format!("In {}   Out {}", crate::video::format_time(a), crate::video::format_time(b));
                 l.text(t, [left, y + 17.0], 12.5, INK());
                 let r = [left + inner - 60.0, y, 60.0, 24.0];
-                l.rect(r, FIELD(), LINE(), 6.0);
+                l.rect(r, FIELD(), LINE(), crate::theme::radius::CONTROL);
                 l.text("Clear", [r[0] + 14.0, r[1] + 16.5], 12.5, INK());
                 l.hits.push((r, Action::ClearRange));
             }
@@ -344,12 +344,12 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             // Time (jumps there), name (click to type), remove.
             let on = v.at_marker == Some(k);
             let tr = [left, y, 58.0, 24.0];
-            l.rect(tr, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
-            l.text(crate::video::format_time(*t), [tr[0] + 8.0, tr[1] + 16.5], 12.0, if on { [1.0; 4] } else { INK() });
+            l.rect(tr, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, crate::theme::radius::CONTROL);
+            l.text(crate::video::format_time(*t), [tr[0] + 8.0, tr[1] + 16.5], 12.0, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((tr, Action::SeekMarker(k)));
             let nr = [left + 64.0, y, inner - 64.0 - 28.0, 24.0];
             let typing = edit.filter(|e| e.field == Field::Marker(k));
-            l.rect(nr, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
+            l.rect(nr, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, crate::theme::radius::CONTROL);
             let (shown, colour) = match typing {
                 Some(e) => (e.text.clone(), INK()),
                 None if label.is_empty() => ("Name this moment".to_owned(), DIM()),
@@ -416,7 +416,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
             l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
+            l.text(label, [x + 10.0, y + 16.5], size, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
             l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM());
@@ -453,7 +453,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
         }
         let r = [left, y, inner, 30.0];
         let typing = edit.filter(|e| e.field == Field::Tag);
-        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, 6.0);
+        l.rect(r, FIELD(), if typing.is_some() { ACCENT() } else { LINE() }, crate::theme::radius::CONTROL);
         match typing {
             Some(e) => {
                 l.text(e.text.clone(), [r[0] + 10.0, r[1] + 20.0], 13.0, INK());
@@ -489,8 +489,8 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
             l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
-            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { [1.0; 4] } else { DIM() });
+            l.text(label, [x + 10.0, y + 16.5], size, if on { crate::theme::t().accent_ink } else { INK() });
+            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { crate::theme::t().accent_ink } else { DIM() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             x += w + 6.0;
         }
@@ -502,7 +502,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     if info.can_open {
         divider(&mut l, x0, &mut y);
         let r = [left, y, inner, 32.0];
-        l.rect(r, FIELD(), LINE(), 6.0);
+        l.rect(r, FIELD(), LINE(), crate::theme::radius::CONTROL);
         let t = if info.kind == "Link" { "Open link" } else { "Open board" };
         let tw = text_width(font, t, 13.5);
         l.text(t, [r[0] + (inner - tw) / 2.0, r[1] + 21.0], 13.5, INK());
@@ -512,7 +512,8 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
 
     let h = (y - TOP).max(60.0).min(viewport[1] - TOP - MARGIN);
     l.rect = [x0, TOP, WIDTH, h];
-    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG(), stroke: LINE(), radius: 10.0, stroke_w: 1.0 });
+    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG(), stroke: LINE(), radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
+    l.boxes.insert(0, crate::theme::shadow(l.rect, crate::theme::radius::PANEL));
     l
 }
 

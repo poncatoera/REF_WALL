@@ -64,16 +64,17 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     let x0 = (left + (right - left - w) / 2.0).max(left + 8.0);
     let y0 = BAR + 8.0;
     l.rect = [x0, y0, w, h];
-    l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 10.0, stroke_w: 1.0 });
+    l.boxes.push(crate::theme::shadow(l.rect, crate::theme::radius::PANEL));
+    l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
     let mut cy = y0 + (H - CHIP_H) / 2.0;
     let mut row_y = y0;
     let mut x = x0 + 8.0;
     for (b, cw) in brush::ALL.iter().zip(&chip_w) {
         let r = [x, cy, *cw, CHIP_H];
         let on = pen.brush == *b;
-        let fill = if on { t.chip } else if panel::inside(r, hover) { t.field } else { [0.0; 4] };
-        l.boxes.push(PanelBox { rect: r, fill, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
-        l.texts.push(TextRun { text: b.label().into(), at: [x + 11.0, cy + 18.5], size: 12.5, color: if on { t.accent } else { t.ink } });
+        let fill = if on { t.accent_soft } else if panel::inside(r, hover) { t.hover } else { [0.0; 4] };
+        l.boxes.push(PanelBox { rect: r, fill, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
+        l.texts.push(TextRun { text: b.label().into(), at: [x + 11.0, cy + 18.5], size: 12.5, color: if on { t.accent_text } else { t.ink } });
         l.hits.push((r, BarHit::Brush(*b)));
         x += cw + gap;
     }
@@ -100,7 +101,7 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     let plus = [x + size_w - 24.0, cy, 24.0, CHIP_H];
     for (r, s, hit) in [(minus, "−", BarHit::Smaller), (plus, "+", BarHit::Bigger)] {
         if panel::inside(r, hover) {
-            l.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
+            l.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         }
         l.texts.push(TextRun { text: s.into(), at: [r[0] + 7.0, cy + 19.5], size: 15.0, color: t.ink });
         l.hits.push((r, hit));
@@ -109,7 +110,7 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     l.texts.push(TextRun { text: size_label, at: [x + (size_w - lw) / 2.0, cy + 18.5], size: 12.5, color: t.dim });
     x += size_w + sep;
     let r = [x, cy, done_w, CHIP_H];
-    l.boxes.push(PanelBox { rect: r, fill: if panel::inside(r, hover) { t.field } else { [0.0; 4] }, stroke: t.line, radius: 7.0, stroke_w: 1.0 });
+    l.boxes.push(PanelBox { rect: r, fill: if panel::inside(r, hover) { t.field } else { [0.0; 4] }, stroke: t.line, radius: crate::theme::radius::CONTROL, stroke_w: 1.0 });
     l.texts.push(TextRun { text: "Done".into(), at: [x + 11.0, cy + 18.5], size: 12.5, color: t.ink });
     l.hits.push((r, BarHit::Done));
     l

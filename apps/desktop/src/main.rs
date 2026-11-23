@@ -20,6 +20,11 @@
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
 //! `Wall/Library.wall` in the home folder. Boards save automatically.
 
+// Release builds on Windows have no console window; see console.rs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod console;
+mod lock;
 mod video;
 
 use std::num::NonZeroU32;
@@ -342,7 +347,10 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
         std::fs::create_dir_all(parent)?;
     }
     println!("wall: library {}", path.display());
+    // Locked before reading, so another Wall can't save it in between.
+    let lock = lock::take(path)?;
     let mut app = App::open_library(path, &device_name(), now_ms())?;
+    lock::keep(lock);
     app.desktop = true;
     app.set_utc_offset(local_offset_min());
     settings::remember_library(path);
@@ -1040,10 +1048,22 @@ fn want_angle() -> bool {
     }
 }
 
+/// The app icon for the title bar and taskbar (wall.exe carries the same
+/// picture as wall.ico, see build.rs). Made by tools/make-icon.py.
+fn window_icon() -> Option<winit::window::Icon> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
         .with_title(title)
+        .with_window_icon(window_icon())
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
+    // Windows takes the big taskbar and Alt-Tab icon separately.
+    #[cfg(windows)]
+    let attrs = winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(attrs, window_icon());
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
     let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_stencil_size(8).with_transparency(false).with_api(api);
@@ -1123,6 +1143,7 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    console::attach();
     let event_loop = EventLoop::new()?;
     let mut title = "Wall".to_owned();
     let mut app = match std::env::var("WALL_DEMO").ok() {
@@ -1136,7 +1157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .or_else(settings::last_library)
                 .unwrap_or_else(default_library);
             title = window_title(&path);
-            open_library(&path)?
+            // Installed Wall has no console: say why it can't start.
+            match open_library(&path) {
+                Ok(app) => app,
+                Err(e) => {
+                    show_error(&format!("Could not open {}: {e}", path.display()));
+                    return Ok(());
+                }
+            }
         }
     };
     app.desktop = true;

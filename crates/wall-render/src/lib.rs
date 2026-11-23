@@ -307,6 +307,46 @@ impl Renderer {
         }
     }
 
+    /// Scales a texture's picture (now `width` x `height`) down to at most
+    /// `max_w` wide, in place, to give its memory back.
+    pub fn shrink_image(&self, id: ImageId, width: u32, height: u32, max_w: u32) {
+        if width <= max_w || height == 0 {
+            return;
+        }
+        let gl = &self.gl;
+        let (w, h) = (max_w as i32, ((height as u64 * max_w as u64 / width as u64) as i32).max(1));
+        unsafe {
+            let (Ok(tmp), Ok(from), Ok(to)) = (gl.create_texture(), gl.create_framebuffer(), gl.create_framebuffer()) else { return };
+            let empty = |tex| {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            };
+            let copy = |a, b, aw, ah| {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+                gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(a), 0);
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to));
+                gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(b), 0);
+                let whole = [glow::READ_FRAMEBUFFER, glow::DRAW_FRAMEBUFFER].iter().all(|t| gl.check_framebuffer_status(*t) == glow::FRAMEBUFFER_COMPLETE);
+                if whole {
+                    gl.blit_framebuffer(0, 0, aw, ah, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                }
+                whole
+            };
+            gl.disable(glow::SCISSOR_TEST);
+            empty(tmp);
+            if copy(id.0, tmp, width as i32, height as i32) {
+                empty(id.0);
+                copy(tmp, id.0, w, h);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.delete_framebuffer(from);
+            gl.delete_framebuffer(to);
+            gl.delete_texture(tmp);
+        }
+    }
+
     /// Replaces a video texture's pixels with a new RGBA8 frame of the size
     /// it was created with.
     pub fn update_image(&mut self, id: ImageId, rgba: &[u8], width: u32, height: u32) {
