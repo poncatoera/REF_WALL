@@ -73,6 +73,8 @@ function connect() {
     } else if (m.t === "peer") {
       peers.set(m.peer.id, m.peer);
       changed = true;
+      sentCursor = undefined; // they haven't seen our pointer yet
+      if (cursor && !cursorTimer) flushCursor();
     } else if (m.t === "cursor") {
       const p = peers.get(m.id);
       if (p) {
@@ -111,7 +113,8 @@ export function liveBoard(id) {
   send({ t: "board", board: id });
 }
 
-// This person's pointer on the board, or null; sent at most ~20 times a second.
+// This person's pointer on the board, or null; sent at most 10 times a second,
+// and only while someone else is there.
 export function liveCursor(x, y) {
   cursor = x === undefined || x === null ? null : [x, y];
   if (cursorTimer) return;
@@ -119,6 +122,12 @@ export function liveCursor(x, y) {
 }
 
 function flushCursor() {
+  // Nobody to see it: nothing to send (messages are counted).
+  if (!peers.size) {
+    sentCursor = undefined;
+    cursorTimer = null;
+    return;
+  }
   const same = sentCursor !== undefined && JSON.stringify(sentCursor) === JSON.stringify(cursor);
   if (same) {
     cursorTimer = null;
@@ -126,7 +135,7 @@ function flushCursor() {
   }
   sentCursor = cursor;
   send(cursor ? { t: "cursor", x: cursor[0], y: cursor[1] } : { t: "cursor", x: null, y: null });
-  cursorTimer = setTimeout(flushCursor, 50);
+  cursorTimer = setTimeout(flushCursor, 100);
 }
 
 // The people on the board as [{id, name, x, y}], if that changed since last asked.
@@ -139,7 +148,10 @@ export function liveTake() {
 // Waits `ms`, or less if the server says there's a change after `have`.
 export function liveWait(ms, have) {
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(false), ms);
+    const t = setTimeout(() => {
+      pokeWaiters = pokeWaiters.filter((w) => w !== f);
+      resolve(false);
+    }, ms);
     const f = (s) => {
       if (s > have) {
         clearTimeout(t);

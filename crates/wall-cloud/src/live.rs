@@ -16,7 +16,7 @@ use tungstenite::{Message, WebSocket};
 use uuid::Uuid;
 
 /// Pointer updates go out at most this often.
-const CURSOR_EVERY: Duration = Duration::from_millis(50);
+const CURSOR_EVERY: Duration = Duration::from_millis(100);
 /// Keep-alive: the server answers "ping" without waking up (not billed).
 const PING_EVERY: Duration = Duration::from_secs(30);
 /// How long a read waits before the thread looks at what to send.
@@ -57,7 +57,9 @@ impl Live {
         let (out, rx) = channel();
         let url = live_url(server);
         let (key, name) = (key.to_owned(), name.to_owned());
-        let _ = std::thread::Builder::new().name("wall-live".into()).spawn(move || run(url, key, name, inbox, out));
+        if let Some(url) = url {
+            let _ = std::thread::Builder::new().name("wall-live".into()).spawn(move || run(url, key, name, inbox, out));
+        }
         Self { tx, rx }
     }
 
@@ -81,16 +83,21 @@ impl Live {
 }
 
 /// `https://host` → `wss://host/api/live`.
-pub fn live_url(server: &str) -> String {
+///
+/// None for anything but https (and this computer, for tests): the key goes
+/// over this connection.
+pub fn live_url(server: &str) -> Option<String> {
     let s = server.trim_end_matches('/');
-    let s = if let Some(rest) = s.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = s.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        s.to_owned()
+    if s.contains(['@', ' ', '"', '?', '#']) {
+        return None;
+    }
+    let local = ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| s.starts_with(p));
+    let ws = match s.strip_prefix("https://") {
+        Some(rest) => format!("wss://{rest}"),
+        None if local => format!("ws://{}", s.strip_prefix("http://")?),
+        None => return None,
     };
-    format!("{s}/api/live")
+    Some(format!("{ws}/api/live"))
 }
 
 #[derive(Deserialize)]
@@ -197,7 +204,9 @@ fn set_timeout(ws: &WebSocket<MaybeTlsStream<TcpStream>>, t: Option<Duration>) {
 }
 
 fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &Sender<LiveEvent>) -> End {
-    let Ok((mut ws, _)) = tungstenite::connect(url) else { return End::Lost };
+    // No redirects: the key would go to wherever they lead.
+    let limits = tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(1 << 20)).max_frame_size(Some(1 << 20));
+    let Ok((mut ws, _)) = tungstenite::client::connect_with_config(url, Some(limits), 0) else { return End::Lost };
     set_timeout(&ws, Some(POLL));
     let send = |ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, v: serde_json::Value| ws.send(Message::text(v.to_string())).is_ok();
     let hello = json!({ "t": "hello", "key": key, "board": here.board.map(|b| b.to_string()), "name": here.name });
@@ -240,7 +249,9 @@ fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &S
             }
             sent_name = here.name.clone();
         }
-        if sent_cursor != Some(here.cursor) && last_cursor.elapsed() >= CURSOR_EVERY {
+        if here.peers.is_empty() {
+            sent_cursor = None; // nobody to see it: nothing to send
+        } else if sent_cursor != Some(here.cursor) && last_cursor.elapsed() >= CURSOR_EVERY {
             let (x, y) = match here.cursor {
                 Some([x, y]) => (json!(x), json!(y)),
                 None => (json!(null), json!(null)),
@@ -326,8 +337,11 @@ mod tests {
 
     #[test]
     fn addresses_become_websocket_addresses() {
-        assert_eq!(live_url("https://wall.example.dev/"), "wss://wall.example.dev/api/live");
-        assert_eq!(live_url("http://127.0.0.1:8787"), "ws://127.0.0.1:8787/api/live");
+        assert_eq!(live_url("https://wall.example.dev/").as_deref(), Some("wss://wall.example.dev/api/live"));
+        assert_eq!(live_url("http://127.0.0.1:8787").as_deref(), Some("ws://127.0.0.1:8787/api/live"));
+        for s in ["http://wall.example.dev", "http://127.0.0.1.evil.dev:1", "ws://x", "https://a@b.dev", ""] {
+            assert_eq!(live_url(s), None, "{s}");
+        }
     }
 
     #[test]

@@ -30,8 +30,10 @@ const PAGE_CHARS = 3_000_000;
 const PENDING_MS = 60 * 60 * 1000; // an upload that never finished is forgotten
 const MAX_LIBRARY_DB = 700_000_000;
 const MAX_SOCKETS = 64; // people connected at once
+const MAX_STRANGERS = 24; // connections that haven't shown a key yet
+const HELLO_MS = 10_000; // and how long they get to
 const MAX_MESSAGE = 1000; // characters in one live message
-const CURSOR_MS = 40; // pointer updates closer together than this are dropped
+const CURSOR_MS = 80; // pointer updates closer together than this are dropped
 const MAX_NAME = 40;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -148,8 +150,8 @@ async function mediaRequest(request, env, who, hash, url) {
     if (r.prove) {
       const bytes = new Uint8Array(await request.arrayBuffer());
       const stored = await shard(env, hash).read(hash);
-      let same = bytes.byteLength === r.size && stored.byteLength === r.size;
-      for (let i = 0; same && i < stored.byteLength; i++) same = bytes[i] === stored[i];
+      // Built in: a loop over 20 MB takes longer than the free plan allows.
+      const same = bytes.byteLength === r.size && stored.byteLength === r.size && crypto.subtle.timingSafeEqual(bytes, stored);
       if (!same) throw new Refuse(409, "not the same file");
       await lib.grant(who, hash);
       return json({ have: true });
@@ -207,11 +209,21 @@ export class LibraryDO extends DurableObject {
   // ---- live: presence and pokes -----------------------------------------
 
   async fetch(request) {
-    if (this.ctx.getWebSockets().length >= MAX_SOCKETS) return new Response("too many people at once", { status: 503 });
+    // Connections that never show a key must not keep people out.
+    const now = Date.now();
+    let people = 0;
+    let strangers = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = ws.deserializeAttachment();
+      if (a && a.who) people += 1;
+      else if (!a || now - (a.opened || 0) > HELLO_MS) ws.close(4001, "say hello with a key");
+      else strangers += 1;
+    }
+    if (people >= MAX_SOCKETS || strangers >= MAX_STRANGERS) return new Response("too many people at once", { status: 503 });
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
     // id: what others see; who/board/name once it said hello.
-    server.serializeAttachment({ id: crypto.randomUUID().slice(0, 13), who: null });
+    server.serializeAttachment({ id: crypto.randomUUID().slice(0, 13), who: null, opened: now });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -325,6 +337,20 @@ export class LibraryDO extends DurableObject {
     return this.webSocketClose(ws);
   }
 
+  // Boards moved or went: nobody stays on one their link no longer reaches.
+  recheck() {
+    for (const [ws, a] of this.live()) {
+      if (!a.board) continue;
+      const access = this.access(a.who);
+      if (access && this.reaches(access, a.board)) continue;
+      this.tell(a.board, { t: "leave", id: a.id }, ws);
+      this.send(ws, { t: "peers", board: a.board, peers: [] });
+      a.board = null;
+      a.x = a.y = null;
+      ws.serializeAttachment(a);
+    }
+  }
+
   // After rows were accepted: everyone pulls now.
   poke() {
     const msg = { t: "poke", seq: this.seq() };
@@ -417,7 +443,10 @@ export class LibraryDO extends DurableObject {
       try {
         const before = this.seq();
         refused = this.ctx.storage.transactionSync(() => this.accept(a, boards, items, sidecars));
-        if (this.seq() !== before) this.poke();
+        if (this.seq() !== before) {
+          if (boards.length) this.recheck();
+          this.poke();
+        }
       } catch (e) {
         if (e instanceof Refuse) return no(e.status, e.message);
         throw e;

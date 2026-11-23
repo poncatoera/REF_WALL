@@ -406,6 +406,48 @@ test("live: no key, a wrong key or junk is shut out", async () => {
   assert.equal(r.status, 426, "plain requests are turned away");
 });
 
+test("live: connections without a key can't keep people out", async () => {
+  const opened = await Promise.all(
+    Array.from({ length: 40 }, () => new Promise((r) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/api/live`);
+      ws.addEventListener("open", () => r(ws));
+      ws.addEventListener("error", () => r(null));
+    })),
+  );
+  const held = opened.filter(Boolean);
+  assert.ok(held.length <= 24 && held.length > 0, `${held.length} strangers`);
+  // Their time to show a key runs out when the next person comes.
+  await new Promise((r) => setTimeout(r, 11_000));
+  const paul = live(owner, A, "Paul");
+  await paul.next((m) => m.t === "welcome");
+  const guest = live(edit.secret, A, "Guest");
+  await guest.next((m) => m.t === "welcome");
+  await paul.next((m) => m.t === "peer");
+  for (const c of [paul, guest]) c.close();
+  held.forEach((ws) => ws.close());
+  await new Promise((r) => setTimeout(r, 300));
+});
+
+test("live: a board moved out of a share takes its guests off it", async () => {
+  const M = randomUUID();
+  await sync(owner, { since: 0, boards: [board(M, A, "moves away")] });
+  const paul = live(owner, M, "Paul");
+  await paul.next((m) => m.t === "welcome");
+  const guest = live(edit.secret, M, "Guest");
+  await guest.next((m) => m.t === "welcome");
+  await paul.next((m) => m.t === "peer");
+  await sync(owner, { since: 0, boards: [board(M, PRIVATE, "moves away")] });
+  await paul.next((m) => m.t === "leave");
+  paul.send({ t: "cursor", x: 5, y: 5 });
+  guest.send({ t: "cursor", x: 9, y: 9 });
+  await new Promise((r) => setTimeout(r, 500));
+  await guest.nothing((m) => m.t === "cursor");
+  await paul.nothing((m) => m.t === "cursor");
+  paul.close();
+  guest.close();
+  await new Promise((r) => setTimeout(r, 300));
+});
+
 test("live: revoking a link disconnects whoever uses it", async () => {
   const temp = (await call(owner, "links", { method: "POST", json: { role: "edit", board: A } })).data;
   const paul = live(owner, A, "Paul");

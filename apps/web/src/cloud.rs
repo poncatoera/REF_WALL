@@ -174,13 +174,16 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
     let mut uploads: Vec<(ContentHash, Vec<u8>)> = Vec::new();
     let mut failed = HashSet::new();
     let mut quiet = 0u32;
+    let mut fails = 0u32;
+    // `App::sync_stamp` as of what was last sent.
+    let mut sent = 0u64;
     loop {
         let done = async {
             if !known {
                 view = json::<Me>(&key, "GET", "me", None).await?.role == "view";
                 known = true;
             }
-            let moved = round(&s, &key, &mut sync, view, &mut uploads).await?;
+            let moved = round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
             if !opened {
                 opened = s.borrow_mut().app.sync_open_top(blank);
             }
@@ -188,6 +191,7 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
             Ok::<bool, Fail>(moved || files)
         }
         .await;
+        fails = if done.is_ok() { 0 } else { fails + 1 };
         match done {
             Ok(moved) => {
                 quiet = if moved { 0 } else { quiet + 1 };
@@ -224,22 +228,53 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
             (false, true) => 5_000,
             (false, false) => 30_000,
         };
-        // Someone else's change cuts the wait short.
-        if wasm_bindgen_futures::JsFuture::from(live_wait(wait, sync.seq as f64)).await.ok().and_then(|v| v.as_bool()) == Some(true) {
-            quiet = 0;
+        // After a failure only time helps: not a round per announced change,
+        // which a server over its daily limit would turn into a storm.
+        if fails > 0 {
+            sleep((5_000 << fails.min(4)).min(60_000)).await;
+            continue;
         }
+        // Someone else's change cuts the wait short; so does one made here,
+        // once it's finished and nothing has followed for a moment.
+        let mut left = wait;
+        while left > 0 {
+            let step = left.min(400);
+            left -= step;
+            if wasm_bindgen_futures::JsFuture::from(live_wait(step, sync.seq as f64)).await.ok().and_then(|v| v.as_bool()) == Some(true) {
+                quiet = 0;
+                break;
+            }
+            if view {
+                continue;
+            }
+            let changed = {
+                let st = s.borrow();
+                !st.app.busy_editing() && st.app.sync_stamp() != sent
+            };
+            if changed {
+                sleep(250).await;
+                quiet = 0;
+                break;
+            }
+        }
+        // A breath between rounds, whatever wakes them.
+        sleep(100).await;
     }
 }
 
 /// Sends what changed here and merges what changed there.
-async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, uploads: &mut Vec<(ContentHash, Vec<u8>)>) -> Result<bool, Fail> {
+async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, uploads: &mut Vec<(ContentHash, Vec<u8>)>, sent: &mut u64) -> Result<bool, Fail> {
     let mut moved = false;
     loop {
         // Not under a drag or while typing.
         let (boards, sidecars) = loop {
             let got = {
                 let st = s.borrow();
-                st.app.sync_boards().map(|b| (b, st.app.sync_sidecars()))
+                let b = st.app.sync_boards();
+                if b.is_some() {
+                    *sent = st.app.sync_stamp();
+                }
+                b.map(|b| (b, st.app.sync_sidecars()))
             };
             match got {
                 Some(x) => break x,
@@ -311,7 +346,17 @@ async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, u
         if !inc.is_empty() {
             moved = true;
             let kept = loop {
-                let k = s.borrow_mut().app.sync_apply(&inc, sync);
+                let k = {
+                    let mut st = s.borrow_mut();
+                    // What's merged now isn't news to send; what was changed
+                    // here meanwhile still is.
+                    let same = st.app.sync_stamp() == *sent;
+                    let k = st.app.sync_apply(&inc, sync);
+                    if k.is_some() && same {
+                        *sent = st.app.sync_stamp();
+                    }
+                    k
+                };
                 match k {
                     Some(k) => break k,
                     None => sleep(500).await,
