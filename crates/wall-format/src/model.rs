@@ -276,6 +276,14 @@ pub enum ItemKind {
         /// swell and taper. Missing: `width` all along.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         widths: Vec<f32>,
+        /// The picture or video this line was drawn on: it moves, resizes
+        /// and is deleted with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on: Option<Uuid>,
+        /// Lines drawn close together share this id and act as one drawing
+        /// (picked and moved together).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawing: Option<Uuid>,
     },
     /// A row of colours ("#rrggbb"), with an optional name.
     Palette {

@@ -42,7 +42,10 @@ impl BarLayout {
 }
 
 /// The options bar, centred over the free part of the window.
-pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], left: f32, text_width: &mut dyn FnMut(&str, f32) -> f32) -> BarLayout {
+/// `left` and `right` bound the free part (the left panel and the right
+/// side panel); when one row doesn't fit there, the colours and size go on
+/// a second row.
+pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], left: f32, right: f32, text_width: &mut dyn FnMut(&str, f32) -> f32) -> BarLayout {
     let t = theme::t();
     let mut l = BarLayout::default();
     let chip_w: Vec<f32> = brush::ALL.iter().map(|b| text_width(b.label(), 12.5) + 22.0).collect();
@@ -51,12 +54,19 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     let done_w = text_width("Done", 12.5) + 22.0;
     let gap = 6.0;
     let sep = 14.0;
-    let w = 8.0 + chip_w.iter().sum::<f32>() + gap * 4.0 + sep + 8.0 * (DOT + gap) + sep + size_w + sep + done_w + 8.0;
-    let x0 = (left + (viewport[0] - left - w) / 2.0).max(left + 8.0);
+    let row1 = chip_w.iter().sum::<f32>() + gap * 4.0;
+    let row2 = 8.0 * (DOT + gap) - gap + sep + size_w + sep + done_w;
+    let right = right.min(viewport[0]);
+    let one_row = 8.0 + row1 + sep + row2 + 8.0;
+    let two_rows = one_row > right - left - 16.0;
+    let w = if two_rows { 8.0 + row1.max(row2) + 8.0 } else { one_row };
+    let h = if two_rows { 2.0 * H - 8.0 } else { H };
+    let x0 = (left + (right - left - w) / 2.0).max(left + 8.0);
     let y0 = BAR + 8.0;
-    l.rect = [x0, y0, w, H];
+    l.rect = [x0, y0, w, h];
     l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 10.0, stroke_w: 1.0 });
-    let cy = y0 + (H - CHIP_H) / 2.0;
+    let mut cy = y0 + (H - CHIP_H) / 2.0;
+    let mut row_y = y0;
     let mut x = x0 + 8.0;
     for (b, cw) in brush::ALL.iter().zip(&chip_w) {
         let r = [x, cy, *cw, CHIP_H];
@@ -67,9 +77,15 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
         l.hits.push((r, BarHit::Brush(*b)));
         x += cw + gap;
     }
-    x += sep - gap;
+    if two_rows {
+        x = x0 + 8.0;
+        row_y += H - 8.0;
+        cy += H - 8.0;
+    } else {
+        x += sep - gap;
+    }
     for (k, c) in brush::COLORS.iter().enumerate() {
-        let r = [x, y0 + (H - DOT) / 2.0, DOT, DOT];
+        let r = [x, row_y + (H - DOT) / 2.0, DOT, DOT];
         let rgb = hex(c);
         let on = pen.color.eq_ignore_ascii_case(c);
         if on {
@@ -106,7 +122,7 @@ fn hex(c: &str) -> [f32; 3] {
 }
 
 /// A drawing item for a line in board units, with its width factors.
-pub fn stroke_item(line: &[[f32; 2]], factors: &[f32], width: f32, color: Option<String>, brush: Brush, top_z: f64) -> Option<(Frame, ItemKind)> {
+pub fn stroke_item(line: &[[f32; 2]], factors: &[f32], width: f32, color: Option<String>, brush: Brush, top_z: f64, on: Option<Uuid>, drawing: Option<Uuid>) -> Option<(Frame, ItemKind)> {
     if line.is_empty() {
         return None;
     }
@@ -121,8 +137,27 @@ pub fn stroke_item(line: &[[f32; 2]], factors: &[f32], width: f32, color: Option
     let widths = if factors.iter().all(|f| (*f - 1.0).abs() < 1e-3) { Vec::new() } else { factors.iter().map(|f| (f * 1000.0).round() / 1000.0).collect() };
     let brush = (brush != Brush::Pen).then(|| brush.name().to_owned());
     let frame = Frame { x: x as f64, y: y as f64, w: w as f64, h: h as f64, z: top_z + 1.0, ..Default::default() };
-    Some((frame, ItemKind::Stroke { points, width, color, brush, widths }))
+    Some((frame, ItemKind::Stroke { points, width, color, brush, widths, on, drawing }))
 }
+
+/// A line drawn on a picture, after the picture's frame changed from
+/// `from` to `to`: it keeps its place on the picture and scales with it.
+pub(crate) fn follow_frame(stroke: &BoardItem, from: Frame, to: Frame) -> BoardItem {
+    let (sx, sy) = (to.w / from.w.max(1e-6), to.h / from.h.max(1e-6));
+    let mut s = stroke.clone();
+    s.frame.x = to.x + (stroke.frame.x - from.x) * sx;
+    s.frame.y = to.y + (stroke.frame.y - from.y) * sy;
+    s.frame.w = stroke.frame.w * sx;
+    s.frame.h = stroke.frame.h * sy;
+    if let ItemKind::Stroke { width, .. } = &mut s.kind {
+        *width *= ((sx * sy).sqrt()) as f32;
+    }
+    s
+}
+
+/// How close (in screen pixels) a new line must come to an earlier one to
+/// join its drawing.
+const JOIN_PX: f32 = 40.0;
 
 impl App {
     /// The drawing tool's settings.
@@ -145,8 +180,9 @@ impl App {
             return None;
         }
         let left = self.left_inset();
+        let right = self.panel_layout().map_or(self.viewport[0], |p| p.rect[0] - 8.0);
         let font = &mut self.font;
-        Some(bar_layout(&self.pen, self.cursor, self.viewport, left, &mut |s, size| panel::text_width(font, s, size)))
+        Some(bar_layout(&self.pen, self.cursor, self.viewport, left, right, &mut |s, size| panel::text_width(font, s, size)))
     }
 
     /// A press on the options bar. True when it was on the bar.
@@ -247,13 +283,75 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// The picture or video a new line was drawn on: the top one holding
+    /// at least half of its points.
+    pub(crate) fn picture_under(&self, line: &[[f32; 2]]) -> Option<Uuid> {
+        let mut media: Vec<&BoardItem> = self.doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Media { .. })).collect();
+        media.sort_by(|a, b| b.frame.z.total_cmp(&a.frame.z));
+        media
+            .into_iter()
+            .find(|m| {
+                let f = m.frame;
+                let inside = line.iter().filter(|p| p[0] as f64 >= f.x && p[0] as f64 <= f.x + f.w && p[1] as f64 >= f.y && p[1] as f64 <= f.y + f.h).count();
+                inside * 2 >= line.len()
+            })
+            .map(|m| m.id)
+    }
+
+    /// The drawing a new line joins: the newest one on the same picture (or
+    /// on the board) with a line within [`JOIN_PX`] of it.
+    pub(crate) fn drawing_near(&self, line: &[[f32; 2]], on: Option<Uuid>) -> Option<Uuid> {
+        let reach = JOIN_PX / self.camera.zoom;
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in line {
+            b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
+        }
+        let mut best: Option<(f64, Uuid)> = None;
+        for i in self.doc.board.live_items() {
+            let ItemKind::Stroke { points, drawing: Some(d), on: o, .. } = &i.kind else { continue };
+            if *o != on {
+                continue;
+            }
+            let f = i.frame;
+            let near_box = (b[0] - reach) as f64 <= f.x + f.w && (b[2] + reach) as f64 >= f.x && (b[1] - reach) as f64 <= f.y + f.h && (b[3] + reach) as f64 >= f.y;
+            if !near_box || best.is_some_and(|(z, _)| z >= f.z) {
+                continue;
+            }
+            let pts = scene::stroke_points(points, [f.x as f32, f.y as f32, f.w as f32, f.h as f32]);
+            let close = pts.windows(2).any(|w| line.iter().any(|p| scene::segment_distance(*p, w[0], w[1]) <= reach))
+                || (pts.len() == 1 && line.iter().any(|p| (p[0] - pts[0][0]).hypot(p[1] - pts[0][1]) <= reach));
+            if close {
+                best = Some((f.z, *d));
+            }
+        }
+        best.map(|(_, d)| d)
+    }
+
+    /// The other lines of the drawing a line belongs to.
+    pub(crate) fn drawing_mates(&self, id: &Uuid) -> Vec<Uuid> {
+        let Some(ItemKind::Stroke { drawing: Some(d), .. }) = self.doc.item(id).map(|i| &i.kind) else { return Vec::new() };
+        self.doc
+            .board
+            .live_items()
+            .filter(|i| i.id != *id && matches!(&i.kind, ItemKind::Stroke { drawing: Some(x), .. } if x == d))
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// Lines drawn on any of these items.
+    pub(crate) fn lines_on(&self, ids: &std::collections::BTreeSet<Uuid>) -> Vec<BoardItem> {
+        self.doc.board.live_items().filter(|i| matches!(&i.kind, ItemKind::Stroke { on: Some(o), .. } if ids.contains(o))).cloned().collect()
+    }
+
     /// Adds a line drawn with the current brush, colour and size.
     pub fn add_stroke_with(&mut self, line: &[[f32; 2]], pressures: &[f32]) -> Option<Uuid> {
         let b = if self.pen.brush == Brush::Eraser { Brush::Pen } else { self.pen.brush };
         let width = self.pen.size() / self.camera.zoom;
         let (line, pressures) = brush::resample(line, pressures, brush::point_step(width, self.camera.zoom));
         let factors = brush::width_factors(&line, &pressures, width, b);
-        let (frame, kind) = stroke_item(&line, &factors, width, Some(self.pen.color.clone()), b, self.doc.top_z())?;
+        let on = self.picture_under(&line);
+        let drawing = Some(self.drawing_near(&line, on).unwrap_or_else(Uuid::new_v4));
+        let (frame, kind) = stroke_item(&line, &factors, width, Some(self.pen.color.clone()), b, self.doc.top_z(), on, drawing)?;
         let id = self.doc.add(vec![(frame, kind)])[0];
         self.needs_redraw = true;
         Some(id)
@@ -284,7 +382,7 @@ impl App {
             .cloned()
             .collect();
         for item in hits {
-            let ItemKind::Stroke { points, width, color, brush: b, widths } = &item.kind else { continue };
+            let ItemKind::Stroke { points, width, color, brush: b, widths, on, drawing } = &item.kind else { continue };
             let f = item.frame;
             let pts = scene::stroke_points(points, [f.x as f32, f.y as f32, f.w as f32, f.h as f32]);
             let factors: Vec<f32> = if widths.len() == pts.len() { widths.clone() } else { vec![1.0; pts.len()] };
@@ -308,7 +406,7 @@ impl App {
             let kinds: Vec<(Frame, ItemKind)> = parts
                 .iter()
                 .filter_map(|(line, fs)| {
-                    let (mut frame, kind) = stroke_item(line, fs, *width, color.clone(), Brush::from_name(b.as_deref()), 0.0)?;
+                    let (mut frame, kind) = stroke_item(line, fs, *width, color.clone(), Brush::from_name(b.as_deref()), 0.0, *on, *drawing)?;
                     frame.z = f.z; // stays at the same depth
                     Some((frame, kind))
                 })
@@ -384,7 +482,109 @@ mod tests {
     }
 
     fn strokes(a: &App) -> Vec<BoardItem> {
-        a.doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Stroke { .. })).cloned().collect()
+        let mut v: Vec<BoardItem> = a.doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Stroke { .. })).cloned().collect();
+        v.sort_by(|x, y| x.frame.z.total_cmp(&y.frame.z));
+        v
+    }
+
+    fn drawing_of(a: &App, id: &Uuid) -> Option<Uuid> {
+        match &a.doc.item(id)?.kind {
+            ItemKind::Stroke { drawing, .. } => *drawing,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn lines_drawn_close_together_are_one_drawing_picked_and_moved_together() {
+        let mut a = app();
+        a.key(Key::Char('d'));
+        drag(&mut a, [300.0, 300.0], [400.0, 300.0], Mods::default());
+        drag(&mut a, [300.0, 320.0], [400.0, 320.0], Mods::default()); // 20 px away: joins
+        drag(&mut a, [300.0, 600.0], [400.0, 600.0], Mods::default()); // far: its own
+        let s = strokes(&a);
+        assert_eq!(s.len(), 3);
+        let (d0, d1, d2) = (drawing_of(&a, &s[0].id), drawing_of(&a, &s[1].id), drawing_of(&a, &s[2].id));
+        assert!(d0.is_some());
+        assert_eq!(d0, d1);
+        assert_ne!(d0, d2);
+        // Pick one line: the whole drawing; drag it: both move.
+        a.key(Key::Char('d'));
+        let before: Vec<f64> = s.iter().map(|i| i.frame.x).collect();
+        drag(&mut a, [350.0, 300.0], [450.0, 300.0], Mods::default());
+        assert_eq!(a.selection.len(), 2);
+        let after: Vec<f64> = s.iter().map(|i| a.doc.item(&i.id).unwrap().frame.x).collect();
+        assert!((after[0] - before[0] - 100.0).abs() < 1.0 && (after[1] - before[1] - 100.0).abs() < 1.0, "{before:?} {after:?}");
+        assert!((after[2] - before[2]).abs() < 1e-6, "the far line stays");
+        // A copy is a separate drawing.
+        a.key(Key::Duplicate);
+        let copies: Vec<Uuid> = a.selection.iter().copied().collect();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(drawing_of(&a, &copies[0]), drawing_of(&a, &copies[1]));
+        assert_ne!(drawing_of(&a, &copies[0]), d0);
+    }
+
+    #[test]
+    fn lines_drawn_on_a_picture_move_resize_copy_and_delete_with_it() {
+        let mut a = app();
+        let frame = Frame { x: 200.0, y: 200.0, w: 400.0, h: 300.0, ..Default::default() };
+        let pic = a.doc.add(vec![(frame, ItemKind::Media { hash: wall_format::ContentHash::of(b"pic"), crop: None, look: Default::default() })])[0];
+        a.key(Key::Char('d'));
+        drag(&mut a, [300.0, 300.0], [500.0, 400.0], Mods::default()); // on the picture
+        drag(&mut a, [700.0, 600.0], [800.0, 650.0], Mods::default()); // off it
+        let s = strokes(&a);
+        let on = |a: &App, id: &Uuid| match &a.doc.item(id).unwrap().kind {
+            ItemKind::Stroke { on, .. } => *on,
+            _ => None,
+        };
+        assert_eq!(on(&a, &s[0].id), Some(pic));
+        assert_eq!(on(&a, &s[1].id), None);
+        a.key(Key::Char('d'));
+        // Move the picture (grab it away from the line).
+        drag(&mut a, [220.0, 480.0], [270.0, 480.0], Mods::default());
+        assert_eq!(a.selection, [pic].into());
+        assert!((a.doc.item(&s[0].id).unwrap().frame.x - s[0].frame.x - 50.0).abs() < 1.0);
+        assert!((a.doc.item(&s[1].id).unwrap().frame.x - s[1].frame.x).abs() < 1e-6);
+        // Resize it to double: the line doubles too, and stays on it.
+        let f = a.doc.item(&pic).unwrap().frame;
+        let line = a.doc.item(&s[0].id).unwrap().frame;
+        let corner = [(f.x + f.w) as f32, (f.y + f.h) as f32];
+        drag(&mut a, corner, [corner[0] + f.w as f32, corner[1] + f.h as f32], Mods::default());
+        let f2 = a.doc.item(&pic).unwrap().frame;
+        let line2 = a.doc.item(&s[0].id).unwrap().frame;
+        assert!((f2.w / f.w - 2.0).abs() < 0.02, "{f2:?}");
+        assert!((line2.w / line.w - 2.0).abs() < 0.02 && ((line2.x - f2.x) / (line.x - f.x) - 2.0).abs() < 0.02);
+        // One undo puts both back.
+        a.key(Key::Undo);
+        assert_eq!(a.doc.item(&pic).unwrap().frame.w, f.w);
+        assert!((a.doc.item(&s[0].id).unwrap().frame.w - line.w).abs() < 1e-6);
+        // A copy of the picture brings a copy of the line, on the copy.
+        a.selection = [pic].into();
+        a.key(Key::Duplicate);
+        let copy = *a.selection.iter().find(|id| matches!(a.doc.item(id).unwrap().kind, ItemKind::Media { .. })).unwrap();
+        assert!(strokes(&a).iter().any(|l| on(&a, &l.id) == Some(copy)));
+        // Deleting the picture deletes its line.
+        a.selection = [pic].into();
+        a.key(Key::Delete);
+        assert!(a.doc.item(&s[0].id).is_none_or(|i| i.deleted));
+        assert!(a.doc.item(&s[1].id).is_some_and(|i| !i.deleted));
+    }
+
+    #[test]
+    fn the_bar_stays_clear_of_the_side_panel_in_a_narrow_window() {
+        let mut a = app();
+        a.resize([800.0, 700.0]);
+        a.panel_open = true;
+        a.key(Key::Char('d'));
+        let panel = a.panel_layout().unwrap().rect;
+        let bar = a.pen_bar().unwrap();
+        assert!(bar.rect[0] + bar.rect[2] <= panel[0], "bar {:?} panel {:?}", bar.rect, panel);
+        assert!(bar.rect[3] > H, "two rows when one doesn't fit");
+        for (r, _) in &bar.hits {
+            assert!(r[0] >= bar.rect[0] && r[0] + r[2] <= bar.rect[0] + bar.rect[2] && r[1] + r[3] <= bar.rect[1] + bar.rect[3], "{r:?} inside {:?}", bar.rect);
+        }
+        // Wide window: one row.
+        a.resize([1800.0, 900.0]);
+        assert_eq!(a.pen_bar().unwrap().rect[3], H);
     }
 
     #[test]
@@ -426,7 +626,7 @@ mod tests {
         }
         // A straight line of only its two ends, as older boards have.
         let frame = Frame { x: 300.0, y: 450.0, w: 400.0, h: 1.0, ..Default::default() };
-        a.doc.add(vec![(frame, ItemKind::Stroke { points: vec![[0.0, 0.5], [1.0, 0.5]], width: 4.0, color: None, brush: None, widths: Vec::new() })]);
+        a.doc.add(vec![(frame, ItemKind::Stroke { points: vec![[0.0, 0.5], [1.0, 0.5]], width: 4.0, color: None, brush: None, widths: Vec::new(), on: None, drawing: None })]);
         let before = a.doc.board.items.len();
         a.key(Key::Char('e'));
         // Two moves, far apart, across all four.

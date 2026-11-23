@@ -260,7 +260,7 @@ impl Scene {
                         }
                     }
                 }
-                ItemKind::Stroke { points, width, color, brush, widths } => {
+                ItemKind::Stroke { points, width, color, brush, widths, .. } => {
                     let a = crate::brush::Brush::from_name(brush.as_deref()).profile().alpha;
                     let ink = parse_hex(color.as_deref()).map_or(TEXT(), |c| [c[0], c[1], c[2], 1.0]);
                     // Premultiplied.

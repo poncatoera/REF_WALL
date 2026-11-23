@@ -655,6 +655,9 @@ impl App {
             return 0;
         }
         self.end_edit();
+        // Lines drawn on the pictures go along.
+        let on: Vec<Uuid> = self.lines_on(&self.selection).iter().map(|i| i.id).collect();
+        self.selection.extend(on);
         let picked: Vec<wall_format::BoardItem> = self.selection.iter().filter_map(|id| self.doc.item(id).cloned()).filter(|i| !matches!(i.kind, ItemKind::Arrow { .. })).collect();
         if picked.is_empty() {
             return 0;
@@ -707,10 +710,7 @@ impl App {
             crate::doc::shift(&mut i, dx, dy);
             i
         };
-        let new_ids = doc.add(picked.iter().map(|i| {
-            let s = shifted(i);
-            (s.frame, s.kind)
-        }).collect());
+        let new_ids = doc.add_copies(&picked.iter().map(shifted).collect::<Vec<_>>());
         let map: HashMap<Uuid, Uuid> = picked.iter().map(|i| i.id).zip(new_ids).collect();
         let remap = |e: &wall_format::ArrowEnd| match e {
             wall_format::ArrowEnd::Item { id } => wall_format::ArrowEnd::Item { id: map[id] },

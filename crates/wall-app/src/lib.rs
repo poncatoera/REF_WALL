@@ -137,7 +137,7 @@ enum Gesture {
     /// Ctrl/Cmd-dragging a corner of a picture: crops instead of scaling.
     Crop { original: BoardItem, start: [f32; 2], left: bool, top: bool },
     /// Dragging an item's bottom-right handle.
-    Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64> },
+    Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64>, attached: Vec<BoardItem> },
     /// Dragging along a video's scrub strip.
     Scrub { hash: ContentHash, x: f32, w: f32, duration: f64 },
     /// Dragging a tool out of the rail; released on the board, it makes
@@ -1095,7 +1095,8 @@ impl App {
         if let Some(item) = self.resize_handle_at(board) {
             // Pictures and videos keep their shape unless Shift is held.
             let aspect = matches!(item.kind, ItemKind::Media { .. }).then(|| item.frame.w / item.frame.h.max(1e-6)).filter(|_| !mods.shift);
-            self.gesture = Gesture::Resize { original: item, start: board, aspect };
+            let attached = self.lines_on(&[item.id].into());
+            self.gesture = Gesture::Resize { original: item, start: board, aspect, attached };
             return;
         }
         if let Some((id, k)) = hit.and_then(|id| self.todo_box_at(id, board).map(|k| (id, k))) {
@@ -1155,12 +1156,20 @@ impl App {
         }
         match hit {
             Some(id) => {
+                // A line of a drawing picks the whole drawing.
+                let mates = self.drawing_mates(&id);
                 if mods.shift {
-                    if !self.selection.remove(&id) {
+                    if self.selection.remove(&id) {
+                        for m in &mates {
+                            self.selection.remove(m);
+                        }
+                    } else {
                         self.selection.insert(id);
+                        self.selection.extend(mates);
                     }
                 } else if !self.selection.contains(&id) {
                     self.selection = [id].into();
+                    self.selection.extend(mates);
                 }
                 let originals = self.drag_set();
                 let snap = (!mods.command).then(|| self.snap_targets(&originals)).flatten();
@@ -1211,6 +1220,9 @@ impl App {
                 ids.extend(self.items_in([f.x as f32, f.y as f32, (f.x + f.w) as f32, (f.y + f.h) as f32]));
             }
         }
+        // Lines drawn on a picture go with it.
+        let on: Vec<Uuid> = self.lines_on(&ids).iter().map(|i| i.id).collect();
+        ids.extend(on);
         ids.iter().filter_map(|id| self.doc.item(id).cloned()).collect()
     }
 
@@ -1251,7 +1263,7 @@ impl App {
                 let item = crop_item(original, [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64], *left, *top);
                 self.doc.preview(item);
             }
-            Gesture::Resize { original, start, aspect } => {
+            Gesture::Resize { original, start, aspect, attached } => {
                 let mut item = original.clone();
                 let min = 20.0;
                 item.frame.w = (original.frame.w + (board[0] - start[0]) as f64).max(min);
@@ -1264,7 +1276,11 @@ impl App {
                         item.frame.w = item.frame.h * a;
                     }
                 }
+                let lines: Vec<BoardItem> = attached.iter().map(|l| drawing::follow_frame(l, original.frame, item.frame)).collect();
                 self.doc.preview(item);
+                for l in lines {
+                    self.doc.preview(l);
+                }
             }
             Gesture::Scrub { hash, x, w, duration } => {
                 let cmd = VideoCommand::Seek(video::time_at(board[0], *x, *w, *duration));
@@ -1345,10 +1361,20 @@ impl App {
                     self.selection = [id].into();
                 }
             }
-            Gesture::Crop { original, .. } | Gesture::Resize { original, .. } => {
+            Gesture::Crop { original, .. } => {
                 if let Some(after) = self.doc.board.items.get(&original.id).cloned() {
                     self.doc.commit_edit(Some(&original), after);
                 }
+            }
+            Gesture::Resize { original, attached, .. } => {
+                // The picture and the lines on it: one undo step.
+                let depth = self.doc.undo_depth();
+                for o in std::iter::once(&original).chain(&attached) {
+                    if let Some(after) = self.doc.board.items.get(&o.id).cloned() {
+                        self.doc.commit_edit(Some(o), after);
+                    }
+                }
+                self.doc.join_undo_since(depth);
             }
             _ => {}
         }
@@ -1466,6 +1492,9 @@ impl App {
         match key {
             Key::Delete | Key::Backspace => {
                 let mut sel = std::mem::take(&mut self.selection);
+                // Lines drawn on deleted pictures go with them.
+                let on: Vec<Uuid> = self.lines_on(&sel).iter().map(|i| i.id).collect();
+                sel.extend(on);
                 // Arrows attached to deleted items go with them.
                 let attached: Vec<Uuid> = self
                     .doc
@@ -1843,17 +1872,12 @@ impl App {
     /// Adds copies of `items` with new ids, moved by `offset`, on top.
     fn paste_items(&mut self, mut items: Vec<BoardItem>, offset: [f64; 2]) -> Vec<Uuid> {
         items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
-        let kinds = items
-            .into_iter()
-            .map(|i| {
-                let mut f = i.frame;
-                f.x += offset[0];
-                f.y += offset[1];
-                (f, i.kind)
-            })
-            .collect();
+        for i in &mut items {
+            i.frame.x += offset[0];
+            i.frame.y += offset[1];
+        }
         self.needs_redraw = true;
-        self.doc.add(kinds)
+        self.doc.add_copies(&items)
     }
 
     /// The selection as text for the system clipboard. Other apps see JSON;
@@ -2944,7 +2968,7 @@ impl App {
         let (x, y, w, h) = (b[0] - pad, b[1] - pad, b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad);
         let points = line.iter().map(|p| [(p[0] - x) / w, (p[1] - y) / h]).collect();
         let frame = Frame { x: x as f64, y: y as f64, w: w as f64, h: h as f64, z: self.doc.top_z() + 1.0, ..Default::default() };
-        let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None, brush: None, widths: Vec::new() })])[0];
+        let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None, brush: None, widths: Vec::new(), on: None, drawing: None })])[0];
         self.needs_redraw = true;
         Some(id)
     }

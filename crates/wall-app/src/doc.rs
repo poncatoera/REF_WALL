@@ -98,13 +98,37 @@ impl Document {
 
     /// Adds new items on top of everything else. Returns their ids.
     pub fn add(&mut self, kinds: Vec<(Frame, ItemKind)>) -> Vec<Uuid> {
+        self.add_with_ids(kinds.into_iter().map(|(f, k)| (Uuid::new_v4(), f, k)).collect())
+    }
+
+    /// Copies of `items` with new ids, on top. Lines drawn on a copied
+    /// picture follow the copy (lines whose picture isn't copied come loose),
+    /// and copied drawings get their own drawing ids.
+    pub fn add_copies(&mut self, items: &[BoardItem]) -> Vec<Uuid> {
+        let ids: std::collections::HashMap<Uuid, Uuid> = items.iter().map(|i| (i.id, Uuid::new_v4())).collect();
+        let mut drawings: std::collections::HashMap<Uuid, Uuid> = Default::default();
+        let copies = items
+            .iter()
+            .map(|i| {
+                let mut kind = i.kind.clone();
+                if let ItemKind::Stroke { on, drawing, .. } = &mut kind {
+                    *on = on.and_then(|o| ids.get(&o).copied());
+                    *drawing = drawing.map(|d| *drawings.entry(d).or_insert_with(Uuid::new_v4));
+                }
+                (ids[&i.id], i.frame, kind)
+            })
+            .collect();
+        self.add_with_ids(copies)
+    }
+
+    fn add_with_ids(&mut self, kinds: Vec<(Uuid, Frame, ItemKind)>) -> Vec<Uuid> {
         let mut z = self.top_z();
         let items: Vec<BoardItem> = kinds
             .into_iter()
-            .map(|(mut frame, kind)| {
+            .map(|(id, mut frame, kind)| {
                 z += 1.0;
                 frame.z = z;
-                BoardItem { id: Uuid::new_v4(), frame, kind, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false }
+                BoardItem { id, frame, kind, rev: 0, updated_ms: 0, updated_by: String::new(), deleted: false }
             })
             .collect();
         let ids = items.iter().map(|i| i.id).collect();
