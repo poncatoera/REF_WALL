@@ -7,6 +7,12 @@ send_metrics = false
 workers_dev = true
 preview_urls = false
 
+# The web version of Wall, built by tools/build-server.ps1. Requests for these
+# files are free and not counted.
+[assets]
+directory = "./public"
+run_worker_first = ["/api/*"]
+
 [vars]
 # SHA-256 (hex) of the owner key that Wall on the owner's PC keeps. The key
 # itself is never on the server. Empty: nobody is the owner, nothing works.

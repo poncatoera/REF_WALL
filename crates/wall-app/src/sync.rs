@@ -4,11 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
-use wall_format::{Board, BoardItem, ContentHash, ItemSidecar};
+use wall_format::{Board, BoardItem, ContentHash, ItemKind, ItemSidecar, MediaKind};
 use wall_sync::{Incoming, Meta, State};
 
 use crate::sidebar::BoardMeta;
-use crate::{App, Camera, Document};
+use crate::{App, AppError, Camera, Document, Picture};
 
 impl App {
     /// Boards in memory: the open one and those visited. None while a drag
@@ -88,6 +88,70 @@ impl App {
         self.sync_put_sidecar(sc);
         self.sync_load_pictures();
         self.needs_redraw = true;
+    }
+
+    // ---- without a library folder (the web, opened by a share link) ----
+
+    /// Details of pictures and videos, whose files come when they're shown.
+    pub fn sync_know(&mut self, sidecars: &[ItemSidecar]) {
+        for s in sidecars {
+            self.sidecars.insert(s.hash.clone(), s.clone());
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Every picture's and video's details.
+    pub fn sync_sidecars(&self) -> Vec<ItemSidecar> {
+        self.sidecars.values().cloned().collect()
+    }
+
+    /// What the open board shows that has no file here yet.
+    pub fn sync_missing_here(&self) -> Vec<ItemSidecar> {
+        let mut seen = BTreeSet::new();
+        self.doc
+            .board
+            .live_items()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Media { hash, .. } => Some(hash),
+                _ => None,
+            })
+            .filter(|h| !self.pictures.contains_key(*h) && !self.videos.contains_key(*h) && seen.insert((*h).clone()))
+            .filter_map(|h| self.sidecars.get(h).cloned())
+            .collect()
+    }
+
+    /// A file that was fetched. True for a video, which needs a player.
+    pub fn sync_media_bytes(&mut self, sc: &ItemSidecar, bytes: &[u8]) -> Result<bool, AppError> {
+        self.needs_redraw = true;
+        if sc.kind == MediaKind::Video {
+            self.videos.insert(sc.hash.clone(), (sc.ext.clone(), sc.width, sc.height));
+            return Ok(true);
+        }
+        // A small file can claim to be a huge picture: limits before decoding.
+        let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| AppError::Other(e.to_string()))?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(300_000_000);
+        r.limits(limits);
+        let rgba = r.decode()?.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        self.pictures.insert(sc.hash.clone(), Picture::Pending { rgba: rgba.into_raw(), width, height });
+        Ok(false)
+    }
+
+    /// Opens the top of what a link reaches, in place of the empty board
+    /// the page started with.
+    pub fn sync_open_top(&mut self, blank: Uuid) -> bool {
+        let top = self.board_meta.iter().filter(|(id, m)| **id != blank && m.parent.is_none_or(|p| !self.board_meta.contains_key(&p))).min_by_key(|(_, m)| m.created_ms).map(|(id, _)| *id);
+        let Some(top) = top else { return false };
+        self.go_to_board(top);
+        self.nav.clear();
+        self.parked.remove(&blank);
+        self.board_meta.remove(&blank);
+        self.board_names.remove(&blank);
+        self.fit_view();
+        self.doc.board.id == top
     }
 
     fn sync_sidecar(&self, hash: &ContentHash) -> Option<ItemSidecar> {
@@ -186,7 +250,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::{Button, Key, Mods};
-    use wall_format::{Frame, ItemKind, Library};
+    use wall_format::{Frame, Library};
 
     fn incoming(app: &App, name: &str) -> (Incoming, Uuid) {
         let m = Meta { id: Uuid::new_v4(), name: name.into(), parent: Some(app.board_id()), created_ms: 5, deleted: false };
@@ -272,6 +336,34 @@ mod tests {
         a.sync_apply(&last, &State::default()).unwrap();
         assert_eq!(a.board_id(), home);
         assert!(lib.board_ids().unwrap().contains(&home));
+    }
+
+    #[test]
+    fn a_shared_board_opens_without_a_library() {
+        let mut a = App::new(Board::new("Wall", 0), "web");
+        a.resize([1000.0, 800.0]);
+        let blank = a.board_id();
+        let top = Meta { id: Uuid::new_v4(), name: "Shared".into(), parent: Some(Uuid::new_v4()), created_ms: 1, deleted: false };
+        let inner = Meta { id: Uuid::new_v4(), name: "Inside".into(), parent: Some(top.id), created_ms: 0, deleted: false };
+        let mut png = Vec::new();
+        image::RgbaImage::new(4, 3).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let hash = ContentHash::of(&png);
+        let sc: ItemSidecar = serde_json::from_value(serde_json::json!({"hash": hash, "kind": "image", "ext": "png", "width": 4, "height": 3, "bytes": 9, "added_ms": 1, "tags": []})).unwrap();
+        let mut pic = note("", 1, "x");
+        pic.kind = ItemKind::Media { hash: hash.clone(), crop: None, look: Default::default() };
+        let inc = Incoming { boards: vec![inner.clone(), top.clone()], items: vec![(top.id, pic), (top.id, note("hello", 1, "x"))], sidecars: vec![sc.clone()], ..Default::default() };
+        a.sync_apply(&inc, &State::default()).unwrap();
+        a.sync_know(&inc.sidecars);
+        assert!(a.sync_open_top(blank));
+        assert_eq!((a.board_name().as_str(), a.item_count(), a.board_meta.len()), ("Shared", 2, 2));
+        assert_eq!(a.sync_missing_here().len(), 1);
+        assert!(!a.sync_media_bytes(&sc, &png).unwrap());
+        assert!(a.sync_missing_here().is_empty());
+        assert!(a.sync_media_bytes(&sc, b"not a picture").is_err());
+        // Out of reach now: the board goes, what's left opens.
+        let gone = Incoming { out_of_reach: vec![top.id], ..Default::default() };
+        a.sync_apply(&gone, &State::default()).unwrap();
+        assert_eq!(a.board_name(), "Inside");
     }
 
     #[test]

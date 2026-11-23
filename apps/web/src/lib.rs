@@ -11,6 +11,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent, WebGl2RenderingContext, WheelEvent};
 
+mod cloud;
+
 struct State {
     /// Playing `<video>` elements and the textures their frames go to.
     videos: Vec<(web_sys::HtmlVideoElement, wall_app::ContentHash, wall_render::ImageId)>,
@@ -180,7 +182,10 @@ fn dpr() -> f32 {
 #[wasm_bindgen]
 pub fn start_with_videos(canvas_id: &str, demo_videos: Vec<String>) -> Result<(), JsValue> {
     let state = start_state(canvas_id)?;
-    wasm_bindgen_futures::spawn_local(startup(state, demo_videos));
+    match cloud::link() {
+        Some(key) => wasm_bindgen_futures::spawn_local(cloud::run(state, key)),
+        None => wasm_bindgen_futures::spawn_local(startup(state, demo_videos)),
+    }
     Ok(())
 }
 
@@ -356,7 +361,11 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         .dyn_into()?;
     let gl = glow::Context::from_webgl2_context(webgl);
     let renderer = unsafe { Renderer::new(gl, GlslTarget::Es300) }.map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let mut app = App::demo(2000);
+    let share = cloud::link();
+    let mut app = match &share {
+        Some(_) => cloud::empty_app(),
+        None => App::demo(2000),
+    };
     // Theme and grid as the person left them.
     let stored = |k: &str| storage().and_then(|s| s.get_item(k).ok().flatten());
     let light = stored("wall.light").as_deref() == Some("1");
@@ -371,7 +380,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         saved_look: (light, grid),
         saved_ui,
         // `?demo` shows the demo as it ships, without saving.
-        store: !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
+        // A shared library stays in the cloud, not among this browser's boards.
+        store: share.is_none() && !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
         loaded: false,
         saved_stamp: 0,
         checked_ms: 0.0,

@@ -1,0 +1,295 @@
+//! A library or board opened by a share link (`…/#share=<secret>`): fetched
+//! from the server this page came from, and kept up to date while it's open.
+//! With an edit link, changes go back up.
+
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use serde::Deserialize;
+use uuid::Uuid;
+use wall_app::App;
+use wall_format::{Board, ContentHash, ItemSidecar};
+use wall_sync::{Incoming, Reply, ReplyItem, State as Sync};
+use wasm_bindgen::prelude::*;
+
+use crate::State;
+
+#[wasm_bindgen(module = "/js/cloud.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = cloudCall, catch)]
+    fn cloud_call(method: &str, path: &str, key: &str, body: &JsValue) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = cloudNote)]
+    fn note(text: &str);
+}
+
+/// The secret in this page's address, if it was opened by a link.
+pub fn link() -> Option<String> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    let key = hash.strip_prefix("#share=")?;
+    let fine = (20..=200).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    fine.then(|| key.to_owned())
+}
+
+/// Nothing yet; edits made here carry a name of their own.
+pub fn empty_app() -> App {
+    let me = Uuid::new_v4().simple().to_string();
+    App::new(Board::new("Wall", 0), &format!("web-{}", &me[..8]))
+}
+
+enum Fail {
+    /// Try again later.
+    Offline,
+    /// The link doesn't work (any more).
+    Refused(String),
+    Full,
+    Missing,
+    Other(String),
+}
+
+async fn call(key: &str, method: &str, path: &str, body: &JsValue) -> Result<Vec<u8>, Fail> {
+    let p = cloud_call(method, path, key, body).map_err(|_| Fail::Offline)?;
+    let r: js_sys::Array = wasm_bindgen_futures::JsFuture::from(p).await.map_err(|_| Fail::Offline)?.into();
+    let status = r.get(0).as_f64().unwrap_or(0.0) as u16;
+    let bytes = js_sys::Uint8Array::new(&r.get(1)).to_vec();
+    if status == 200 {
+        return Ok(bytes);
+    }
+    let said = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| Some(v.get("error")?.as_str()?.chars().take(200).collect::<String>()));
+    let Some(said) = said else { return Err(Fail::Offline) };
+    Err(match status {
+        401 | 403 => Fail::Refused(said),
+        404 => Fail::Missing,
+        507 => Fail::Full,
+        409 | 429 | 500..=599 => Fail::Offline,
+        _ => Fail::Other(said),
+    })
+}
+
+async fn json<T: for<'a> Deserialize<'a>>(key: &str, method: &str, path: &str, body: Option<String>) -> Result<T, Fail> {
+    let b = body.map_or(JsValue::NULL, |b| JsValue::from_str(&b));
+    serde_json::from_slice(&call(key, method, path, &b).await?).map_err(|e| Fail::Other(e.to_string()))
+}
+
+async fn sleep(ms: i32) {
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(p).await;
+}
+
+#[derive(Deserialize)]
+struct Me {
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct Page {
+    items: Vec<ReplyItem>,
+    sidecars: Vec<serde_json::Value>,
+    after: String,
+    more: bool,
+}
+
+pub async fn run(s: Rc<RefCell<State>>, key: String) {
+    note("Opening…");
+    let mut view = true;
+    let mut known = false;
+    let mut sync = Sync::default();
+    let blank = s.borrow().app.board_id();
+    let mut opened = false;
+    let mut uploads: Vec<(ContentHash, Vec<u8>)> = Vec::new();
+    let mut failed = HashSet::new();
+    let mut quiet = 0u32;
+    loop {
+        let done = async {
+            if !known {
+                view = json::<Me>(&key, "GET", "me", None).await?.role == "view";
+                known = true;
+            }
+            let moved = round(&s, &key, &mut sync, view, &mut uploads).await?;
+            if !opened {
+                opened = s.borrow_mut().app.sync_open_top(blank);
+            }
+            let files = files(&s, &key, &mut failed).await?;
+            Ok::<bool, Fail>(moved || files)
+        }
+        .await;
+        match done {
+            Ok(moved) => {
+                quiet = if moved { 0 } else { quiet + 1 };
+                note(match (opened, view) {
+                    (false, _) => "There's nothing on this link.",
+                    (true, true) => "View only: changes you make here aren't saved",
+                    (true, false) => "",
+                });
+            }
+            Err(Fail::Refused(e)) => {
+                note(&format!("Not up to date: {e}"));
+                return;
+            }
+            Err(Fail::Full) => {
+                note("The cloud space is full: new files stay in this browser only until you leave");
+                uploads.clear();
+                quiet += 1;
+            }
+            Err(Fail::Offline) => {
+                note("No connection; trying again…");
+                quiet += 4;
+            }
+            Err(Fail::Missing) => quiet += 1,
+            Err(Fail::Other(e)) => {
+                web_sys::console::warn_1(&format!("wall: cloud: {e}").into());
+                quiet += 4;
+            }
+        }
+        // Often while things change, then every half minute; less in a tab
+        // nobody looks at (the free plan's requests are counted).
+        let hidden = web_sys::window().and_then(|w| w.document()).is_some_and(|d| d.hidden());
+        let wait = match (hidden, quiet < 24) {
+            (true, _) => 120_000,
+            (false, true) => 5_000,
+            (false, false) => 30_000,
+        };
+        sleep(wait).await;
+    }
+}
+
+/// Sends what changed here and merges what changed there.
+async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, uploads: &mut Vec<(ContentHash, Vec<u8>)>) -> Result<bool, Fail> {
+    let mut moved = false;
+    loop {
+        // Not under a drag or while typing.
+        let (boards, sidecars) = loop {
+            let got = {
+                let st = s.borrow();
+                st.app.sync_boards().map(|b| (b, st.app.sync_sidecars()))
+            };
+            match got {
+                Some(x) => break x,
+                None => sleep(500).await,
+            }
+        };
+        uploads.extend(s.borrow_mut().app.take_new_media().into_iter().map(|m| (m.hash, m.bytes)));
+        if view {
+            uploads.clear();
+        }
+        let mut push = if view { sync.collect([], &[], &[]) } else { sync.collect(&boards, &sidecars, &[]) };
+        let more_to_send = push.more;
+        moved |= !push.is_empty();
+        let before = sync.clone();
+        let mut inc = Incoming::default();
+        loop {
+            let body = serde_json::to_string(&push).map_err(|e| Fail::Other(e.to_string()))?;
+            let reply: Reply = match json(key, "POST", "sync", Some(body)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    sync.seq = before.seq;
+                    sync.scope = before.scope;
+                    return Err(e);
+                }
+            };
+            let (more, seq) = (reply.more, reply.seq);
+            let part = sync.take(&push, reply);
+            inc.boards.extend(part.boards);
+            inc.items.extend(part.items);
+            inc.sidecars.extend(part.sidecars);
+            inc.out_of_reach.extend(part.out_of_reach);
+            inc.newly_reached.extend(part.newly_reached);
+            if !more || seq <= push.since {
+                break;
+            }
+            push = wall_sync::Push { since: sync.seq, known: sync.scope.iter().flatten().copied().collect(), ..Default::default() };
+        }
+        for b in std::mem::take(&mut inc.newly_reached) {
+            let mut after = String::new();
+            loop {
+                let p: Page = match json(key, "GET", &format!("items?board={b}&after={after}"), None).await {
+                    Ok(p) => p,
+                    Err(Fail::Missing) => break,
+                    Err(e) => {
+                        *sync = before;
+                        return Err(e);
+                    }
+                };
+                sync.take_items(p.items, p.sidecars, &mut inc);
+                if !p.more || p.after.is_empty() || p.after.len() > 40 {
+                    break;
+                }
+                after = p.after;
+            }
+        }
+        inc.boards.retain(|m| sync.boards.get(&m.id).map(|b| &b.meta) != Some(m));
+        inc.items.retain(|(b, i)| sync.boards.get(b).and_then(|b| b.items.get(&i.id)).is_none_or(|(rev, by)| (i.rev, i.updated_by.as_str()) > (*rev, by.as_str())));
+        if !inc.is_empty() {
+            moved = true;
+            let kept = loop {
+                let k = s.borrow_mut().app.sync_apply(&inc, sync);
+                match k {
+                    Some(k) => break k,
+                    None => sleep(500).await,
+                }
+            };
+            s.borrow_mut().app.sync_know(&inc.sidecars);
+            sync.merged(&inc, &kept);
+        }
+        if !more_to_send {
+            break;
+        }
+    }
+    while let Some((hash, bytes)) = uploads.first() {
+        let body = js_sys::Uint8Array::from(&bytes[..]);
+        match call(key, "PUT", &format!("media/{hash}"), &body).await {
+            Ok(_) => moved = true,
+            Err(Fail::Other(e)) => web_sys::console::warn_1(&format!("wall: {hash}: {e}").into()),
+            Err(e) => return Err(e),
+        }
+        uploads.remove(0);
+    }
+    Ok(moved)
+}
+
+/// Fetches files the open board shows, checked to be the ones asked for.
+async fn files(s: &Rc<RefCell<State>>, key: &str, failed: &mut HashSet<ContentHash>) -> Result<bool, Fail> {
+    let mut moved = false;
+    loop {
+        let next: Option<ItemSidecar> = s.borrow().app.sync_missing_here().into_iter().find(|m| !failed.contains(&m.hash));
+        let Some(sc) = next else { return Ok(moved) };
+        let bytes = match call(key, "GET", &format!("media/{}", sc.hash), &JsValue::NULL).await {
+            Ok(b) => b,
+            // Not uploaded yet from where it was added: look again later.
+            Err(Fail::Missing) => return Ok(moved),
+            Err(e) => return Err(e),
+        };
+        moved = true;
+        if ContentHash::of(&bytes) != sc.hash {
+            web_sys::console::warn_1(&format!("wall: {} arrived damaged", sc.hash).into());
+            failed.insert(sc.hash.clone());
+            continue;
+        }
+        let video = s.borrow_mut().app.sync_media_bytes(&sc, &bytes);
+        match video {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Err(e) = play(s, &sc, &bytes).await {
+                    web_sys::console::warn_1(&format!("wall: video: {}", crate::err_text(&e)).into());
+                    failed.insert(sc.hash.clone());
+                }
+            }
+            Err(e) => {
+                web_sys::console::warn_1(&format!("wall: {}: {e}", sc.hash).into());
+                failed.insert(sc.hash.clone());
+            }
+        }
+    }
+}
+
+async fn play(s: &Rc<RefCell<State>>, sc: &ItemSidecar, bytes: &[u8]) -> Result<(), JsValue> {
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type(crate::video_mime(&sc.ext));
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
+    crate::attach_player(s.clone(), &blob, sc.hash.clone(), sc.width, sc.height).await
+}
