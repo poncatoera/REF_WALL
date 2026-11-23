@@ -2791,6 +2791,7 @@ name = "wall-cloud"
 version = "0.1.0"
 dependencies = [
  "image",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

@@ -57,6 +57,9 @@ impl Live {
         let (out, rx) = channel();
         let url = live_url(server);
         let (key, name) = (key.to_owned(), name.to_owned());
+        // TLS needs a crypto provider chosen once per program; ring, as
+        // ureq uses (an Err only means one is set already).
+        let _ = rustls::crypto::ring::default_provider().install_default();
         if let Some(url) = url {
             let _ = std::thread::Builder::new().name("wall-live".into()).spawn(move || run(url, key, name, inbox, out));
         }
