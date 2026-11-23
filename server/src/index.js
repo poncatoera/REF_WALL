@@ -77,6 +77,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
+      // Keys never over plain http (except on this computer, for tests).
+      if (url.protocol !== "https:" && !["127.0.0.1", "localhost"].includes(url.hostname)) throw new Refuse(403, "use https");
       if (!url.pathname.startsWith("/api/")) return new Response("Not found", { status: 404 });
       const who = await bearer(request);
       const path = url.pathname.slice(5);

@@ -26,6 +26,7 @@ Set-Content -Path (Join-Path $out "_headers") -Encoding ascii -Value @"
   Referrer-Policy: no-referrer
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
+  Strict-Transport-Security: max-age=31536000
 "@
 # Nothing that goes public may name this computer's user.
 $name = [regex]::Escape($env:USERNAME)

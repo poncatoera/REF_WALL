@@ -10,6 +10,10 @@
     canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
   </style>
   <script>
+    // Never over plain http: a share link's secret would go along unprotected.
+    if (location.protocol === "http:" && !["127.0.0.1", "localhost"].includes(location.hostname)) {
+      location.replace("https:" + location.href.slice(5));
+    }
     // The theme Wall last used (it keeps this in sync), before the first frame.
     try { if (localStorage.getItem("wall.light") === "1") document.documentElement.dataset.theme = "light"; } catch (e) {}
   </script>
