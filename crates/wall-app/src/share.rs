@@ -167,7 +167,7 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
             Some(b) => card.above.iter().find(|(id, _)| *id == b).map(|(_, name)| Some(name.clone())),
         };
         let mine: Vec<(&ShareLink, Option<String>)> = card.links.iter().flatten().filter_map(|k| Some((k, via(k)?))).collect();
-        texts.push(TextRun { text: if mine.is_empty() { "NO LINKS OPEN THIS BOARD".into() } else { "LINKS THAT OPEN THIS BOARD".into() }, at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
+        texts.push(TextRun { text: if mine.is_empty() { "No links open this board".into() } else { "Links that open this board".into() }, at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
         y += 16.0;
         for (k, through) in mine.iter().take(8) {
             let what = if k.edit { "Can edit" } else { "View only" };

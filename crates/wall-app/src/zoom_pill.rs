@@ -54,6 +54,10 @@ impl App {
         layout(&mut self.font, self.camera.zoom, self.cursor, self.viewport)
     }
 
+    pub(crate) fn zoom_pill_rect(&mut self) -> [f32; 4] {
+        self.zoom_pill_layout().rect
+    }
+
     /// A press on the zoom pill. True when it was used.
     pub(crate) fn zoom_pill_press(&mut self, pos: [f32; 2]) -> bool {
         let l = self.zoom_pill_layout();

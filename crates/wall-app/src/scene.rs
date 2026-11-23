@@ -202,14 +202,14 @@ impl Scene {
             let marks = (run.boxes.len(), run.glyphs.len(), run.curves.len(), run.see_through.len());
             match &item.kind {
                 ItemKind::Group { name, color } => {
-                    let c = parse_hex(color.as_deref()).unwrap_or([0.6, 0.6, 0.65]);
-                    run.boxes.push(BoxInstance {
-                        rect,
-                        fill: crate::theme::tinted_group(c).0,
-                        stroke: crate::theme::tinted_group(c).1,
-                        shape: [6.0, 1.0],
-                    });
-                    label = Some((name.as_str(), crate::theme::group_label(c)));
+                    // Without a colour a group is a quiet neutral frame.
+                    let th = crate::theme::t();
+                    let (fill, stroke, ink) = match parse_hex(color.as_deref()) {
+                        Some(c) => (crate::theme::tinted_group(c).0, crate::theme::tinted_group(c).1, crate::theme::group_label(c)),
+                        None => (th.hover, th.card_stroke, th.dim),
+                    };
+                    run.boxes.push(BoxInstance { rect, fill, stroke, shape: [6.0, 1.0] });
+                    label = Some((name.as_str(), ink));
                 }
                 ItemKind::Media { hash, crop, look } => {
                     // Placeholder under the picture, seen until its pixels (or a
@@ -576,10 +576,10 @@ pub fn overlays(doc: &Document, selection: &BTreeSet<Uuid>, marquee: Option<[f32
         .map(|i| {
             let f = i.frame;
             BoxInstance {
-                rect: [f.x as f32 - 3.0 * px, f.y as f32 - 3.0 * px, f.w as f32 + 6.0 * px, f.h as f32 + 6.0 * px],
+                rect: [f.x as f32 - 2.5 * px, f.y as f32 - 2.5 * px, f.w as f32 + 5.0 * px, f.h as f32 + 5.0 * px],
                 fill: [0.0; 4],
                 stroke: ACCENT(),
-                shape: [6.0 * px, 2.0 * px],
+                shape: [5.0 * px, 1.5 * px],
             }
         })
         .collect();

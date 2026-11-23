@@ -254,7 +254,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     let mut y = TOP + PAD;
 
     // Header: kind and a close button.
-    l.text(info.kind.to_uppercase(), [left, y + 11.0], 11.5, DIM());
+    l.text(info.kind.clone(), [left, y + 11.0], 12.5, INK());
     let close = [x0 + WIDTH - PAD - 18.0, y - 4.0, 22.0, 22.0];
     l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, DIM());
     l.hits.push((close, Action::Close));
@@ -305,7 +305,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Video controls: play/pause and speed.
     if let Some(v) = &info.video {
         divider(&mut l, x0, &mut y);
-        l.text("PLAYBACK", [left, y + 11.0], 11.0, DIM());
+        l.text("Playback", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let play = [left, y, 64.0, 28.0];
         l.rect(play, FIELD(), LINE(), crate::theme::radius::CONTROL);
@@ -375,7 +375,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Colour swatches.
     if let Some(current) = &info.color {
         divider(&mut l, x0, &mut y);
-        l.text("COLOUR", [left, y + 11.0], 11.0, DIM());
+        l.text("Colour", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let n = PALETTE.len() + 1;
         let s = 26.0;
@@ -402,7 +402,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Tags: chips with a remove button, then an "add tag" box.
     if let Some(tags) = &info.tags {
         divider(&mut l, x0, &mut y);
-        l.text("TAGS", [left, y + 11.0], 11.0, DIM());
+        l.text("Tags", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         let (h, size) = (24.0, 12.5);
         let mut x = left;
@@ -469,7 +469,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
     // Board panel: every tag with its count; a click filters the board.
     if let Some(tags) = &info.board_tags {
         divider(&mut l, x0, &mut y);
-        l.text("TAGS ON THIS BOARD", [left, y + 11.0], 11.0, DIM());
+        l.text("Tags on this board", [left, y + 11.0], 11.0, DIM());
         y += 20.0;
         if tags.is_empty() {
             l.text("No tags yet. Select a picture to add some.", [left, y + 13.0], 12.5, DIM());

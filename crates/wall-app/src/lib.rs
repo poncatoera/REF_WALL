@@ -835,7 +835,9 @@ impl App {
             let y = (f.y + f.h) as f32 - 12.0 * px;
             let t = if st.duration > 0.0 { (st.time / st.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
             let h = 4.0 * px;
-            out.push(wall_render::BoxInstance { rect: [x, y, w, h], fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
+            // A dark strip behind the controls so they read on any frame.
+            out.push(wall_render::BoxInstance { rect: [x - 6.0 * px, y - 10.0 * px, w + 12.0 * px, 24.0 * px], fill: [0.0, 0.0, 0.0, 0.5], stroke: [0.0; 4], shape: [theme::radius::INNER * px, 0.0] });
+            out.push(wall_render::BoxInstance { rect: [x, y, w, h], fill: [0.22, 0.22, 0.22, 0.22], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
             if let Some((a, b)) = self.video_range(&hash).filter(|_| st.duration > 0.0) {
                 // The in-out range: a band above the track with end ticks.
                 let (xa, xb) = (x + w * (a / st.duration).clamp(0.0, 1.0) as f32, x + w * (b / st.duration).clamp(0.0, 1.0) as f32);
@@ -852,16 +854,18 @@ impl App {
                     out.push(wall_render::BoxInstance { rect: [xm - px, y - 6.0 * px, 2.0 * px, 16.0 * px], fill: [1.0, 0.36, 0.62, 1.0], stroke: [0.0; 4], shape: [px, 0.0] });
                 }
             }
-            out.push(wall_render::BoxInstance { rect: [x, y, w * t, h], fill: [0.36, 0.62, 1.0, 1.0], stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
-            out.push(wall_render::BoxInstance { rect: [x + w * t - 5.0 * px, y - 3.0 * px, 10.0 * px, 10.0 * px], fill: [1.0; 4], stroke: [0.0; 4], shape: [5.0 * px, 0.0] });
+            out.push(wall_render::BoxInstance { rect: [x, y, w * t, h], fill: theme::t().accent, stroke: [0.0; 4], shape: [2.0 * px, 0.0] });
+            // Playhead: a white dot with a dark rim.
+            out.push(wall_render::BoxInstance { rect: [x + w * t - 6.0 * px, y - 4.0 * px, 12.0 * px, 12.0 * px], fill: [1.0; 4], stroke: [0.0, 0.0, 0.0, 0.35], shape: [6.0 * px, px] });
             if !st.playing {
-                // Pause sign at the top-left corner.
-                for dx in [0.0, 9.0] {
+                // Paused: two bars on a dark chip at the top-left corner.
+                out.push(wall_render::BoxInstance { rect: [f.x as f32 + 8.0 * px, f.y as f32 + 8.0 * px, 26.0 * px, 26.0 * px], fill: [0.0, 0.0, 0.0, 0.5], stroke: [0.0; 4], shape: [theme::radius::INNER * px, 0.0] });
+                for dx in [0.0, 7.0] {
                     out.push(wall_render::BoxInstance {
-                        rect: [f.x as f32 + (12.0 + dx) * px, f.y as f32 + 12.0 * px, 5.0 * px, 18.0 * px],
-                        fill: [1.0, 1.0, 1.0, 0.9],
-                        stroke: [0.0, 0.0, 0.0, 0.5],
-                        shape: [1.5 * px, px],
+                        rect: [f.x as f32 + (15.0 + dx) * px, f.y as f32 + 14.0 * px, 4.0 * px, 14.0 * px],
+                        fill: [1.0, 1.0, 1.0, 0.95],
+                        stroke: [0.0; 4],
+                        shape: [px, 0.0],
                     });
                 }
             }
@@ -1299,6 +1303,14 @@ impl App {
             Gesture::Idle => {
                 // Tooltips on the rail and the size ring follow the pointer.
                 if self.tool == toolbar::Tool::Pen || self.rail_layout().contains(pos) || self.rail_layout().contains(last) {
+                    self.needs_redraw = true;
+                }
+                // Hover looks on the menu bar, the side panel and the zoom pill.
+                // (Cheap checks: this runs on every pointer move.)
+                let side = self.sidebar_tab().is_some();
+                let pill = self.zoom_pill_rect();
+                let over = |p: [f32; 2]| p[1] < menu::BAR || (side && p[0] < sidebar::WIDTH) || panel::inside(pill, p);
+                if over(pos) || over(last) {
                     self.needs_redraw = true;
                 }
                 return;
@@ -2373,9 +2385,9 @@ impl App {
                 let px = 1.0 / self.camera.zoom;
                 let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
                 overlays.push(wall_render::BoxInstance {
-                    rect: [hx - 5.0 * px, hy - 5.0 * px, 10.0 * px, 10.0 * px],
+                    rect: [hx - 4.5 * px, hy - 4.5 * px, 9.0 * px, 9.0 * px],
                     fill: [1.0; 4],
-                    stroke: [0.36, 0.62, 1.0, 1.0],
+                    stroke: theme::t().accent,
                     shape: [2.0 * px, 1.5 * px],
                 });
             }

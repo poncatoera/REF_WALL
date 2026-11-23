@@ -64,12 +64,14 @@ pub struct LibraryView {
     /// Whether the Trash tab exists (only with a library on disk).
     pub has_trash: bool,
     pub thumbs: HashMap<ContentHash, Thumb>,
+    /// The pointer, so a tile's × only shows while it's under it.
+    pub hover: [f32; 2],
 }
 
 impl LibraryView {
     pub fn new(mut items: Vec<ItemSidecar>, trashed: Vec<ItemSidecar>, has_trash: bool) -> Self {
         items.sort_by(|a, b| b.added_ms.cmp(&a.added_ms).then_with(|| a.hash.to_string().cmp(&b.hash.to_string())));
-        Self { tab: Tab::All, items, trashed, scroll_row: 0, has_trash, thumbs: HashMap::new() }
+        Self { tab: Tab::All, items, trashed, scroll_row: 0, has_trash, thumbs: HashMap::new(), hover: [-1.0, -1.0] }
     }
 
     pub fn shown(&self) -> &[ItemSidecar] {
@@ -211,8 +213,8 @@ pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: b
             let dw = panel::text_width(font, &d, 11.0);
             let pill = [area[0] + 8.0, area[1] + area[3] - 26.0, dw + 30.0, 18.0];
             l.top_boxes.push(PanelBox { rect: pill, fill: [0.0, 0.0, 0.0, 0.6], stroke: [0.0; 4], radius: 9.0, stroke_w: 0.0 });
-            l.text("▶", [pill[0] + 7.0, pill[1] + 13.5], 10.0, INK());
-            l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, INK());
+            l.text("▶", [pill[0] + 7.0, pill[1] + 13.5], 10.0, [1.0; 4]);
+            l.text(d, [pill[0] + 22.0, pill[1] + 13.5], 11.0, [1.0; 4]);
         }
         let title = sc.title.clone().unwrap_or_else(|| format!("{} × {}", sc.width, sc.height));
         let title = panel::fit(font, &title, 12.0, tile_w - 4.0);
@@ -222,8 +224,11 @@ pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: b
             Tab::All => {
                 l.hits.push((tile, Action::Place(sc.hash.clone())));
                 let x = [area[0] + area[2] - 26.0, area[1] + 6.0, 20.0, 20.0];
-                l.top_boxes.push(PanelBox { rect: x, fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], radius: 10.0, stroke_w: 0.0 });
-                l.text("×", [x[0] + 5.0, x[1] + 15.0], 15.0, INK());
+                // × only on the tile under the pointer (its hit is always there).
+                if panel::inside(tile, view.hover) {
+                    l.top_boxes.push(PanelBox { rect: x, fill: [0.0, 0.0, 0.0, 0.55], stroke: [0.0; 4], radius: 10.0, stroke_w: 0.0 });
+                    l.text("×", [x[0] + 5.0, x[1] + 15.0], 15.0, [1.0; 4]);
+                }
                 l.hits.push((x, Action::Trash(sc.hash.clone())));
             }
             Tab::Trash => l.hits.push((tile, Action::Restore(sc.hash.clone()))),
@@ -417,10 +422,6 @@ fn TILE() -> [f32; 4] {
     crate::theme::t().tile
 }
 #[allow(non_snake_case)]
-fn INK() -> [f32; 4] {
-    crate::theme::t().ink
-}
-#[allow(non_snake_case)]
 fn DIM() -> [f32; 4] {
     crate::theme::t().dim
 }
@@ -451,7 +452,9 @@ impl App {
             return None;
         }
         let area = self.sidebar_layout()?.content;
-        let view = self.library_view.as_ref()?;
+        let cursor = self.cursor;
+        let view = self.library_view.as_mut()?;
+        view.hover = cursor;
         Some(layout_in(&mut self.font, view, area, true))
     }
 
