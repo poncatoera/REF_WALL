@@ -1006,6 +1006,17 @@ fn window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
+/// wall.exe's icon at `size` pixels on a 100% screen, drawn for that size
+/// (a 256 px picture shrunk by Windows looks jagged). 1 is the id build.rs
+/// gives it; without it, the picture does.
+#[cfg(windows)]
+fn sized_icon(event_loop: &ActiveEventLoop, size: f64) -> Option<winit::window::Icon> {
+    use winit::platform::windows::IconExtWindows;
+    let scale = event_loop.primary_monitor().map_or(1.0, |m| m.scale_factor());
+    let size = (size * scale).round() as u32;
+    winit::window::Icon::from_resource(1, Some(winit::dpi::PhysicalSize::new(size, size))).ok().or_else(window_icon)
+}
+
 fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
         .with_title(title)
@@ -1013,7 +1024,10 @@ fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn 
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
     // Windows takes the big taskbar and Alt-Tab icon separately.
     #[cfg(windows)]
-    let attrs = winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(attrs, window_icon());
+    let attrs = winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(
+        attrs.with_window_icon(sized_icon(event_loop, 16.0)),
+        sized_icon(event_loop, 32.0),
+    );
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
     let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_stencil_size(8).with_transparency(false).with_api(api);
