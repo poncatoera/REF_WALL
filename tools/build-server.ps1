@@ -4,9 +4,14 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    & cargo build --release --target wasm32-unknown-unknown -p wall-web
+    # Panic messages carry source paths: without this they'd show the world
+    # this computer's user name. Its own target folder, so other builds
+    # aren't redone because of the different flags.
+    $env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE=home --remap-path-prefix=$root=wall"
+    & cargo build --release --target wasm32-unknown-unknown -p wall-web --target-dir target/public
+    Remove-Item Env:RUSTFLAGS
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-    & wasm-bindgen --target web --out-dir apps/web/www/pkg target/wasm32-unknown-unknown/release/wall_web.wasm
+    & wasm-bindgen --target web --out-dir apps/web/www/pkg target/public/wasm32-unknown-unknown/release/wall_web.wasm
     if ($LASTEXITCODE -ne 0) { throw "wasm-bindgen failed" }
 } finally { Pop-Location }
 $out = Join-Path $root "server\public"
@@ -22,4 +27,10 @@ Set-Content -Path (Join-Path $out "_headers") -Encoding ascii -Value @"
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
 "@
+# Nothing that goes public may name this computer's user.
+$name = [regex]::Escape($env:USERNAME)
+Get-ChildItem $out -Recurse -File | ForEach-Object {
+    $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($_.FullName))
+    if ($text -match "(?i)users[\/]+$name[\/]") { throw "$($_.Name) contains this computer's user name" }
+}
 Get-ChildItem $out -Recurse -File | ForEach-Object { "{0,-60} {1,8:N0} KB" -f $_.FullName.Substring($out.Length + 1), ($_.Length / 1KB) }
