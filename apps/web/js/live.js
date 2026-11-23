@@ -138,6 +138,24 @@ function flushCursor() {
   cursorTimer = setTimeout(flushCursor, 100);
 }
 
+// The name this person chose here, or "" if none yet.
+export function liveMyName() {
+  try {
+    return localStorage.getItem(NAME_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+// A new name, typed on the board (click your own badge).
+export function liveSetName(name) {
+  try {
+    localStorage.setItem(NAME_KEY, name);
+  } catch {}
+  document.getElementById("wall-name")?.closest("form")?.remove();
+  send({ t: "name", name });
+}
+
 // The people on the board as [{id, name, x, y}], if that changed since last asked.
 export function liveTake() {
   if (!changed) return undefined;

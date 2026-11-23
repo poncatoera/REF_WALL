@@ -176,9 +176,11 @@ async function mediaRequest(request, env, who, hash, url) {
 const no = (status, error) => ({ status, error });
 
 // A name others will see: one line, no control characters, not too long.
-function cleanName(v) {
+// "Guest" (or the default given) for none, or one called "Guest" itself.
+function cleanName(v, fallback = "Guest") {
   const s = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "").trim() : "";
-  return [...s].slice(0, MAX_NAME).join("") || "Guest";
+  const name = [...s].slice(0, MAX_NAME).join("");
+  return name && name.toLowerCase() !== "guest" ? name : fallback;
 }
 
 export class LibraryDO extends DurableObject {
@@ -257,6 +259,14 @@ export class LibraryDO extends DurableObject {
     return { id: a.id, name: a.name, x: a.x ?? null, y: a.y ?? null };
   }
 
+  // What someone who gave no name is called: "Guest (Nike team)" for a
+  // link labelled so.
+  guestName(access) {
+    const label = access.link ? this.rows("SELECT label FROM links WHERE id = ?", access.link)[0]?.label : "";
+    const l = cleanName(label, "");
+    return l ? [...`Guest (${l})`].slice(0, MAX_NAME).join("") : "Guest";
+  }
+
   // May `access` look at `board`?
   reaches(access, board) {
     if (!UUID.test(board)) return false;
@@ -280,7 +290,8 @@ export class LibraryDO extends DurableObject {
       const access = this.access(who);
       if (!access) return ws.close(4003, "this link doesn't work (any more)");
       a.who = who;
-      a.name = cleanName(m.name);
+      a.guest = this.guestName(access);
+      a.name = cleanName(m.name, a.guest);
       a.board = null;
       a.at = 0;
       ws.serializeAttachment(a);
@@ -292,7 +303,7 @@ export class LibraryDO extends DurableObject {
     if (!access) return ws.close(4003, "this link doesn't work (any more)");
     if (m.t === "board" && typeof m.board === "string") return this.join(ws, a, access, m.board);
     if (m.t === "name") {
-      a.name = cleanName(m.name);
+      a.name = cleanName(m.name, a.guest || "Guest");
       ws.serializeAttachment(a);
       return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
     }

@@ -448,6 +448,22 @@ test("live: a board moved out of a share takes its guests off it", async () => {
   await new Promise((r) => setTimeout(r, 300));
 });
 
+test("live: no name gives the link's label; names can change", async () => {
+  const temp = (await call(owner, "links", { method: "POST", json: { role: "view", board: A, label: "Nike team" } })).data;
+  const paul = live(owner, A, "Paul");
+  await paul.next((m) => m.t === "peers");
+  const guest = live(temp.secret, A, "");
+  const p = await paul.next((m) => m.t === "peer");
+  assert.equal(p.peer.name, "Guest (Nike team)");
+  await guest.next((m) => m.t === "peers");
+  guest.send({ t: "name", name: "Mia" });
+  assert.equal((await paul.next((m) => m.t === "peer")).peer.name, "Mia");
+  guest.send({ t: "name", name: "guest" });
+  assert.equal((await paul.next((m) => m.t === "peer")).peer.name, "Guest (Nike team)");
+  await call(owner, `links/${temp.id}`, { method: "DELETE" });
+  paul.close();
+});
+
 test("live: revoking a link disconnects whoever uses it", async () => {
   const temp = (await call(owner, "links", { method: "POST", json: { role: "edit", board: A } })).data;
   const paul = live(owner, A, "Paul");

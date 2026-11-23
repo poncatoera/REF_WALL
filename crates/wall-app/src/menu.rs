@@ -99,6 +99,9 @@ pub enum ShellCommand {
     CopyText(String),
     /// Something to do in the cloud; answer with `App::cloud_answer`.
     Cloud(crate::share::CloudAsk),
+    /// The name others on a shared board see for this person changed: keep
+    /// it and tell the live connection.
+    SetName(String),
 }
 
 impl Command {

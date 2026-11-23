@@ -505,13 +505,14 @@ const CLOUD_LOOK: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl Cloud {
     /// Starts syncing if this library is connected.
-    fn start(app: &App) -> Option<Self> {
+    fn start(app: &mut App) -> Option<Self> {
         let root = app.library_root()?.to_owned();
         let dir = wall_cloud::settings_dir()?;
         let lib = wall_format::Library::open(&root).ok()?;
         let account = wall_cloud::Accounts::load(&dir).find(&lib)?;
         let name = account.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Owner".into());
         let live = wall_cloud::live::Live::start(&account.server, &account.key, &name);
+        app.set_my_name(Some(name));
         match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
             Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None }),
             Err(e) => {
@@ -598,9 +599,20 @@ impl Cloud {
         }
         if stop {
             app.set_peers(Vec::new());
+            app.set_my_name(None);
             self.live = None;
         }
     }
+}
+
+/// Keeps the name others see in `cloud.json`, with the library's account.
+fn save_name(root: &std::path::Path, name: &str) -> Result<(), String> {
+    let dir = wall_cloud::settings_dir().ok_or("no settings folder")?;
+    let lib = wall_format::Library::open(root).map_err(|e| e.to_string())?;
+    let mut all = wall_cloud::Accounts::load(&dir);
+    let a = all.libraries.get_mut(&lib.manifest().id).ok_or("this library isn't connected")?;
+    a.name = Some(name.to_owned());
+    all.save(&dir).map_err(|e| e.to_string())
 }
 
 /// Saves the open board and opens another library in its place.
@@ -808,6 +820,18 @@ impl ApplicationHandler for Shell {
                                 export_png(&mut self.app, &mut gfx.renderer, &path);
                             }
                         }
+                        wall_app::ShellCommand::SetName(name) => {
+                            if let Some(c) = &self.cloud {
+                                if let Some(live) = &c.live {
+                                    live.name(&name);
+                                }
+                            }
+                            if let Some(root) = self.app.library_root() {
+                                if let Err(e) = save_name(root, &name) {
+                                    eprintln!("wall: could not keep the name: {e}");
+                                }
+                            }
+                        }
                         wall_app::ShellCommand::Cloud(ask) => {
                             let root = self.app.library_root().map(|p| p.to_owned());
                             let (tx, rx) = std::sync::mpsc::channel();
@@ -916,7 +940,8 @@ impl ApplicationHandler for Shell {
         let Some(gfx) = &self.gfx else { return };
         // Another library was opened: its own sync, or none.
         if self.cloud.as_ref().is_some_and(|c| Some(c.root.as_path()) != self.app.library_root()) || (self.cloud.is_none() && self.cloud_for.as_deref() != self.app.library_root()) {
-            self.cloud = Cloud::start(&self.app);
+            self.app.set_my_name(None);
+            self.cloud = Cloud::start(&mut self.app);
             self.cloud_for = self.app.library_root().map(|p| p.to_owned());
         }
         let Some(cloud) = &mut self.cloud else {

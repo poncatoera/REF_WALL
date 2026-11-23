@@ -35,6 +35,17 @@ extern "C" {
     fn live_take() -> JsValue;
     #[wasm_bindgen(js_name = liveWait)]
     fn live_wait(ms: i32, have: f64) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = liveMyName)]
+    fn live_my_name() -> String;
+    #[wasm_bindgen(js_name = liveSetName)]
+    fn live_set_name(name: &str);
+}
+
+/// A name typed on the board (the app's own badge).
+pub fn set_name(name: &str) {
+    if LIVE.with(|l| l.borrow().is_some()) {
+        live_set_name(name);
+    }
 }
 
 /// What this page last told the live connection.
@@ -61,6 +72,14 @@ pub fn tick(app: &mut App) {
     LIVE.with(|l| {
         let mut l = l.borrow_mut();
         let Some(l) = l.as_mut() else { return };
+        // Our badge shows the name chosen in this browser ("Guest" until then).
+        if !app.name_typing() {
+            let n = live_my_name();
+            let name = if n.trim().is_empty() { "Guest".to_owned() } else { n };
+            if app.my_name() != Some(name.as_str()) {
+                app.set_my_name(Some(name));
+            }
+        }
         let board = app.board_id();
         if l.board != Some(board) {
             l.board = Some(board);
