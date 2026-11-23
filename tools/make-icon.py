@@ -48,7 +48,6 @@ def pic(d):
     d.polygon([(p+40,p+330),(p+170,p+170),(p+260,p+270),(p+320,p+215),(p+420,p+330)],fill=(24,42,82,255))
     d.ellipse((p+300,p+70,p+380,p+150),fill=(236,244,255,255))
 paste(img, card(img,(170,300,630,760),(110,168,255,255),46,4), pic)
-img.save(sys.argv[1]+"/icon-1024.png")
 sizes=[16,20,24,32,40,48,64,128,256]
 img.resize((256,256),Image.LANCZOS).save(sys.argv[1]+"/icon.png")
 img.save(sys.argv[1]+"/wall.ico",sizes=[(s,s) for s in sizes])
