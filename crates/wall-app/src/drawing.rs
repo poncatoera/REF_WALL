@@ -182,8 +182,8 @@ impl App {
     pub(crate) fn start_draw(&mut self, board: [f32; 2], straight: bool) {
         self.selection.clear();
         if self.pen.brush == Brush::Eraser {
-            self.gesture = Gesture::Erase { depth: self.doc.undo_depth() };
-            self.erase_at(board);
+            self.gesture = Gesture::Erase { depth: self.doc.undo_depth(), last: board };
+            self.erase_along(board, board);
         } else {
             self.gesture = Gesture::Draw { points: vec![board], pressures: vec![1.0], velocity: 0.0, last_ms: self.now_ms, straight };
         }
@@ -214,7 +214,10 @@ impl App {
                 points.push(board);
                 pressures.push(brush::speed_pressure(*velocity));
             }
-            Gesture::Erase { .. } => self.erase_at(board),
+            Gesture::Erase { last, .. } => {
+                let from = std::mem::replace(last, board);
+                self.erase_along(from, board);
+            }
             _ => {}
         }
         self.needs_redraw = true;
@@ -234,10 +237,10 @@ impl App {
                 }
                 self.add_stroke_with(&points, &pressures);
             }
-            Gesture::Erase { depth } => {
-                self.erase_at(board);
+            Gesture::Erase { depth, last } => {
+                self.erase_along(last, board);
                 // One drag of the eraser is one undo step.
-                self.doc.join_undo_since(depth);
+                self.doc.join_undo_dropping_transient(depth);
             }
             _ => {}
         }
@@ -248,17 +251,26 @@ impl App {
     pub fn add_stroke_with(&mut self, line: &[[f32; 2]], pressures: &[f32]) -> Option<Uuid> {
         let b = if self.pen.brush == Brush::Eraser { Brush::Pen } else { self.pen.brush };
         let width = self.pen.size() / self.camera.zoom;
-        let factors = brush::width_factors(line, pressures, width, b);
-        let (frame, kind) = stroke_item(line, &factors, width, Some(self.pen.color.clone()), b, self.doc.top_z())?;
+        let (line, pressures) = brush::resample(line, pressures, brush::point_step(width, self.camera.zoom));
+        let factors = brush::width_factors(&line, &pressures, width, b);
+        let (frame, kind) = stroke_item(&line, &factors, width, Some(self.pen.color.clone()), b, self.doc.top_z())?;
         let id = self.doc.add(vec![(frame, kind)])[0];
         self.needs_redraw = true;
         Some(id)
     }
 
-    /// Rubs out the parts of lines under the eraser at a board point: the
-    /// rest of each line stays as one or more lines.
-    pub(crate) fn erase_at(&mut self, p: [f32; 2]) {
+    /// Rubs out the parts of lines the eraser passes over from `a` to `b`
+    /// (board points; pointer moves can be far apart): the rest of each
+    /// line stays as one or more lines.
+    pub(crate) fn erase_along(&mut self, a: [f32; 2], b: [f32; 2]) {
         let r = self.pen.size() / 2.0 / self.camera.zoom;
+        let steps = ((b[0] - a[0]).hypot(b[1] - a[1]) / (r * 0.5)).ceil().clamp(1.0, 2000.0) as usize;
+        let path: Vec<[f32; 2]> = if a == b {
+            vec![b]
+        } else {
+            (0..=steps).map(|k| k as f32 / steps as f32).map(|t| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]).collect()
+        };
+        let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
         let hits: Vec<BoardItem> = self
             .doc
             .board
@@ -267,7 +279,7 @@ impl App {
             .filter(|i| {
                 let f = i.frame;
                 let m = r as f64;
-                p[0] as f64 >= f.x - m && p[0] as f64 <= f.x + f.w + m && p[1] as f64 >= f.y - m && p[1] as f64 <= f.y + f.h + m
+                hi[0] as f64 >= f.x - m && lo[0] as f64 <= f.x + f.w + m && hi[1] as f64 >= f.y - m && lo[1] as f64 <= f.y + f.h + m
             })
             .cloned()
             .collect();
@@ -276,7 +288,22 @@ impl App {
             let f = item.frame;
             let pts = scene::stroke_points(points, [f.x as f32, f.y as f32, f.w as f32, f.h as f32]);
             let factors: Vec<f32> = if widths.len() == pts.len() { widths.clone() } else { vec![1.0; pts.len()] };
-            let Some(parts) = brush::erase(&pts, &factors, p, r + 0.35 * width) else { continue };
+            let reach = r + 0.35 * width;
+            if !path.iter().any(|p| brush::erase(&pts, &factors, *p, reach).is_some()) {
+                continue;
+            }
+            // Lines with points far apart (older ones) get more first, so
+            // only what's under the eraser goes.
+            let gap = reach * 0.5;
+            let sparse = pts.windows(2).any(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) > gap);
+            let start = if sparse { brush::resample(&pts, &factors, brush::point_step(*width, self.camera.zoom).min(gap)) } else { (pts, factors) };
+            let mut parts = vec![start];
+            for p in &path {
+                parts = parts
+                    .into_iter()
+                    .flat_map(|(line, fs)| brush::erase(&line, &fs, *p, reach).unwrap_or_else(|| vec![(line, fs)]))
+                    .collect();
+            }
             self.doc.delete(&[item.id].into());
             let kinds: Vec<(Frame, ItemKind)> = parts
                 .iter()
@@ -297,10 +324,11 @@ impl App {
         let Gesture::Draw { points, pressures, .. } = &self.gesture else { return (Vec::new(), Vec::new()) };
         let b = self.pen.brush;
         let width = self.pen.size() / self.camera.zoom;
-        let factors = brush::width_factors(points, pressures, width, b);
+        let (points, pressures) = brush::resample(points, pressures, brush::point_step(width, self.camera.zoom));
+        let factors = brush::width_factors(&points, &pressures, width, b);
         let a = b.profile().alpha;
         let c = hex(&self.pen.color);
-        let curves = scene::pen_curves_varying(points, &factors, width, [c[0] * a, c[1] * a, c[2] * a, a]);
+        let curves = scene::pen_curves_varying(&points, &factors, width, [c[0] * a, c[1] * a, c[2] * a, a]);
         if a < 1.0 { (Vec::new(), curves) } else { (curves, Vec::new()) }
     }
 
@@ -389,6 +417,45 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_eraser_misses_nothing_and_leaves_no_hidden_pieces() {
+        let mut a = app();
+        a.toggle_drawing();
+        a.key(Key::Char('4'));
+        for y in [300.0, 350.0, 400.0] {
+            drag(&mut a, [300.0, y], [700.0, y], Mods::default());
+        }
+        // A straight line of only its two ends, as older boards have.
+        let frame = Frame { x: 300.0, y: 450.0, w: 400.0, h: 1.0, ..Default::default() };
+        a.doc.add(vec![(frame, ItemKind::Stroke { points: vec![[0.0, 0.5], [1.0, 0.5]], width: 4.0, color: None, brush: None, widths: Vec::new() })]);
+        let before = a.doc.board.items.len();
+        a.key(Key::Char('e'));
+        // Two moves, far apart, across all four.
+        a.pointer_down(Button::Primary, [500.0, 250.0], Mods::default());
+        a.pointer_move([500.0, 360.0]);
+        a.pointer_move([500.0, 520.0]);
+        a.pointer_up(Button::Primary, [500.0, 520.0]);
+        assert_eq!(strokes(&a).len(), 8, "each line in two");
+        assert_eq!(a.doc.board.items.len(), before + 8, "only the four originals (deleted) and the eight pieces");
+        let longest = strokes(&a).iter().map(|i| i.frame.w).fold(0.0, f64::max);
+        // 200 to the middle, less the reach (15 + 0.35 × 22), plus the
+        // frame's padding of one line width (22) at each end.
+        assert!((longest - (200.0 - 22.7 + 44.0)).abs() < 8.0, "only what was under the eraser went ({longest})");
+        a.key(Key::Undo);
+        assert_eq!(strokes(&a).len(), 4);
+        a.key(Key::Redo);
+        assert_eq!(strokes(&a).len(), 8);
+        // Back and forth over the same lines leaves nothing hidden either.
+        let before = a.doc.board.items.len();
+        a.pointer_down(Button::Primary, [420.0, 280.0], Mods::default());
+        for k in 0..30 {
+            a.pointer_move([420.0 + 2.0 * k as f32, if k % 2 == 0 { 480.0 } else { 280.0 }]);
+        }
+        a.pointer_up(Button::Primary, [480.0, 480.0]);
+        let live_new = a.doc.board.items.len() - before;
+        assert!(live_new <= 8, "{live_new} items more after 30 moves");
+    }
+
+    #[test]
     fn the_pen_tapers_and_shift_draws_straight() {
         let mut a = app();
         a.toggle_drawing();
@@ -397,8 +464,11 @@ mod tests {
         let ItemKind::Stroke { widths, .. } = &s[0].kind else { unreachable!() };
         assert!(widths.first().unwrap() < &0.3 && widths.last().unwrap() < &0.3, "tapered ends");
         drag(&mut a, [300.0, 600.0], [700.0, 650.0], Mods { shift: true, ..Default::default() });
-        let lens: Vec<usize> = strokes(&a).iter().map(|i| match &i.kind { ItemKind::Stroke { points, .. } => points.len(), _ => 0 }).collect();
-        assert!(lens.contains(&2), "straight: just its two ends ({lens:?})");
+        let straight = strokes(&a).into_iter().find(|i| i.frame.y > 500.0).unwrap();
+        let ItemKind::Stroke { points, widths, .. } = &straight.kind else { unreachable!() };
+        let pts = scene::stroke_points(points, [straight.frame.x as f32, straight.frame.y as f32, straight.frame.w as f32, straight.frame.h as f32]);
+        assert!(pts.iter().all(|p| scene::segment_distance(*p, [300.0, 600.0], [700.0, 650.0]) < 0.1), "on the straight line");
+        assert!(widths.iter().fold(0.0f32, |m, w| m.max(*w)) > 0.95, "full width between its tapered ends");
         a.key(Key::Escape);
         assert_eq!(a.tool, toolbar::Tool::Select);
     }

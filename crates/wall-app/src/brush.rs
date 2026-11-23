@@ -156,6 +156,62 @@ pub fn speed_pressure(velocity: f32) -> f32 {
     (1.0 - (velocity / 3.0).min(1.0) * 0.8).max(0.2)
 }
 
+/// Points about `step` apart along a line, following the same smooth curve
+/// it is drawn as (quadratics through the midpoints), with a value carried
+/// along for each. Pointer moves can be far apart on a fast or a straight
+/// line; tapering and rubbing out need points in between.
+pub fn resample(points: &[[f32; 2]], values: &[f32], step: f32) -> (Vec<[f32; 2]>, Vec<f32>) {
+    let value = |i: usize| values.get(i).copied().unwrap_or(1.0);
+    let all: Vec<[f32; 3]> = points.iter().enumerate().map(|(i, p)| [p[0], p[1], value(i)]).collect();
+    let mid = |a: [f32; 3], b: [f32; 3]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0];
+    let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+    let n = all.len();
+    if n < 2 || step <= 0.0 {
+        return (points.to_vec(), (0..n).map(value).collect());
+    }
+    // Start, control and end of each piece.
+    let mut pieces = Vec::with_capacity(n);
+    if n == 2 {
+        pieces.push((all[0], mid(all[0], all[1]), all[1]));
+    } else {
+        let (m0, m1) = (mid(all[0], all[1]), mid(all[n - 2], all[n - 1]));
+        pieces.push((all[0], mid(all[0], m0), m0));
+        for i in 1..n - 1 {
+            pieces.push((mid(all[i - 1], all[i]), all[i], mid(all[i], all[i + 1])));
+        }
+        pieces.push((m1, mid(m1, all[n - 1]), all[n - 1]));
+    }
+    let mut out = vec![all[0]];
+    // Distance left before the next point is due.
+    let mut due = step;
+    for (a, c, b) in pieces {
+        let steps = (((dist(a, c) + dist(c, b)) / step * 4.0).ceil() as usize).clamp(1, 4096);
+        let mut prev = a;
+        for k in 1..=steps {
+            let t = k as f32 / steps as f32;
+            let u = 1.0 - t;
+            let q: [f32; 3] = std::array::from_fn(|j| u * u * a[j] + 2.0 * u * t * c[j] + t * t * b[j]);
+            due -= dist(prev, q);
+            prev = q;
+            if due <= 0.0 {
+                out.push(q);
+                due = step;
+            }
+        }
+    }
+    // End exactly where the line ends.
+    if out.len() > 1 && dist(out[out.len() - 1], all[n - 1]) < step * 0.5 {
+        out.pop();
+    }
+    out.push(all[n - 1]);
+    (out.iter().map(|p| [p[0], p[1]]).collect(), out.iter().map(|p| p[2]).collect())
+}
+
+/// How far apart a brush's points are kept, in board units.
+pub fn point_step(width: f32, zoom: f32) -> f32 {
+    (width * 0.3).max(1.5 / zoom.max(1e-6))
+}
+
 /// Width factor (0–1 of the full width) at each point: pressure thins it
 /// by the brush's `thin`, and both ends taper over `taper` widths (at most
 /// 30% of the line's length each).
@@ -255,6 +311,21 @@ mod tests {
         assert!(erase(&line, &f, [50.0, 40.0], 12.0).is_none());
         // Everything rubbed out: nothing left.
         assert_eq!(erase(&line, &f, [50.0, 0.0], 200.0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn resampling_fills_in_sparse_lines_and_keeps_their_ends() {
+        // A straight line of two points can taper and still be full in the middle.
+        let (p, v) = resample(&[[0.0, 0.0], [200.0, 0.0]], &[1.0, 1.0], 3.0);
+        assert!(p.len() > 50 && p.len() == v.len(), "{}", p.len());
+        assert_eq!((p[0], *p.last().unwrap()), ([0.0, 0.0], [200.0, 0.0]));
+        assert!(p.windows(2).all(|w| w[1][0] > w[0][0] && w[1][0] - w[0][0] < 6.0 && w[1][1] == 0.0));
+        let f = width_factors(&p, &v, 10.0, Brush::Pen);
+        assert!(f[0] < 0.2 && (f[p.len() / 2] - 1.0).abs() < 1e-5);
+        // Values are carried along; a dot stays a dot.
+        let (_, v) = resample(&[[0.0, 0.0], [100.0, 0.0]], &[1.0, 0.0], 1.0);
+        assert!((v[v.len() / 2] - 0.5).abs() < 0.05);
+        assert_eq!(resample(&[[3.0, 4.0]], &[0.7], 1.0), (vec![[3.0, 4.0]], vec![0.7]));
     }
 
     #[test]

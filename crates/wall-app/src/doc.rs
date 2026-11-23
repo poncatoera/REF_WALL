@@ -258,6 +258,21 @@ impl Document {
         self.undo.push(joined);
     }
 
+    /// As [`Self::join_undo_since`], for a gesture that made items and
+    /// removed them again before it ended (the eraser's in-between pieces):
+    /// those leave no trace, rather than a tombstone each in the board
+    /// file. Nothing may have been saved during the gesture.
+    pub fn join_undo_dropping_transient(&mut self, depth: usize) {
+        self.join_undo_since(depth);
+        let Some(change) = self.undo.get_mut(depth) else { return };
+        let transient = |c: &ItemChange| c.before.is_none() && c.after.deleted;
+        for c in change.items.iter().filter(|c| transient(c)) {
+            self.board.items.remove(&c.after.id);
+        }
+        change.items.retain(|c| !transient(c));
+        self.version += 1;
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(change) = self.undo.pop() else { return false };
         self.apply_side(&change, true);

@@ -154,7 +154,7 @@ enum Gesture {
     Draw { points: Vec<[f32; 2]>, pressures: Vec<f32>, velocity: f32, last_ms: u64, straight: bool },
     /// Rubbing out; `depth` is the undo depth at the start, so the whole
     /// drag becomes one undo step.
-    Erase { depth: usize },
+    Erase { depth: usize, last: [f32; 2] },
 }
 
 /// Text being typed into an item. The item shows the live text through
