@@ -460,7 +460,10 @@ fn cloud_ask(root: Option<&std::path::Path>, ask: wall_app::CloudAsk) -> wall_ap
                 max: me.as_ref().and_then(|m| m.max_media_bytes),
             }
         }),
-        CloudAsk::Make { board, edit, label } => client.make_link(board, edit, &label).and_then(|k| {
+        CloudAsk::Make { board, edit, label } => client.make_link(board, edit, &label).map_err(|e| match e {
+            wall_cloud::CloudError::Missing => wall_cloud::CloudError::Other("this board isn't in the cloud yet; try again in a moment".into()),
+            e => e,
+        }).and_then(|k| {
             let secret = k.secret.ok_or_else(|| wall_cloud::CloudError::Other("the server gave no link".into()))?;
             Ok(CloudAnswer::Made { url: client.link_address(&secret), edit })
         }),
@@ -990,6 +993,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // WALL_OPEN_LIBRARY=1 starts with the library tab open (screenshots).
     if std::env::var_os("WALL_OPEN_LIBRARY").is_some() && !app.library_is_open() {
         app.toggle_sidebar(wall_app::sidebar::Tab::Library);
+    }
+    // WALL_OPEN_SHARE=1 starts with the share card open (screenshots).
+    if std::env::var_os("WALL_OPEN_SHARE").is_some() {
+        app.open_share();
     }
     // WALL_CAMERA="x,y,zoom" sets the start view (used for screenshots).
     if let Some(v) = std::env::var("WALL_CAMERA").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).collect::<Vec<_>>()) {

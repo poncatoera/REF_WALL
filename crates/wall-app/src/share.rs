@@ -47,6 +47,10 @@ pub enum CloudAnswer {
 #[derive(Debug, Clone, Default)]
 pub struct ShareCard {
     pub board: Uuid,
+    /// The boards this one is inside, with their names: their links open it too.
+    pub above: Vec<(Uuid, String)>,
+    /// There are boards inside this one, which its links open as well.
+    pub has_inside: bool,
     /// None until the shell answers.
     pub links: Option<Vec<ShareLink>>,
     pub not_connected: bool,
@@ -114,9 +118,12 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
     if card.not_connected {
         wrap(text_width, &mut texts, &mut y, "This library isn't in the cloud yet. Once it is, links made here open this board in a browser.", t.dim, x0 + PAD, inner);
     } else if card.links.is_none() {
-        wrap(text_width, &mut texts, &mut y, "Asking the cloud…", t.dim, x0 + PAD, inner);
+        if card.busy {
+            wrap(text_width, &mut texts, &mut y, "Asking the cloud…", t.dim, x0 + PAD, inner);
+        }
     } else {
-        wrap(text_width, &mut texts, &mut y, "Anyone with a link can open this board until you turn the link off. They can't reach your other boards.", t.dim, x0 + PAD, inner);
+        let opens = if card.has_inside { "this board and the boards inside it" } else { "this board" };
+        wrap(text_width, &mut texts, &mut y, &format!("Anyone with a link can open {opens}, and boards you put inside later, until you turn the link off. They can't reach your other boards."), t.dim, x0 + PAD, inner);
         y += 6.0;
         let bw = (inner - 10.0) / 2.0;
         buttons.push(([x0 + PAD, y, bw, 32.0], "Copy view link", true, ShareHit::Make { edit: false }));
@@ -128,12 +135,23 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
             buttons.push(([x0 + W - PAD - 60.0, y - 12.0, 60.0, 26.0], "Copy", false, ShareHit::CopyAgain));
             y += 26.0;
         }
-        let mine: Vec<&ShareLink> = card.links.iter().flatten().filter(|k| k.board == Some(card.board)).collect();
-        texts.push(TextRun { text: if mine.is_empty() { "NO LINKS TO THIS BOARD".into() } else { "LINKS TO THIS BOARD".into() }, at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
+        // Links that open this board: its own, those of the boards it's in,
+        // and those to the whole library.
+        let via = |k: &ShareLink| match k.board {
+            None => Some(Some("the whole library".to_owned())),
+            Some(b) if b == card.board => Some(None),
+            Some(b) => card.above.iter().find(|(id, _)| *id == b).map(|(_, name)| Some(name.clone())),
+        };
+        let mine: Vec<(&ShareLink, Option<String>)> = card.links.iter().flatten().filter_map(|k| Some((k, via(k)?))).collect();
+        texts.push(TextRun { text: if mine.is_empty() { "NO LINKS OPEN THIS BOARD".into() } else { "LINKS THAT OPEN THIS BOARD".into() }, at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
         y += 16.0;
-        for k in mine.iter().take(8) {
+        for (k, through) in mine.iter().take(8) {
             let what = if k.edit { "Can edit" } else { "View only" };
-            let label = if k.label.is_empty() { what.to_owned() } else { format!("{what}  ·  {}", k.label) };
+            let label = match through {
+                Some(name) => format!("{what}  ·  through {name}"),
+                None if k.label.is_empty() => what.to_owned(),
+                None => format!("{what}  ·  {}", k.label),
+            };
             texts.push(TextRun { text: panel::fit_with(text_width, &label, 12.5, inner - 90.0), at: [x0 + PAD, y + ROW / 2.0 + 4.5], size: 12.5, color: t.ink });
             buttons.push(([x0 + W - PAD - 76.0, y + 4.0, 76.0, ROW - 8.0], "Turn off", false, ShareHit::Revoke(k.id)));
             y += ROW;
@@ -169,7 +187,18 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
 impl App {
     /// File > Share this board…: opens the card and asks for the links.
     pub fn open_share(&mut self) {
-        self.share = Some(ShareCard { board: self.doc.board.id, busy: true, ..Default::default() });
+        let board = self.doc.board.id;
+        let mut above: Vec<(Uuid, String)> = Vec::new();
+        let mut at = self.doc.board.parent;
+        while let Some(p) = at {
+            if p == board || above.iter().any(|(id, _)| *id == p) {
+                break;
+            }
+            above.push((p, self.board_names.get(&p).cloned().unwrap_or_else(|| "a board above".into())));
+            at = self.board_meta.get(&p).and_then(|m| m.parent);
+        }
+        let has_inside = self.board_meta.values().any(|m| m.parent == Some(board));
+        self.share = Some(ShareCard { board, above, has_inside, busy: true, ..Default::default() });
         self.shell_commands.push(ShellCommand::Cloud(CloudAsk::Links));
         self.needs_redraw = true;
     }
@@ -322,6 +351,31 @@ mod tests {
         assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Revoke(old))]);
         a.cloud_answer(CloudAnswer::Revoked(old));
         assert!(a.share_layout().unwrap().hits.iter().all(|(_, h)| !matches!(h, ShareHit::Revoke(_))));
+
+        // A board inside another: the other's links, and the library's, open
+        // it too and are listed; a sister's aren't.
+        a.key(Key::Escape);
+        let child = a.new_board();
+        a.open_board(child, true);
+        a.run_command(crate::menu::Command::Share);
+        a.take_shell_commands();
+        let k = |b: Option<Uuid>| ShareLink { id: Uuid::new_v4(), edit: false, board: b, label: "x".into() };
+        a.cloud_answer(CloudAnswer::Links { links: vec![k(Some(board)), k(None), k(Some(Uuid::new_v4()))], used: None, max: None });
+        let l = a.share_layout().unwrap();
+        assert_eq!(l.hits.iter().filter(|(_, h)| matches!(h, ShareHit::Revoke(_))).count(), 2);
+        assert!(l.texts.iter().any(|t| t.text.contains("through Moodboard")) && l.texts.iter().any(|t| t.text.contains("whole library")));
+        a.key(Key::Escape);
+        a.open_board(board, false);
+        a.run_command(crate::menu::Command::Share);
+        a.cloud_answer(CloudAnswer::Links { links: vec![], used: None, max: None });
+        let said = a.share_layout().unwrap().texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>().join(" ");
+        assert!(said.contains("boards inside it"), "says what the link opens: {said}");
+        // An error isn't hidden behind "Asking the cloud…".
+        a.run_command(crate::menu::Command::Share);
+        a.cloud_answer(CloudAnswer::Failed("offline".into()));
+        let l = a.share_layout().unwrap();
+        assert!(l.texts.iter().all(|t| !t.text.contains("Asking")) && l.texts.iter().any(|t| t.text.contains("offline")));
+        a.take_shell_commands();
 
         // Esc closes it; so does a click outside.
         a.key(Key::Escape);
