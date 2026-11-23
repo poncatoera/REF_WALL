@@ -106,18 +106,37 @@ impl App {
     }
 
     /// What the open board shows that has no file here yet.
+    ///
+    /// What's on screen comes first, nearest the middle first; then what's
+    /// off screen, pictures before videos (small before big), nearest first.
     pub fn sync_missing_here(&self) -> Vec<ItemSidecar> {
+        let cam = self.camera;
+        let half = [self.viewport[0] * 0.5 / cam.zoom.max(1e-6), self.viewport[1] * 0.5 / cam.zoom.max(1e-6)];
+        let mut found: Vec<((bool, bool, u64), ItemSidecar)> = Vec::new();
         let mut seen = BTreeSet::new();
-        self.doc
-            .board
-            .live_items()
-            .filter_map(|i| match &i.kind {
-                ItemKind::Media { hash, .. } => Some(hash),
-                _ => None,
-            })
-            .filter(|h| !self.pictures.contains_key(*h) && !self.videos.contains_key(*h) && seen.insert((*h).clone()))
-            .filter_map(|h| self.sidecars.get(h).cloned())
-            .collect()
+        for i in self.doc.board.live_items() {
+            let ItemKind::Media { hash, .. } = &i.kind else { continue };
+            if self.pictures.contains_key(hash) || self.videos.contains_key(hash) {
+                continue;
+            }
+            let Some(sc) = self.sidecars.get(hash) else { continue };
+            let f = &i.frame;
+            // How far the item is from the screen's middle, past its own half size.
+            let dx = ((f.x + f.w / 2.0) as f32 - cam.center[0]).abs() - f.w as f32 / 2.0;
+            let dy = ((f.y + f.h / 2.0) as f32 - cam.center[1]).abs() - f.h as f32 / 2.0;
+            let off = dx > half[0] || dy > half[1];
+            let video = sc.kind == MediaKind::Video;
+            let dist = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() as u64;
+            let key = (off, off && video, dist);
+            // The same file twice: the nearer one counts.
+            if seen.insert(hash.clone()) {
+                found.push((key, sc.clone()));
+            } else if let Some(e) = found.iter_mut().find(|(_, s)| s.hash == *hash) {
+                e.0 = e.0.min(key);
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found.into_iter().map(|(_, s)| s).collect()
     }
 
     /// A file that was fetched. True for a video, which needs a player.
@@ -342,6 +361,27 @@ mod tests {
         a.sync_apply(&last, &State::default()).unwrap();
         assert_eq!(a.board_id(), home);
         assert!(lib.board_ids().unwrap().contains(&home));
+    }
+
+    #[test]
+    fn files_on_screen_are_fetched_first_then_pictures_then_videos() {
+        let mut a = App::new(Board::new("Wall", 0), "web");
+        a.resize([1000.0, 800.0]);
+        let mut sc = |n: u8, kind: &str, x: f64| {
+            let hash = ContentHash::of(&[n]);
+            let s: ItemSidecar = serde_json::from_value(serde_json::json!({"hash": hash, "kind": kind, "ext": "png", "width": 4, "height": 3, "bytes": 9, "added_ms": 1, "tags": []})).unwrap();
+            a.sync_know(std::slice::from_ref(&s));
+            a.doc.add(vec![(wall_format::Frame { x, y: 0.0, w: 100.0, h: 100.0, ..Default::default() }, ItemKind::Media { hash: hash.clone(), crop: None, look: Default::default() })])[0];
+            hash
+        };
+        let far_video = sc(1, "video", 9000.0);
+        let far_pic = sc(2, "image", 20000.0);
+        let near_video = sc(3, "video", 100.0);
+        let middle = sc(4, "image", -50.0);
+        a.camera.center = [0.0, 50.0];
+        a.camera.zoom = 1.0;
+        let order: Vec<ContentHash> = a.sync_missing_here().into_iter().map(|s| s.hash).collect();
+        assert_eq!(order, vec![middle, near_video, far_pic, far_video]);
     }
 
     #[test]
