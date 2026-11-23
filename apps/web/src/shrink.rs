@@ -46,7 +46,11 @@ async fn read_track(file: &web_sys::Blob) -> Result<VideoTrack, String> {
             let moov = slice(file, at, at + size).await.map_err(|_| "the file can't be read".to_string())?;
             return mp4::parse_moov(&moov).map_err(|e| e.to_string());
         }
-        at += size;
+        // A damaged size mustn't send the search back to the start.
+        at = match at.checked_add(size) {
+            Some(next) if next > at => next,
+            _ => break,
+        };
     }
     Err("only MP4 and MOV videos can be made smaller here".into())
 }
@@ -111,6 +115,8 @@ async fn convert(file: &web_sys::Blob, name: &str, track: &VideoTrack, s: &wall_
         let out = js_sys::Object::new();
         set(&out, "width", s.width);
         set(&out, "height", s.height);
+        set(&out, "srcWidth", track.width);
+        set(&out, "srcHeight", track.height);
         set(&out, "rotation", track.rotation);
         set(&out, "kbps", kbps);
         set(&out, "keyframeUs", (s.keyframe_interval_ms * 1000) as f64);

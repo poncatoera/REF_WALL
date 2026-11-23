@@ -10,7 +10,7 @@ export async function shrinkSupport(codec, description, out) {
   if (typeof VideoDecoder === "undefined" || typeof VideoEncoder === "undefined") {
     return { error: "this browser can't convert videos" };
   }
-  const dec = await VideoDecoder.isConfigSupported(decoderConfig(codec, description)).catch(() => null);
+  const dec = await VideoDecoder.isConfigSupported(decoderConfig(codec, description, out)).catch(() => null);
   if (!dec || !dec.supported) {
     const kind = codec.startsWith("hvc1") || codec.startsWith("hev1") ? "HEVC (iPhone)" : codec.split(".")[0];
     return { error: `this browser can't read ${kind} videos` };
@@ -23,8 +23,8 @@ export async function shrinkSupport(codec, description, out) {
 }
 
 // Converts the samples of `file`. `samples` is a Float64Array of
-// [offset, size, timeUs, key] per frame in decode order. `out` has width,
-// height (upright), rotation (0/90/180/270), kbps, keyframeUs, fps and
+// [offset, size, timeUs, key] per frame in decode order. `out` has srcWidth,
+// srcHeight (as stored), width, height (upright), rotation (0/90/180/270), kbps, keyframeUs, fps and
 // codec (from shrinkSupport). Returns { description, frames: [{data, time, key}] }.
 // One conversion at a time: each holds a decoder, an encoder and its output.
 let queue = Promise.resolve();
@@ -68,6 +68,11 @@ async function convert(file, codec, description, samples, out, onProgress) {
   const decoder = new VideoDecoder({
     output(frame) {
       try {
+        // A decoder that has the size wrong would give a cropped video.
+        const seen = frame.visibleRect;
+        if (seen && (seen.width < out.srcWidth * 0.9 || seen.height < out.srcHeight * 0.9)) {
+          throw new Error("this browser reads the video at the wrong size");
+        }
         let input = frame;
         const same = rot === 0 && frame.displayWidth === out.width && frame.displayHeight === out.height;
         if (!same) {
@@ -92,7 +97,7 @@ async function convert(file, codec, description, samples, out, onProgress) {
     },
     error: fail,
   });
-  decoder.configure(decoderConfig(codec, description));
+  decoder.configure(decoderConfig(codec, description, out));
 
   const count = samples.length / 4;
   let i = 0;
@@ -154,8 +159,9 @@ export function shrinkProgress(text) {
   e.textContent = text;
 }
 
-function decoderConfig(codec, description) {
-  const c = { codec, hardwareAcceleration: "no-preference" };
+function decoderConfig(codec, description, out) {
+  // The size matters: without it Edge takes HEVC for 1280x720 and crops it.
+  const c = { codec, codedWidth: out.srcWidth, codedHeight: out.srcHeight, hardwareAcceleration: "no-preference" };
   if (description && description.length) c.description = description;
   return c;
 }
