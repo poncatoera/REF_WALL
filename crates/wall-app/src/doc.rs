@@ -230,6 +230,19 @@ impl Document {
         }
     }
 
+    /// Brings deleted items back, as one undo step.
+    pub fn restore(&mut self, ids: &[Uuid]) -> bool {
+        let back: Vec<BoardItem> = ids
+            .iter()
+            .filter_map(|id| self.board.items.get(id).filter(|i| i.deleted).cloned())
+            .map(|mut i| {
+                i.deleted = false;
+                i
+            })
+            .collect();
+        !back.is_empty() && self.commit(back)
+    }
+
     /// Deletes items (as tombstones, so the deletion syncs).
     pub fn delete(&mut self, ids: &BTreeSet<Uuid>) -> bool {
         let afters = ids

@@ -3,8 +3,10 @@
 //! second tab (L). It pushes the board over while open.
 //!
 //! Click a board to open it, double-click to rename, drag it up or down
-//! among its sisters to reorder, and drop pictures from the board onto it
-//! to move them there.
+//! among its sisters to reorder or onto the middle of another board to put
+//! it inside that one, drop pictures from the board onto it to move them
+//! there, and delete it with the × that shows on hover (asks first; the
+//! board goes to the library's trash folder).
 //!
 //! As with the other panels, layout is plain data in screen pixels so it
 //! can be tested without a GPU.
@@ -54,12 +56,23 @@ pub struct Sidebar {
     pub typing: Option<(Field, String)>,
     /// First tree row shown.
     pub scroll: usize,
+    /// A board whose row asks "Delete?".
+    pub confirm: Option<Uuid>,
 }
 
 impl Sidebar {
     pub fn new(tab: Tab) -> Self {
-        Sidebar { tab, folded: HashSet::new(), search: String::new(), typing: None, scroll: 0 }
+        Sidebar { tab, folded: HashSet::new(), search: String::new(), typing: None, scroll: 0, confirm: None }
     }
+}
+
+/// Items moved from one board to another (dropped on a board's row).
+#[derive(Debug, Clone)]
+pub struct MovedOut {
+    pub from: Uuid,
+    pub originals: Vec<Uuid>,
+    pub target: Uuid,
+    pub copies: Vec<Uuid>,
 }
 
 /// What the app knows about a board without opening it.
@@ -152,6 +165,10 @@ pub enum Action {
     Fold(Uuid),
     New,
     Search,
+    /// The × on a row: asks whether to delete the board.
+    Delete(Uuid),
+    ConfirmDelete(Uuid),
+    CancelDelete,
     /// A click on the panel that does nothing, so it doesn't reach the board.
     None,
 }
@@ -179,9 +196,14 @@ impl Layout {
         Some(self.hits.iter().rev().find(|(r, _)| panel::inside(*r, p)).map_or(Action::None, |(_, a)| a.clone()))
     }
 
-    /// The board row under `p`, and whether `p` is in its lower half.
-    pub fn row_at(&self, p: [f32; 2]) -> Option<(Uuid, bool)> {
-        self.rows.iter().find(|(r, _)| panel::inside(*r, p)).map(|(r, id)| (*id, p[1] > r[1] + r[3] / 2.0))
+    /// The board row under `p`: Some(false) in its top quarter (before
+    /// it), Some(true) in its bottom quarter (after it), None in the middle
+    /// (into it).
+    pub fn row_at(&self, p: [f32; 2]) -> Option<(Uuid, Option<bool>)> {
+        self.rows.iter().find(|(r, _)| panel::inside(*r, p)).map(|(r, id)| {
+            let t = (p[1] - r[1]) / r[3];
+            (*id, if t < 0.25 { Some(false) } else if t > 0.75 { Some(true) } else { None })
+        })
     }
 
     fn rect(&mut self, rect: [f32; 4], fill: [f32; 4], stroke: [f32; 4], radius: f32) {
@@ -292,7 +314,7 @@ pub fn layout(font: &mut Font, v: &View, viewport: [f32; 2]) -> Layout {
     let hint = if l.max_scroll > 0 {
         format!("{}–{} of {}  ·  scroll for more", first + 1, (first + fits).min(v.tree.len()), v.tree.len())
     } else {
-        "Double-click to rename  ·  drag to reorder".to_owned()
+        "Double-click to rename  ·  drag to move".to_owned()
     };
     let hint = panel::fit(font, &hint, 11.0, inner);
     l.text(hint, [x0 + PAD, y0 + h - 12.0], 11.0, t.dim);
@@ -328,7 +350,30 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
         l.images.push((h.clone(), [th[0] + 1.0, th[1] + 1.0, th[2] - 2.0, th[3] - 2.0]));
     }
     x += THUMB[0] + 8.0;
-    let right = r[0] + r[2] - 8.0;
+    let mut right = r[0] + r[2] - 8.0;
+    if tree && v.state.confirm == Some(row.id) {
+        // "Delete?  Delete  Cancel" in place of the name.
+        l.text("Delete?", [x, r[1] + 19.5], 12.5, t.ink);
+        let cancel_w = panel::text_width(font, "Cancel", 12.0) + 14.0;
+        let del_w = panel::text_width(font, "Delete", 12.0) + 14.0;
+        let cancel = [right - cancel_w, r[1] + 4.0, cancel_w, r[3] - 8.0];
+        let del = [cancel[0] - 6.0 - del_w, cancel[1], del_w, cancel[3]];
+        l.rect(del, t.accent, [0.0; 4], 5.0);
+        l.text("Delete", [del[0] + 7.0, r[1] + 19.0], 12.0, t.panel_bg);
+        l.rect(cancel, [0.0; 4], t.line, 5.0);
+        l.text("Cancel", [cancel[0] + 7.0, r[1] + 19.0], 12.0, t.ink);
+        l.hits.insert(0, (r, Action::None));
+        l.hits.push((del, Action::ConfirmDelete(row.id)));
+        l.hits.push((cancel, Action::CancelDelete));
+        return;
+    }
+    // × to delete, on hover (not for the library's top board).
+    if tree && over && v.dragging.is_none() && row.depth > 0 && v.state.typing.is_none() {
+        let xr = [right - 18.0, r[1] + (r[3] - 20.0) / 2.0, 20.0, 20.0];
+        l.text("×", [xr[0] + 4.5, xr[1] + 15.5], 16.0, t.dim);
+        l.hits.push((xr, Action::Delete(row.id)));
+        right = xr[0] - 4.0;
+    }
     let renaming = matches!(&v.state.typing, Some((Field::Rename(id), _)) if *id == row.id) && tree;
     let ink = if row.current { t.accent } else { t.ink };
     if renaming {
@@ -505,7 +550,7 @@ impl App {
             _ if dragged_row.is_some() => {
                 let id = dragged_row.unwrap();
                 let target = self.side_rows_at(self.cursor).filter(|(t, _)| *t != id);
-                (Some(id), target.map(|(t, after)| (t, Some(after))))
+                (Some(id), target.map(|(t, place)| (t, place)))
             }
             crate::Gesture::Move { .. } => (None, self.side_rows_at(self.cursor).filter(|(t, _)| *t != self.doc.board.id).map(|(t, _)| (t, None))),
             _ => (None, None),
@@ -515,7 +560,7 @@ impl App {
     }
 
     /// The tree row under a screen point (no drop highlight involved).
-    pub(crate) fn side_rows_at(&mut self, p: [f32; 2]) -> Option<(Uuid, bool)> {
+    pub(crate) fn side_rows_at(&mut self, p: [f32; 2]) -> Option<(Uuid, Option<bool>)> {
         let state = self.sidebar.clone()?;
         if state.tab != Tab::Boards || p[0] > WIDTH {
             return None;
@@ -587,8 +632,177 @@ impl App {
                     self.gesture = crate::Gesture::SideRow { id, start: pos, moved: false };
                 }
             }
+            Action::Delete(id) => {
+                if let Some(s) = &mut self.sidebar {
+                    s.confirm = Some(id);
+                }
+            }
+            Action::ConfirmDelete(id) => {
+                if let Some(s) = &mut self.sidebar {
+                    s.confirm = None;
+                }
+                self.delete_board(id);
+            }
+            Action::CancelDelete => {
+                if let Some(s) = &mut self.sidebar {
+                    s.confirm = None;
+                }
+            }
             Action::None => {}
         }
+        true
+    }
+
+    /// After undo or redo on the open board: items moved away from it that
+    /// are back here are taken off the other board, and the other way round.
+    pub(crate) fn sync_moved_out(&mut self) {
+        let here = self.doc.board.id;
+        let moves: Vec<MovedOut> = self.moved_out.iter().filter(|m| m.from == here).cloned().collect();
+        for m in moves {
+            let back = m.originals.iter().all(|id| self.doc.item(id).is_some_and(|i| !i.deleted));
+            let away = m.originals.iter().all(|id| self.doc.item(id).is_none_or(|i| i.deleted));
+            if !back && !away {
+                continue;
+            }
+            self.edit_board(m.target, |doc| {
+                if back {
+                    let live: std::collections::BTreeSet<Uuid> = m.copies.iter().filter(|id| doc.item(id).is_some_and(|i| !i.deleted)).copied().collect();
+                    if !live.is_empty() {
+                        doc.delete(&live);
+                    }
+                } else {
+                    doc.restore(&m.copies);
+                }
+            });
+        }
+    }
+
+    /// A board and every board inside it, the board first.
+    pub fn board_and_descendants(&self, id: Uuid) -> Vec<Uuid> {
+        let mut out = vec![id];
+        let mut k = 0;
+        while k < out.len() {
+            let at = out[k];
+            let mut kids: Vec<Uuid> = self.board_meta.iter().filter(|(c, m)| m.parent == Some(at) && !out.contains(c)).map(|(c, _)| *c).collect();
+            kids.sort();
+            out.extend(kids);
+            k += 1;
+        }
+        out
+    }
+
+    /// Runs `f` on any board's document (open, kept in memory, or read from
+    /// the library) and saves it. False if the board can't be found or saved.
+    fn edit_board(&mut self, id: Uuid, f: impl FnOnce(&mut crate::doc::Document)) -> bool {
+        if id == self.doc.board.id {
+            f(&mut self.doc);
+            self.scene.invalidate();
+            if let Some(lib) = &self.library {
+                return lib.write_board(&self.doc.board).map_err(|e| eprintln!("wall: could not save: {e}")).is_ok();
+            }
+            return true;
+        }
+        let found = match self.parked.remove(&id) {
+            Some(p) => Some(p),
+            None => self.library.as_ref().and_then(|l| l.read_board(id).ok()).map(|b| (crate::doc::Document::new(b, self.doc.device.clone()), crate::Camera { center: [0.0, 0.0], zoom: 1.0 })),
+        };
+        let Some((mut doc, camera)) = found else { return false };
+        doc.set_clock(self.now_ms);
+        f(&mut doc);
+        let saved = match &self.library {
+            Some(lib) => lib.write_board(&doc.board).map_err(|e| eprintln!("wall: could not save board {id}: {e}")).is_ok(),
+            None => true,
+        };
+        if let Some(m) = self.board_meta.get_mut(&id) {
+            m.parent = doc.board.parent;
+        }
+        self.parked.insert(id, (doc, camera));
+        saved
+    }
+
+    /// Puts a board inside another one: its card leaves the old parent and
+    /// a new card goes to the right of the new parent's things. Not into
+    /// itself or a board inside it, and not the library's top board.
+    pub fn move_board(&mut self, id: Uuid, into: Uuid) -> bool {
+        let Some(old) = self.board_meta.get(&id).and_then(|m| m.parent) else { return false };
+        if old == into || self.board_and_descendants(id).contains(&into) || !self.board_meta.contains_key(&into) {
+            return false;
+        }
+        self.end_edit();
+        // The card on the old parent goes, as one undo step there.
+        let card = |doc: &crate::doc::Document| -> std::collections::BTreeSet<Uuid> {
+            doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Board { board_id } if board_id == id)).map(|i| i.id).collect()
+        };
+        let old_frame = |doc: &crate::doc::Document| doc.board.live_items().find(|i| matches!(i.kind, ItemKind::Board { board_id } if board_id == id)).map(|i| i.frame);
+        let mut frame = None;
+        if !self.edit_board(old, |doc| {
+            frame = old_frame(doc);
+            let ids = card(doc);
+            doc.delete(&ids);
+        }) {
+            return false;
+        }
+        let mut f = frame.unwrap_or(wall_format::Frame { w: 220.0, h: 140.0, ..Default::default() });
+        self.edit_board(into, |doc| {
+            let right = doc.board.live_items().map(|i| i.frame.x + i.frame.w).fold(f64::MIN, f64::max);
+            let top = doc.board.live_items().map(|i| i.frame.y).fold(f64::MAX, f64::min);
+            if right > f64::MIN {
+                f.x = right + 80.0;
+                f.y = top;
+            }
+            doc.add(vec![(f, ItemKind::Board { board_id: id })]);
+        });
+        self.edit_board(id, |doc| doc.board.parent = Some(into));
+        if let Some(m) = self.board_meta.get_mut(&id) {
+            m.parent = Some(into);
+        }
+        // The breadcrumb now leads through the new parent.
+        if self.board_and_descendants(id).contains(&self.doc.board.id) {
+            let at = self.doc.board.id;
+            self.nav.clear();
+            let mut p = self.board_meta.get(&at).and_then(|m| m.parent);
+            while let Some(b) = p {
+                if self.nav.contains(&b) {
+                    break;
+                }
+                self.nav.insert(0, b);
+                p = self.board_meta.get(&b).and_then(|m| m.parent);
+            }
+        }
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Deletes a board and the boards inside it: their files go to the
+    /// library's trash folder and the card leaves the parent board. If one
+    /// of them is open, the parent opens first. Not the library's top board.
+    pub fn delete_board(&mut self, id: Uuid) -> bool {
+        let Some(parent) = self.board_meta.get(&id).and_then(|m| m.parent) else { return false };
+        let gone = self.board_and_descendants(id);
+        self.end_edit();
+        if gone.contains(&self.doc.board.id) {
+            self.go_to_board(parent);
+            if gone.contains(&self.doc.board.id) {
+                return false;
+            }
+        }
+        self.edit_board(parent, |doc| {
+            let ids: std::collections::BTreeSet<Uuid> = doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Board { board_id } if board_id == id)).map(|i| i.id).collect();
+            doc.delete(&ids);
+        });
+        for b in &gone {
+            self.parked.remove(b);
+            if let Some(lib) = &self.library {
+                if let Err(e) = lib.trash_board(*b, self.now_ms) {
+                    eprintln!("wall: could not move board {b} to the trash: {e}");
+                }
+            }
+            self.board_meta.remove(b);
+            self.board_names.remove(b);
+        }
+        self.nav.retain(|b| !gone.contains(b));
+        self.board_order.retain(|b| !gone.contains(b));
+        self.needs_redraw = true;
         true
     }
 
@@ -599,8 +813,19 @@ impl App {
             self.go_to_board(id);
             return;
         }
-        if let Some((target, after)) = self.side_rows_at(pos).filter(|(t, _)| *t != id) {
-            self.reorder_board(id, target, after);
+        match self.side_rows_at(pos).filter(|(t, _)| *t != id) {
+            Some((target, Some(after))) => {
+                // Next to a board: into that board's parent if it differs.
+                let parent = self.board_meta.get(&target).and_then(|m| m.parent);
+                if let Some(p) = parent.filter(|p| self.board_meta.get(&id).and_then(|m| m.parent) != Some(*p)) {
+                    self.move_board(id, p);
+                }
+                self.reorder_board(id, target, after);
+            }
+            Some((target, None)) => {
+                self.move_board(id, target);
+            }
+            None => {}
         }
     }
 
@@ -711,7 +936,7 @@ impl App {
             i
         };
         let new_ids = doc.add_copies(&picked.iter().map(shifted).collect::<Vec<_>>());
-        let map: HashMap<Uuid, Uuid> = picked.iter().map(|i| i.id).zip(new_ids).collect();
+        let map: HashMap<Uuid, Uuid> = picked.iter().map(|i| i.id).zip(new_ids.iter().copied()).collect();
         let remap = |e: &wall_format::ArrowEnd| match e {
             wall_format::ArrowEnd::Item { id } => wall_format::ArrowEnd::Item { id: map[id] },
             p => p.clone(),
@@ -727,8 +952,9 @@ impl App {
                 (s.frame, s.kind)
             })
             .collect();
+        let mut copies: Vec<Uuid> = new_ids.clone();
         if !arrow_kinds.is_empty() {
-            doc.add(arrow_kinds);
+            copies.extend(doc.add(arrow_kinds));
         }
         let saved = match &self.library {
             Some(lib) => lib.write_board(&doc.board).map_err(|e| eprintln!("wall: could not save the other board: {e}")).is_ok(),
@@ -747,6 +973,7 @@ impl App {
         let mut gone = ids;
         gone.extend(arrows.iter().map(|a| a.id));
         self.doc.delete(&gone);
+        self.moved_out.push(MovedOut { from: self.doc.board.id, originals: gone.into_iter().collect(), target, copies });
         self.selection.clear();
         self.needs_redraw = true;
         map.len()
@@ -1012,8 +1239,65 @@ mod tests {
         a.pointer_move(target);
         a.pointer_up(Button::Primary, target);
         assert!(a.doc.item(&note).is_none_or(|i| i.deleted), "gone from this board");
-        let (other, _) = &a.parked[&b1];
-        assert!(other.board.live_items().any(|i| matches!(&i.kind, ItemKind::Note { text, .. } if text == "move me")));
+        let moved = |a: &App| a.parked[&b1].0.board.live_items().filter(|i| matches!(&i.kind, ItemKind::Note { text, .. } if text == "move me")).count();
+        assert_eq!(moved(&a), 1);
+        // Undo brings it back here and takes the copy off Board 1; redo moves it again.
+        a.key(Key::Undo);
+        assert!(a.doc.item(&note).is_some_and(|i| !i.deleted));
+        assert_eq!(moved(&a), 0, "no copy left behind");
+        a.key(Key::Redo);
+        assert!(a.doc.item(&note).is_none_or(|i| i.deleted));
+        assert_eq!(moved(&a), 1);
+    }
+
+    #[test]
+    fn a_board_dragged_onto_another_goes_inside_it_and_the_cross_deletes_it_after_asking() {
+        let mut a = app();
+        let home = a.board_id();
+        a.set_time(10);
+        let b1 = a.new_board();
+        a.set_time(20);
+        let b2 = a.new_board();
+        a.open_board(b1, true);
+        a.set_time(30);
+        let inner = a.new_board();
+        a.toggle_sidebar(Tab::Boards);
+        let cards = |a: &App, board: Uuid, id: Uuid| -> usize {
+            let doc = if a.doc.board.id == board { &a.doc } else { &a.parked[&board].0 };
+            doc.board.live_items().filter(|i| matches!(i.kind, ItemKind::Board { board_id } if board_id == id)).count()
+        };
+        assert_eq!(cards(&a, b1, inner), 1);
+        // Drag "inner" onto the middle of Board 2's row: it moves inside.
+        let from = row_centre(&mut a, inner);
+        let to = row_centre(&mut a, b2);
+        a.pointer_down(Button::Primary, from, Mods::default());
+        a.pointer_move(to);
+        a.pointer_up(Button::Primary, to);
+        assert_eq!(a.board_meta[&inner].parent, Some(b2));
+        assert_eq!((cards(&a, b1, inner), cards(&a, b2, inner)), (0, 1));
+        assert_eq!(a.parked[&inner].0.board.parent, Some(b2), "saved on the board too");
+        // Not into a board inside itself, and the top board stays put.
+        assert!(!a.move_board(b2, inner));
+        assert!(!a.move_board(home, b1));
+
+        // Open "inner", then delete Board 2 from the panel: asks first, then
+        // both go and the top board opens.
+        a.go_to_board(inner);
+        assert_eq!(a.nav, vec![home, b2]);
+        let at = row_centre(&mut a, b2);
+        a.pointer_move(at);
+        let l = a.sidebar_layout().unwrap();
+        let cross = l.hits.iter().find(|(_, x)| *x == Action::Delete(b2)).expect("× on hover").0;
+        click(&mut a, [cross[0] + 5.0, cross[1] + 5.0]);
+        assert_eq!(a.sidebar.as_ref().unwrap().confirm, Some(b2));
+        assert!(a.board_meta.contains_key(&b2), "nothing deleted yet");
+        let l = a.sidebar_layout().unwrap();
+        let yes = l.hits.iter().find(|(_, x)| *x == Action::ConfirmDelete(b2)).unwrap().0;
+        click(&mut a, [yes[0] + 5.0, yes[1] + 5.0]);
+        assert!(!a.board_meta.contains_key(&b2) && !a.board_meta.contains_key(&inner));
+        assert_eq!(a.board_id(), home);
+        assert_eq!(cards(&a, home, b2), 0);
+        assert!(a.board_meta.contains_key(&b1));
     }
 
     #[test]

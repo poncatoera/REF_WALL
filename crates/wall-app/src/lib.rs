@@ -266,6 +266,9 @@ pub struct App {
     fit_on_resize: bool,
     /// Boards opened before (with their undo history and view), by id.
     parked: HashMap<Uuid, (Document, Camera)>,
+    /// Items moved to other boards: undo on the board they left also takes
+    /// the copies off the other board (and redo puts them back).
+    moved_out: Vec<sidebar::MovedOut>,
     /// Names of every known board, for board cards and the breadcrumb.
     board_names: HashMap<Uuid, String>,
     /// The boards above the open one, outermost first.
@@ -366,6 +369,7 @@ impl App {
             onion: HashSet::new(),
             fit_on_resize: false,
             parked: HashMap::new(),
+            moved_out: Vec::new(),
             board_names: [(board_id, board_name)].into(),
             nav: Vec::new(),
             search: None,
@@ -1518,10 +1522,12 @@ impl App {
             }
             Key::Undo => {
                 self.doc.undo();
+                self.sync_moved_out();
                 self.prune_selection();
             }
             Key::Redo => {
                 self.doc.redo();
+                self.sync_moved_out();
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
