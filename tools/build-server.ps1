@@ -31,6 +31,6 @@ Set-Content -Path (Join-Path $out "_headers") -Encoding ascii -Value @"
 $name = [regex]::Escape($env:USERNAME)
 Get-ChildItem $out -Recurse -File | ForEach-Object {
     $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($_.FullName))
-    if ($text -match "(?i)users[\/]+$name[\/]") { throw "$($_.Name) contains this computer's user name" }
+    if ($text -match "(?i)users[\\/]+$name[\\/]") { throw "$($_.Name) contains this computer's user name" }
 }
 Get-ChildItem $out -Recurse -File | ForEach-Object { "{0,-60} {1,8:N0} KB" -f $_.FullName.Substring($out.Length + 1), ($_.Length / 1KB) }
