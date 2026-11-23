@@ -46,7 +46,7 @@ fn server() -> Option<Server> {
         .spawn()
         .ok()?;
     let s = Server(child, data);
-    let c = Client::new(Account { server: url(), key: KEY.into(), root: None, name: None }).unwrap();
+    let c = Client::new(Account { server: url(), key: KEY.into(), root: None, name: None, color: None }).unwrap();
     for _ in 0..240 {
         if c.me().is_ok() {
             return Some(s);
@@ -82,13 +82,16 @@ fn peers(l: &Live, want: impl Fn(&[LivePeer]) -> bool) -> Vec<LivePeer> {
 fn two_desktops_on_a_board_see_each_other_and_their_pointers() {
     let Some(_server) = server() else { return };
     let board = Uuid::new_v4();
-    let a = Live::start(&url(), KEY, "Paul");
+    let a = Live::start(&url(), KEY, "Paul", Some(2));
     a.board(board);
-    let b = Live::start(&url(), KEY, "Studio PC");
+    let b = Live::start(&url(), KEY, "Studio PC", None);
     b.board(board);
     let seen = peers(&a, |p| p.len() == 1);
     assert_eq!(seen[0].name, "Studio PC");
-    assert_eq!(peers(&b, |p| p.len() == 1)[0].name, "Paul");
+    let paul = peers(&b, |p| p.len() == 1);
+    assert_eq!((paul[0].name.as_str(), paul[0].color), ("Paul", Some(2)));
+    a.color(Some(5));
+    peers(&b, |p| p.first().is_some_and(|x| x.color == Some(5)));
 
     b.cursor(Some([120.0, -40.5]));
     peers(&a, |p| p.first().is_some_and(|x| x.at == Some([120.0, -40.5])));
@@ -99,7 +102,7 @@ fn two_desktops_on_a_board_see_each_other_and_their_pointers() {
     b.board(Uuid::new_v4());
     peers(&a, |p| p.is_empty());
     // A wrong key stops for good.
-    let c = Live::start(&url(), "a-key-nobody-has-0000000000", "x");
+    let c = Live::start(&url(), "a-key-nobody-has-0000000000", "x", None);
     c.board(board);
     let until = Instant::now() + Duration::from_secs(10);
     loop {

@@ -14,7 +14,23 @@ pub struct Peer {
     pub name: String,
     /// Their pointer on the board (board units), if it's over the board.
     pub at: Option<[f32; 2]>,
+    /// The colour they picked (an index into the 8), else one by their id.
+    pub color: Option<u8>,
 }
+
+impl Peer {
+    pub fn paint(&self) -> [f32; 4] {
+        pick(self.color).unwrap_or_else(|| color_of(&self.id))
+    }
+}
+
+/// A picked colour.
+pub fn pick(i: Option<u8>) -> Option<[f32; 4]> {
+    i.and_then(|i| COLORS.get(i as usize).copied())
+}
+
+/// How many colours there are to pick from.
+pub const COLOR_COUNT: u8 = 8;
 
 /// Colours people get, by connection id: bright enough on light and dark.
 const COLORS: [[f32; 4]; 8] = [
@@ -54,6 +70,8 @@ pub(crate) struct PresenceLayout {
     pub me: Option<[f32; 4]>,
     /// The card for typing a new name, while it's open.
     pub card: Option<[f32; 4]>,
+    /// The colour swatches on the card.
+    pub swatches: Vec<([f32; 4], u8)>,
 }
 
 /// Ourselves, for the layout: our name, and the text being typed if the
@@ -63,6 +81,9 @@ pub(crate) struct Me<'a> {
     pub editing: Option<&'a str>,
     /// Caret blink: shown or not.
     pub caret: bool,
+    pub color: Option<u8>,
+    /// The name comes with the link and can't be changed here.
+    pub fixed: bool,
 }
 
 const CARD_W: f32 = 280.0;
@@ -74,6 +95,7 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
     let mut texts = Vec::new();
     let mut me_rect = None;
     let mut card = None;
+    let mut swatches = Vec::new();
 
     // Pointers first, so the badges stay on top.
     for p in peers {
@@ -82,7 +104,7 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         if s[0] < -40.0 || s[1] < menu::BAR || s[0] > viewport[0] + 4.0 || s[1] > viewport[1] + 4.0 {
             continue;
         }
-        let color = color_of(&p.id);
+        let color = p.paint();
         boxes.push(PanelBox { rect: [s[0] - 6.0, s[1] - 6.0, 12.0, 12.0], fill: color, stroke: WHITE, radius: 6.0, stroke_w: 2.0 });
         let name = panel::fit_with(width, &p.name, 12.0, 160.0);
         let w = width(&name, 12.0);
@@ -97,24 +119,42 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
     let mut right = right;
     if let Some(me) = &me {
         let r = [right - BADGE, y, BADGE, BADGE];
-        boxes.push(PanelBox { rect: r, fill: [0.16, 0.17, 0.2, 1.0], stroke: [0.85, 0.86, 0.9, 1.0], radius: BADGE / 2.0, stroke_w: 1.5 });
+        let fill = pick(me.color).unwrap_or([0.16, 0.17, 0.2, 1.0]);
+        boxes.push(PanelBox { rect: r, fill, stroke: [0.85, 0.86, 0.9, 1.0], radius: BADGE / 2.0, stroke_w: 1.5 });
         let i = initial(me.name);
         texts.push(TextRun { at: [r[0] + (BADGE - width(&i, 13.0)) / 2.0, y + 16.5], text: i, size: 13.0, color: WHITE });
         me_rect = Some(r);
         right = r[0] - 10.0;
         if let Some(text) = me.editing {
-            let c = [(r[0] + BADGE - CARD_W).max(8.0), menu::BAR + 6.0, CARD_W, 92.0];
+            let c = [(r[0] + BADGE - CARD_W).max(8.0), menu::BAR + 6.0, CARD_W, 128.0];
+            let dim = [0.65, 0.67, 0.72, 1.0];
             boxes.push(PanelBox { rect: c, fill: panel::BG(), stroke: [0.3, 0.31, 0.36, 1.0], radius: 10.0, stroke_w: 1.0 });
-            texts.push(TextRun { text: "Your name, as others see it".into(), at: [c[0] + 14.0, c[1] + 22.0], size: 12.0, color: [0.65, 0.67, 0.72, 1.0] });
             let field = [c[0] + 12.0, c[1] + 32.0, c[2] - 24.0, 28.0];
-            boxes.push(PanelBox { rect: field, fill: [0.09, 0.09, 0.11, 1.0], stroke: [0.48, 0.64, 0.97, 1.0], radius: 6.0, stroke_w: 1.5 });
-            let shown_text = panel::fit_with(width, text, 14.0, field[2] - 20.0);
-            let tw = width(&shown_text, 14.0);
-            texts.push(TextRun { text: shown_text, at: [field[0] + 8.0, field[1] + 19.0], size: 14.0, color: WHITE });
-            if me.caret {
-                boxes.push(PanelBox { rect: [field[0] + 9.0 + tw, field[1] + 6.0, 1.5, 16.0], fill: WHITE, stroke: [0.0; 4], radius: 0.0, stroke_w: 0.0 });
+            if me.fixed {
+                texts.push(TextRun { text: "Your name comes with your link".into(), at: [c[0] + 14.0, c[1] + 22.0], size: 12.0, color: dim });
+                let t = panel::fit_with(width, me.name, 14.0, field[2] - 8.0);
+                texts.push(TextRun { text: t, at: [field[0] + 2.0, field[1] + 19.0], size: 14.0, color: WHITE });
+            } else {
+                texts.push(TextRun { text: "Your name, as others see it".into(), at: [c[0] + 14.0, c[1] + 22.0], size: 12.0, color: dim });
+                boxes.push(PanelBox { rect: field, fill: [0.09, 0.09, 0.11, 1.0], stroke: [0.48, 0.64, 0.97, 1.0], radius: 6.0, stroke_w: 1.5 });
+                let shown_text = panel::fit_with(width, text, 14.0, field[2] - 20.0);
+                let tw = width(&shown_text, 14.0);
+                texts.push(TextRun { text: shown_text, at: [field[0] + 8.0, field[1] + 19.0], size: 14.0, color: WHITE });
+                if me.caret {
+                    boxes.push(PanelBox { rect: [field[0] + 9.0 + tw, field[1] + 6.0, 1.5, 16.0], fill: WHITE, stroke: [0.0; 4], radius: 0.0, stroke_w: 0.0 });
+                }
             }
-            texts.push(TextRun { text: "Enter to keep, Esc to cancel".into(), at: [c[0] + 14.0, c[1] + 80.0], size: 11.0, color: [0.55, 0.57, 0.62, 1.0] });
+            // Colour: 8 swatches; the picked one has a ring.
+            let sw = 22.0;
+            let gap = (field[2] - sw * COLOR_COUNT as f32) / (COLOR_COUNT as f32 - 1.0);
+            for i in 0..COLOR_COUNT {
+                let rr = [field[0] + i as f32 * (sw + gap), c[1] + 72.0, sw, sw];
+                let on = me.color == Some(i);
+                boxes.push(PanelBox { rect: rr, fill: COLORS[i as usize], stroke: if on { WHITE } else { [0.0; 4] }, radius: sw / 2.0, stroke_w: if on { 2.5 } else { 0.0 } });
+                swatches.push((rr, i));
+            }
+            let hint = if me.fixed { "Pick a colour. Esc to close" } else { "Enter to keep, Esc to cancel" };
+            texts.push(TextRun { text: hint.into(), at: [c[0] + 14.0, c[1] + 116.0], size: 11.0, color: [0.55, 0.57, 0.62, 1.0] });
             card = Some(c);
         }
     }
@@ -128,13 +168,13 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         x = r[0] - BADGE + 6.0;
     }
     for p in peers.iter().take(shown) {
-        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: color_of(&p.id), stroke: WHITE, radius: BADGE / 2.0, stroke_w: 2.0 });
+        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: p.paint(), stroke: WHITE, radius: BADGE / 2.0, stroke_w: 2.0 });
         let i = initial(&p.name);
         texts.push(TextRun { at: [x + (BADGE - width(&i, 13.0)) / 2.0, y + 16.5], text: i, size: 13.0, color: WHITE });
         // Overlap a little, like a stack of people.
         x -= BADGE - 6.0;
     }
-    PresenceLayout { boxes, texts, me: me_rect, card }
+    PresenceLayout { boxes, texts, me: me_rect, card, swatches }
 }
 
 /// Names are one line, at most this many characters (the server cuts there too).
@@ -178,6 +218,24 @@ impl App {
         self.my_name.as_deref()
     }
 
+    /// Our picked colour, if any.
+    pub fn set_my_color(&mut self, color: Option<u8>) {
+        let color = color.filter(|c| *c < COLOR_COUNT);
+        if self.my_color != color {
+            self.my_color = color;
+            self.needs_redraw = true;
+        }
+    }
+
+    pub fn my_color(&self) -> Option<u8> {
+        self.my_color
+    }
+
+    /// The name comes with the link (it can't be typed over).
+    pub fn set_name_fixed(&mut self, fixed: bool) {
+        self.name_fixed = fixed;
+    }
+
     /// The name card is open (the shell shouldn't overwrite the name now).
     pub fn name_typing(&self) -> bool {
         self.name_edit.is_some()
@@ -191,6 +249,14 @@ impl App {
         }
         let l = self.presence_layout();
         if let Some(c) = l.card {
+            if let Some((_, i)) = l.swatches.iter().find(|(r, _)| panel::inside(*r, pos)) {
+                if self.my_color != Some(*i) {
+                    self.my_color = Some(*i);
+                    self.shell_commands.push(crate::ShellCommand::SetColor(*i));
+                }
+                self.needs_redraw = true;
+                return true;
+            }
             if panel::inside(c, pos) {
                 return true;
             }
@@ -207,6 +273,10 @@ impl App {
 
     fn commit_name(&mut self) {
         let Some(text) = self.name_edit.take() else { return };
+        if self.name_fixed {
+            self.needs_redraw = true;
+            return;
+        }
         let name: String = text.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(MAX_NAME).collect();
         self.needs_redraw = true;
         if name.is_empty() || Some(&name) == self.my_name.as_ref() {
@@ -219,14 +289,15 @@ impl App {
     /// Keys while the name card is open. True when used.
     pub(crate) fn name_key(&mut self, key: crate::Key) -> bool {
         use crate::Key;
+        let fixed = self.name_fixed;
         let Some(text) = &mut self.name_edit else { return false };
         match key {
             Key::Escape => self.name_edit = None,
             Key::Enter => self.commit_name(),
-            Key::Backspace => {
+            Key::Backspace if !fixed => {
                 text.pop();
             }
-            Key::Char(c) if !c.is_control() && text.chars().count() < MAX_NAME => text.push(c),
+            Key::Char(c) if !fixed && !c.is_control() && text.chars().count() < MAX_NAME => text.push(c),
             _ => {}
         }
         self.needs_redraw = true;
@@ -234,7 +305,11 @@ impl App {
     }
 
     pub(crate) fn name_text(&mut self, s: &str) -> bool {
+        let fixed = self.name_fixed;
         let Some(text) = &mut self.name_edit else { return false };
+        if fixed {
+            return true;
+        }
         for c in s.chars().filter(|c| !c.is_control()) {
             if text.chars().count() >= MAX_NAME {
                 break;
@@ -251,7 +326,7 @@ impl App {
         let to_screen = move |p: [f32; 2]| [(p[0] - cam.center[0]) * cam.zoom + vp[0] * 0.5, (p[1] - cam.center[1]) * cam.zoom + vp[1] * 0.5];
         let title = self.breadcrumb().join("  ›  ");
         let caret = (self.now_ms / 530) % 2 == 0;
-        let me = self.my_name.as_deref().map(|name| Me { name, editing: self.name_edit.as_deref(), caret });
+        let me = self.my_name.as_deref().map(|name| Me { name, editing: self.name_edit.as_deref(), caret, color: self.my_color, fixed: self.name_fixed });
         let font = &mut self.font;
         // Left of the board's name at the right of the menu bar.
         let name_w = panel::text_width(font, &title, 12.5).min(vp[0] * 0.4);
@@ -291,7 +366,7 @@ mod tests {
     }
 
     fn peer(id: &str, name: &str, at: Option<[f32; 2]>) -> Peer {
-        Peer { id: id.into(), name: name.into(), at }
+        Peer { id: id.into(), name: name.into(), at, color: None }
     }
 
     #[test]
@@ -357,6 +432,25 @@ mod tests {
         press(&mut a, [500.0, 400.0]);
         assert_eq!(a.my_name(), Some("Paul!o"));
         assert!(a.take_shell_commands().contains(&ShellCommand::SetName("Paul!o".into())));
+
+        // A colour from the card.
+        press(&mut a, [r[0] + 5.0, r[1] + 5.0]);
+        let (sw, i) = a.presence_layout().swatches[3];
+        press(&mut a, [sw[0] + 5.0, sw[1] + 5.0]);
+        assert_eq!((i, a.my_color()), (3, Some(3)));
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::SetColor(3)]);
+        assert!(a.presence_layout().card.is_some(), "the card stays open for the name");
+        a.key(Key::Escape);
+
+        // A name that comes with the link can't be typed over.
+        a.set_name_fixed(true);
+        a.set_my_name(Some("Mia".into()));
+        press(&mut a, [r[0] + 5.0, r[1] + 5.0]);
+        a.key(Key::Backspace);
+        a.text_input("xx");
+        a.key(Key::Enter);
+        assert_eq!(a.my_name(), Some("Mia"));
+        assert!(a.take_shell_commands().is_empty());
     }
 
     #[test]

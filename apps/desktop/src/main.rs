@@ -468,12 +468,12 @@ fn cloud_ask(root: Option<&std::path::Path>, ask: wall_app::CloudAsk) -> wall_ap
         CloudAsk::Links => client.links().map(|links| {
             let me = client.me().ok();
             CloudAnswer::Links {
-                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label }).collect(),
+                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label, person: k.person }).collect(),
                 used: me.as_ref().and_then(|m| m.media_bytes),
                 max: me.as_ref().and_then(|m| m.max_media_bytes),
             }
         }),
-        CloudAsk::Make { board, edit, label } => client.make_link(board, edit, &label).map_err(|e| match e {
+        CloudAsk::Make { board, edit, label, person } => client.make_link(board, edit, &label, &person).map_err(|e| match e {
             wall_cloud::CloudError::Missing => wall_cloud::CloudError::Other("this board isn't in the cloud yet; try again in a moment".into()),
             e => e,
         }).and_then(|k| {
@@ -511,8 +511,9 @@ impl Cloud {
         let lib = wall_format::Library::open(&root).ok()?;
         let account = wall_cloud::Accounts::load(&dir).find(&lib)?;
         let name = account.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Owner".into());
-        let live = wall_cloud::live::Live::start(&account.server, &account.key, &name);
+        let live = wall_cloud::live::Live::start(&account.server, &account.key, &name, account.color);
         app.set_my_name(Some(name));
+        app.set_my_color(account.color);
         match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
             Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None }),
             Err(e) => {
@@ -589,7 +590,7 @@ impl Cloud {
         let mut stop = false;
         while let Some(e) = live.try_event() {
             match e {
-                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at }).collect()),
+                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at, color: p.color }).collect()),
                 LiveEvent::Changed => self.worker.poke(),
                 LiveEvent::Stopped(why) => {
                     eprintln!("wall: live: {why}");
@@ -605,13 +606,13 @@ impl Cloud {
     }
 }
 
-/// Keeps the name others see in `cloud.json`, with the library's account.
-fn save_name(root: &std::path::Path, name: &str) -> Result<(), String> {
+/// Keeps the name (or colour) others see in `cloud.json`, with the library's account.
+fn save_me(root: &std::path::Path, change: impl FnOnce(&mut wall_cloud::Account)) -> Result<(), String> {
     let dir = wall_cloud::settings_dir().ok_or("no settings folder")?;
     let lib = wall_format::Library::open(root).map_err(|e| e.to_string())?;
     let mut all = wall_cloud::Accounts::load(&dir);
     let a = all.libraries.get_mut(&lib.manifest().id).ok_or("this library isn't connected")?;
-    a.name = Some(name.to_owned());
+    change(a);
     all.save(&dir).map_err(|e| e.to_string())
 }
 
@@ -827,8 +828,18 @@ impl ApplicationHandler for Shell {
                                 }
                             }
                             if let Some(root) = self.app.library_root() {
-                                if let Err(e) = save_name(root, &name) {
+                                if let Err(e) = save_me(root, |a| a.name = Some(name)) {
                                     eprintln!("wall: could not keep the name: {e}");
+                                }
+                            }
+                        }
+                        wall_app::ShellCommand::SetColor(c) => {
+                            if let Some(live) = self.cloud.as_ref().and_then(|c| c.live.as_ref()) {
+                                live.color(Some(c));
+                            }
+                            if let Some(root) = self.app.library_root() {
+                                if let Err(e) = save_me(root, |a| a.color = Some(c)) {
+                                    eprintln!("wall: could not keep the colour: {e}");
                                 }
                             }
                         }

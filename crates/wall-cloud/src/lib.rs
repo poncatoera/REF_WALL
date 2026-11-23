@@ -42,6 +42,9 @@ pub struct Account {
     /// The name others on a shared board see for this person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Their picked colour (one of 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u8>,
 }
 
 // Not derived: a key must not end up in a log.
@@ -158,6 +161,9 @@ pub struct Link {
     pub board: Option<Uuid>,
     #[serde(default)]
     pub label: String,
+    /// The name of the one it's for ("" for anyone).
+    #[serde(default)]
+    pub person: String,
     /// Only when just made.
     #[serde(default)]
     pub secret: Option<String>,
@@ -264,8 +270,8 @@ impl Client {
 
     /// A new link: the whole library or one board, to view or to edit. Its
     /// secret is in the answer, this once.
-    pub fn make_link(&self, board: Option<Uuid>, edit: bool, label: &str) -> Result<Link, CloudError> {
-        let v = serde_json::json!({ "role": if edit { "edit" } else { "view" }, "board": board, "label": label });
+    pub fn make_link(&self, board: Option<Uuid>, edit: bool, label: &str, person: &str) -> Result<Link, CloudError> {
+        let v = serde_json::json!({ "role": if edit { "edit" } else { "view" }, "board": board, "label": label, "person": person });
         self.json("POST", "links", Some(&v))
     }
 

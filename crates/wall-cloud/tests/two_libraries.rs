@@ -68,7 +68,7 @@ fn client(key: &str) -> Client {
 }
 
 fn account(key: &str) -> Account {
-    Account { server: server(), key: key.into(), root: None, name: None }
+    Account { server: server(), key: key.into(), root: None, name: None, color: None }
 }
 
 /// One computer: an app, its library, and its sync worker.
@@ -242,7 +242,7 @@ fn libraries_stay_the_same_through_the_cloud() {
     assert!(std::fs::read_dir(a.root.join("trash")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(&third.to_string())));
 
     // A link to one board, to look at: that board and its files only.
-    let view = me.make_link(Some(shared), false, "client").unwrap();
+    let view = me.make_link(Some(shared), false, "client", "").unwrap();
     let vkey = view.secret.clone().unwrap();
     let mut c = Pc::new(dir, "c", &vkey);
     until("the viewer has the board", &mut [&mut a, &mut b, &mut c], |p| p[2].boards().contains(&shared) && p[2].lib().has_media(&hash2));
@@ -257,7 +257,7 @@ fn libraries_stay_the_same_through_the_cloud() {
     assert!(!a.texts().contains(&"not allowed".into()), "looking only: nothing goes up");
 
     // A link to edit it.
-    let edit = me.make_link(Some(shared), true, "colleague").unwrap();
+    let edit = me.make_link(Some(shared), true, "colleague", "Mia").unwrap();
     let mut d = Pc::new(dir, "d", edit.secret.as_ref().unwrap());
     until("the editor has the board", &mut [&mut a, &mut d], |p| p[1].boards().contains(&shared) && p[1].lib().has_media(&hash2));
     d.app.open_board(shared, false);
@@ -309,9 +309,9 @@ fn libraries_stay_the_same_through_the_cloud() {
 #[test]
 fn a_key_never_goes_to_an_odd_address_and_isnt_printed() {
     for s in ["http://example.com", "ftp://x", "https://a@b.com", "https://x.dev/?a", "http://127.0.0.1.evil.com:80", "javascript:1"] {
-        assert!(Client::new(Account { server: s.into(), key: "k".into(), root: None, name: None }).is_err(), "{s}");
+        assert!(Client::new(Account { server: s.into(), key: "k".into(), root: None, name: None, color: None }).is_err(), "{s}");
     }
-    let a = Account { server: "https://x.dev".into(), key: "sesame".into(), root: None, name: None };
+    let a = Account { server: "https://x.dev".into(), key: "sesame".into(), root: None, name: None, color: None };
     assert!(!format!("{a:?}").contains("sesame"));
     let dir = tempfile::tempdir().unwrap();
     let id = Uuid::new_v4();
@@ -329,6 +329,6 @@ fn a_key_never_goes_to_an_odd_address_and_isnt_printed() {
     let (k1, k2) = (wall_cloud::new_key(), wall_cloud::new_key());
     assert!(k1 != k2 && k1.len() == 96 && wall_cloud::key_hash("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     // No server there: offline, not a lost key.
-    let c = Client::new(Account { server: "http://127.0.0.1:9".into(), key: "k".into(), root: None, name: None }).unwrap();
+    let c = Client::new(Account { server: "http://127.0.0.1:9".into(), key: "k".into(), root: None, name: None, color: None }).unwrap();
     assert!(matches!(c.me(), Err(CloudError::Offline(_))));
 }

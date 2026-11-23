@@ -17,13 +17,34 @@ let retry = 1000;
 let stopped = false;
 
 const NAME_KEY = "wall.name";
+const COLOR_KEY = "wall.color";
+let fixedName = null; // a name that comes with the link
+
+// Read once: the page asks for these every frame.
+function stored(k) {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+}
+function keep(k, v) {
+  try {
+    localStorage.setItem(k, v);
+  } catch {}
+}
+let savedName = stored(NAME_KEY) || "";
+let savedColor = (() => {
+  const c = parseInt(stored(COLOR_KEY), 10);
+  return c >= 0 && c < 8 ? c : null;
+})();
+
+function myColor() {
+  return savedColor;
+}
 
 function myName() {
-  try {
-    return localStorage.getItem(NAME_KEY) || "Guest";
-  } catch {
-    return "Guest";
-  }
+  return savedName || "Guest";
 }
 
 function send(m) {
@@ -48,7 +69,7 @@ function connect() {
   let pinger = null;
   s.onopen = () => {
     retry = 1000;
-    s.send(JSON.stringify({ t: "hello", key, board, name: myName() }));
+    s.send(JSON.stringify({ t: "hello", key, board, name: myName(), color: myColor() }));
     sentCursor = undefined;
     // Answered by the server without waking it up (not billed).
     pinger = setInterval(() => s.readyState === WebSocket.OPEN && s.send("ping"), 30000);
@@ -60,6 +81,11 @@ function connect() {
       m = JSON.parse(e.data);
     } catch {
       return;
+    }
+    if (m.t === "welcome" && typeof m.name === "string" && m.name) {
+      // The link was made for one person: their name, no need to ask.
+      fixedName = m.name;
+      document.getElementById("wall-name")?.closest("form")?.remove();
     }
     if (m.t === "welcome" || m.t === "poke") {
       seq = Math.max(seq, m.seq || 0);
@@ -138,22 +164,31 @@ function flushCursor() {
   cursorTimer = setTimeout(flushCursor, 100);
 }
 
-// The name this person chose here, or "" if none yet.
+// The name this person chose here, or "" if none yet. A name that comes
+// with the link starts with "=".
 export function liveMyName() {
-  try {
-    return localStorage.getItem(NAME_KEY) || "";
-  } catch {
-    return "";
-  }
+  if (fixedName) return "=" + fixedName;
+  return savedName;
 }
 
 // A new name, typed on the board (click your own badge).
 export function liveSetName(name) {
-  try {
-    localStorage.setItem(NAME_KEY, name);
-  } catch {}
+  savedName = name;
+  keep(NAME_KEY, name);
   document.getElementById("wall-name")?.closest("form")?.remove();
   send({ t: "name", name });
+}
+
+// The colour picked here (0..7), or -1.
+export function liveMyColor() {
+  const c = myColor();
+  return c === null ? -1 : c;
+}
+
+export function liveSetColor(c) {
+  savedColor = c;
+  keep(COLOR_KEY, String(c));
+  send({ t: "name", color: c });
 }
 
 // The people on the board as [{id, name, x, y}], if that changed since last asked.
@@ -185,11 +220,8 @@ export function liveWait(ms, have) {
 
 // Asks once for a name others will see; kept in this browser.
 function askName() {
-  let had = null;
-  try {
-    had = localStorage.getItem(NAME_KEY);
-  } catch {}
-  if (had) return;
+  if (fixedName) return;
+  if (savedName) return;
   const box = document.createElement("form");
   box.style.cssText =
     "position:fixed;left:50%;transform:translateX(-50%);top:44px;z-index:10;display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:10px;font:13px system-ui,sans-serif;background:#1c1d22f2;color:#e8e9ee;border:1px solid #3a3c44;box-shadow:0 6px 24px #0006;max-width:calc(100vw - 32px)";
@@ -216,9 +248,8 @@ function askName() {
     e.preventDefault();
     const name = input.value.trim();
     if (!name) return input.focus();
-    try {
-      localStorage.setItem(NAME_KEY, name);
-    } catch {}
+    savedName = name;
+    keep(NAME_KEY, name);
     send({ t: "name", name });
     box.remove();
   });

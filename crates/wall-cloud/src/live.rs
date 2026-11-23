@@ -28,6 +28,7 @@ pub struct LivePeer {
     pub id: String,
     pub name: String,
     pub at: Option<[f32; 2]>,
+    pub color: Option<u8>,
 }
 
 pub enum LiveEvent {
@@ -43,6 +44,7 @@ enum Out {
     Board(Uuid),
     Cursor(Option<[f32; 2]>),
     Name(String),
+    Color(Option<u8>),
 }
 
 pub struct Live {
@@ -52,7 +54,7 @@ pub struct Live {
 
 impl Live {
     /// Connects to `server` (`https://…`) with `key`, showing `name` to others.
-    pub fn start(server: &str, key: &str, name: &str) -> Self {
+    pub fn start(server: &str, key: &str, name: &str, color: Option<u8>) -> Self {
         let (tx, inbox) = channel();
         let (out, rx) = channel();
         let url = live_url(server);
@@ -61,7 +63,7 @@ impl Live {
         // ureq uses (an Err only means one is set already).
         let _ = rustls::crypto::ring::default_provider().install_default();
         if let Some(url) = url {
-            let _ = std::thread::Builder::new().name("wall-live".into()).spawn(move || run(url, key, name, inbox, out));
+            let _ = std::thread::Builder::new().name("wall-live".into()).spawn(move || run(url, key, name, color, inbox, out));
         }
         Self { tx, rx }
     }
@@ -78,6 +80,11 @@ impl Live {
 
     pub fn name(&self, name: &str) {
         let _ = self.tx.send(Out::Name(name.to_owned()));
+    }
+
+    /// The colour others see for us.
+    pub fn color(&self, color: Option<u8>) {
+        let _ = self.tx.send(Out::Color(color));
     }
 
     pub fn try_event(&self) -> Option<LiveEvent> {
@@ -128,11 +135,13 @@ struct WirePeer {
     x: Option<f32>,
     #[serde(default)]
     y: Option<f32>,
+    #[serde(default)]
+    color: Option<u8>,
 }
 
 impl From<WirePeer> for LivePeer {
     fn from(p: WirePeer) -> Self {
-        LivePeer { id: p.id, name: p.name, at: p.x.zip(p.y).map(|(x, y)| [x, y]) }
+        LivePeer { id: p.id, name: p.name, at: p.x.zip(p.y).map(|(x, y)| [x, y]), color: p.color }
     }
 }
 
@@ -141,11 +150,12 @@ struct Here {
     board: Option<Uuid>,
     cursor: Option<[f32; 2]>,
     name: String,
+    color: Option<u8>,
     peers: BTreeMap<String, LivePeer>,
 }
 
-fn run(url: String, key: String, name: String, inbox: Receiver<Out>, out: Sender<LiveEvent>) {
-    let mut here = Here { board: None, cursor: None, name, peers: BTreeMap::new() };
+fn run(url: String, key: String, name: String, color: Option<u8>, inbox: Receiver<Out>, out: Sender<LiveEvent>) {
+    let mut here = Here { board: None, cursor: None, name, color, peers: BTreeMap::new() };
     let mut retry = Duration::from_secs(1);
     loop {
         let started = Instant::now();
@@ -193,6 +203,7 @@ impl Here {
             Out::Board(b) => self.board = Some(b),
             Out::Cursor(c) => self.cursor = c,
             Out::Name(n) => self.name = n,
+            Out::Color(c) => self.color = c,
         }
     }
 }
@@ -212,12 +223,13 @@ fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &S
     let Ok((mut ws, _)) = tungstenite::client::connect_with_config(url, Some(limits), 0) else { return End::Lost };
     set_timeout(&ws, Some(POLL));
     let send = |ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, v: serde_json::Value| ws.send(Message::text(v.to_string())).is_ok();
-    let hello = json!({ "t": "hello", "key": key, "board": here.board.map(|b| b.to_string()), "name": here.name });
+    let hello = json!({ "t": "hello", "key": key, "board": here.board.map(|b| b.to_string()), "name": here.name, "color": here.color });
     if !send(&mut ws, hello) {
         return End::Lost;
     }
     let mut sent_board = here.board;
     let mut sent_name = here.name.clone();
+    let mut sent_color = here.color;
     let mut sent_cursor: Option<Option<[f32; 2]>> = None;
     let mut last_cursor = Instant::now() - CURSOR_EVERY;
     let mut last_ping = Instant::now();
@@ -251,6 +263,12 @@ fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &S
                 return End::Lost;
             }
             sent_name = here.name.clone();
+        }
+        if here.color != sent_color {
+            if !send(&mut ws, json!({ "t": "name", "color": here.color })) {
+                return End::Lost;
+            }
+            sent_color = here.color;
         }
         if here.peers.is_empty() {
             sent_cursor = None; // nobody to see it: nothing to send
@@ -351,11 +369,11 @@ mod tests {
     fn messages_keep_the_list_of_people() {
         let (tx, rx) = channel();
         let board = Uuid::new_v4();
-        let mut h = Here { board: Some(board), cursor: None, name: "Paul".into(), peers: BTreeMap::new() };
+        let mut h = Here { board: Some(board), cursor: None, name: "Paul".into(), color: None, peers: BTreeMap::new() };
         let m = |s: &str| serde_json::from_str::<In>(s).unwrap();
         let peers = format!(r#"{{"t":"peers","board":"{board}","peers":[{{"id":"a","name":"Mia","x":1,"y":2}}]}}"#);
         assert!(h.apply(m(&peers), &tx));
-        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p == vec![LivePeer { id: "a".into(), name: "Mia".into(), at: Some([1.0, 2.0]) }]));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p == vec![LivePeer { id: "a".into(), name: "Mia".into(), at: Some([1.0, 2.0]), color: None }]));
         // For another board (an answer that crossed a board change): ignored.
         let other = r#"{"t":"peers","board":"00000000-0000-0000-0000-000000000000","peers":[]}"#;
         assert!(h.apply(m(other), &tx));

@@ -19,7 +19,8 @@ pub enum CloudAsk {
     /// The library's links and how much room it uses.
     Links,
     /// A new link to a board (None: the whole library).
-    Make { board: Option<Uuid>, edit: bool, label: String },
+    /// `person`: the name the one who opens it shows as ("" lets them type their own).
+    Make { board: Option<Uuid>, edit: bool, label: String, person: String },
     Revoke(Uuid),
 }
 
@@ -30,6 +31,8 @@ pub struct ShareLink {
     pub edit: bool,
     pub board: Option<Uuid>,
     pub label: String,
+    /// Made for this person ("" for anyone).
+    pub person: String,
 }
 
 /// The shell's answer to a [`CloudAsk`].
@@ -60,11 +63,19 @@ pub struct ShareCard {
     pub note: Option<String>,
     /// The newest link made, shown so it can be copied again.
     pub made: Option<String>,
+    /// Who the next link is for (their name on the board), typed on the card.
+    pub person: String,
+    /// The keyboard types into `person`.
+    pub typing: bool,
 }
+
+/// The longest name a link can carry.
+const MAX_PERSON: usize = 40;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShareHit {
     Make { edit: bool },
+    Person,
     CopyAgain,
     Revoke(Uuid),
     Close,
@@ -96,7 +107,7 @@ fn mb(bytes: u64) -> String {
     if bytes >= 1 << 30 { format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64) } else { format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64) }
 }
 
-pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2], text_width: &mut dyn FnMut(&str, f32) -> f32) -> ShareLayout {
+pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewport: [f32; 2], text_width: &mut dyn FnMut(&str, f32) -> f32) -> ShareLayout {
     let t = theme::t();
     let mut l = ShareLayout::default();
     let x0 = ((viewport[0] - W) / 2.0).max(8.0);
@@ -125,6 +136,19 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
         let opens = if card.has_inside { "this board and the boards inside it" } else { "this board" };
         wrap(text_width, &mut texts, &mut y, &format!("Anyone with a link can open {opens}, and boards you put inside later, until you turn the link off. They can't reach your other boards."), t.dim, x0 + PAD, inner);
         y += 6.0;
+        // Who it's for: their name on the board, so they don't type one.
+        texts.push(TextRun { text: "FOR (OPTIONAL)".into(), at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
+        y += 14.0;
+        let field = [x0 + PAD, y, inner, 30.0];
+        l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: if card.typing { t.accent } else { t.line }, radius: 6.0, stroke_w: if card.typing { 1.5 } else { 1.0 } });
+        let (shown, ink) = if card.person.is_empty() && !card.typing { ("Anyone: they type their own name".to_owned(), t.dim) } else { (panel::fit_with(text_width, &card.person, 13.0, inner - 20.0), t.ink) };
+        let tw = if card.person.is_empty() { 0.0 } else { text_width(&shown, 13.0) };
+        texts.push(TextRun { text: if card.person.is_empty() && card.typing { String::new() } else { shown }, at: [field[0] + 9.0, field[1] + 20.0], size: 13.0, color: ink });
+        if card.typing && caret {
+            l.boxes.push(PanelBox { rect: [field[0] + 10.0 + tw, field[1] + 7.0, 1.5, 16.0], fill: t.ink, stroke: [0.0; 4], radius: 0.0, stroke_w: 0.0 });
+        }
+        l.hits.push((field, ShareHit::Person));
+        y += 30.0 + 10.0;
         let bw = (inner - 10.0) / 2.0;
         buttons.push(([x0 + PAD, y, bw, 32.0], "Copy view link", true, ShareHit::Make { edit: false }));
         buttons.push(([x0 + PAD + bw + 10.0, y, bw, 32.0], "Copy edit link", false, ShareHit::Make { edit: true }));
@@ -147,11 +171,14 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
         y += 16.0;
         for (k, through) in mine.iter().take(8) {
             let what = if k.edit { "Can edit" } else { "View only" };
-            let label = match through {
+            let mut label = match through {
                 Some(name) => format!("{what}  ·  through {name}"),
                 None if k.label.is_empty() => what.to_owned(),
                 None => format!("{what}  ·  {}", k.label),
             };
+            if !k.person.is_empty() {
+                label = format!("{label}  ·  for {}", k.person);
+            }
             texts.push(TextRun { text: panel::fit_with(text_width, &label, 12.5, inner - 90.0), at: [x0 + PAD, y + ROW / 2.0 + 4.5], size: 12.5, color: t.ink });
             buttons.push(([x0 + W - PAD - 76.0, y + 4.0, 76.0, ROW - 8.0], "Turn off", false, ShareHit::Revoke(k.id)));
             y += ROW;
@@ -175,7 +202,7 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], viewport: [f32; 2],
     }
     y += PAD;
     l.rect = [x0, y0, W, y - y0];
-    l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
+    l.boxes.insert(0, PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
     l.texts = texts;
     for (r, label, primary, hit) in buttons {
         button(&mut l, r, label, primary, hover, hit, text_width);
@@ -245,7 +272,8 @@ impl App {
         let card = self.share.clone()?;
         let name = self.doc.board.name.clone();
         let font = &mut self.font;
-        Some(layout(&card, &name, self.cursor, self.viewport, &mut |s, size| panel::text_width(font, s, size)))
+        let caret = (self.now_ms / 530) % 2 == 0;
+        Some(layout(&card, &name, self.cursor, caret, self.viewport, &mut |s, size| panel::text_width(font, s, size)))
     }
 
     /// A press while the card is open. True when the card took it (a press
@@ -259,17 +287,23 @@ impl App {
         }
         let Some(hit) = l.hits.iter().rev().find(|(r, _)| panel::inside(*r, pos)).map(|(_, h)| h.clone()) else { return true };
         let busy = self.share.as_ref().is_some_and(|c| c.busy);
+        if let Some(c) = &mut self.share {
+            c.typing = hit == ShareHit::Person;
+        }
         match hit {
+            ShareHit::Person => {}
             ShareHit::Close => self.share = None,
             _ if busy => {}
             ShareHit::Make { edit } => {
                 let board = self.doc.board.id;
                 let label = self.doc.board.name.clone();
+                let mut person = String::new();
                 if let Some(c) = &mut self.share {
                     c.busy = true;
                     c.note = None;
+                    person = std::mem::take(&mut c.person).trim().to_owned();
                 }
-                self.shell_commands.push(ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit, label }));
+                self.shell_commands.push(ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit, label, person }));
             }
             ShareHit::CopyAgain => {
                 if let Some(url) = self.share.as_ref().and_then(|c| c.made.clone()) {
@@ -290,7 +324,42 @@ impl App {
         true
     }
 
+    /// Typing the name of who a link is for.
+    pub(crate) fn share_typing(&self) -> bool {
+        self.share.as_ref().is_some_and(|c| c.typing)
+    }
+
+    pub(crate) fn share_key(&mut self, key: crate::Key) -> bool {
+        use crate::Key;
+        let Some(c) = self.share.as_mut().filter(|c| c.typing) else { return false };
+        match key {
+            Key::Escape | Key::Enter => c.typing = false,
+            Key::Backspace => {
+                c.person.pop();
+            }
+            Key::Char(ch) if !ch.is_control() && c.person.chars().count() < MAX_PERSON => c.person.push(ch),
+            _ => {}
+        }
+        self.needs_redraw = true;
+        true
+    }
+
+    pub(crate) fn share_text(&mut self, s: &str) -> bool {
+        let Some(c) = self.share.as_mut().filter(|c| c.typing) else { return false };
+        for ch in s.chars().filter(|ch| !ch.is_control()) {
+            if c.person.chars().count() >= MAX_PERSON {
+                break;
+            }
+            c.person.push(ch);
+        }
+        self.needs_redraw = true;
+        true
+    }
+
     pub(crate) fn draw_share(&mut self, renderer: &mut Renderer) {
+        if self.share_typing() {
+            self.needs_redraw = true; // the caret blinks
+        }
         let Some(l) = self.share_layout() else { return };
         let view = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
         let boxes: Vec<BoxInstance> = l.boxes.iter().map(|b| BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] }).collect();
@@ -333,20 +402,35 @@ mod tests {
         a.run_command(crate::menu::Command::Share);
         assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Links)]);
         let old = Uuid::new_v4();
-        let other = ShareLink { id: Uuid::new_v4(), edit: true, board: Some(Uuid::new_v4()), label: String::new() };
-        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: "client".into() }, other], used: Some(150 << 20), max: Some(4 << 30) });
+        let other = ShareLink { id: Uuid::new_v4(), edit: true, board: Some(Uuid::new_v4()), label: String::new(), person: String::new() };
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: "client".into(), person: String::new() }, other], used: Some(150 << 20), max: Some(4 << 30) });
         let l = a.share_layout().unwrap();
         assert_eq!(l.hits.iter().filter(|(_, h)| matches!(h, ShareHit::Revoke(_))).count(), 1, "only this board's links");
         assert!(l.texts.iter().any(|t| t.text.contains("150 MB of 4.0 GB")));
 
         press(&mut a, &ShareHit::Make { edit: true });
-        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: true, label: "Moodboard".into() })]);
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: true, label: "Moodboard".into(), person: String::new() })]);
         a.cloud_answer(CloudAnswer::Made { url: "https://wall.example/#share=abc".into(), edit: true });
         let cmds = a.take_shell_commands();
         assert_eq!(cmds[0], ShellCommand::CopyText("https://wall.example/#share=abc".into()));
         assert_eq!(cmds[1], ShellCommand::Cloud(CloudAsk::Links));
 
-        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: String::new() }], used: None, max: None });
+        // A link for one person: their name goes with it.
+        press(&mut a, &ShareHit::Person);
+        assert!(a.is_editing());
+        a.text_input("Mia ");
+        a.key(Key::Char('K'));
+        a.key(Key::Backspace);
+        a.key(Key::Enter);
+        assert!(!a.is_editing());
+        a.cloud_answer(CloudAnswer::Links { links: vec![], used: None, max: None });
+        press(&mut a, &ShareHit::Make { edit: false });
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: false, label: "Moodboard".into(), person: "Mia".into() })]);
+        assert_eq!(a.share_card().unwrap().person, "", "the next link is for anyone again");
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: Uuid::new_v4(), edit: false, board: Some(board), label: String::new(), person: "Mia".into() }], used: None, max: None });
+        assert!(a.share_layout().unwrap().texts.iter().any(|t| t.text.ends_with("for Mia")));
+
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: String::new(), person: String::new() }], used: None, max: None });
         press(&mut a, &ShareHit::Revoke(old));
         assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Revoke(old))]);
         a.cloud_answer(CloudAnswer::Revoked(old));
@@ -359,7 +443,7 @@ mod tests {
         a.open_board(child, true);
         a.run_command(crate::menu::Command::Share);
         a.take_shell_commands();
-        let k = |b: Option<Uuid>| ShareLink { id: Uuid::new_v4(), edit: false, board: b, label: "x".into() };
+        let k = |b: Option<Uuid>| ShareLink { id: Uuid::new_v4(), edit: false, board: b, label: "x".into(), person: String::new() };
         a.cloud_answer(CloudAnswer::Links { links: vec![k(Some(board)), k(None), k(Some(Uuid::new_v4()))], used: None, max: None });
         let l = a.share_layout().unwrap();
         assert_eq!(l.hits.iter().filter(|(_, h)| matches!(h, ShareHit::Revoke(_))).count(), 2);

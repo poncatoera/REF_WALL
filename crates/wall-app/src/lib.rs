@@ -302,6 +302,9 @@ pub struct App {
     my_name: Option<String>,
     /// Typing a new name for ourselves.
     name_edit: Option<String>,
+    my_color: Option<u8>,
+    /// Our name comes with the link we opened.
+    name_fixed: bool,
     /// Set by the desktop shell: shows the menu entries only it can carry out.
     pub desktop: bool,
     /// The library drawer, while open (L).
@@ -399,6 +402,8 @@ impl App {
             cursor_out: false,
             my_name: None,
             name_edit: None,
+            my_color: None,
+            name_fixed: false,
             desktop: false,
             library_view: None,
             show_grid: true,
@@ -1444,7 +1449,7 @@ impl App {
         if self.menu_open.take().is_some() && key == Key::Escape {
             return;
         }
-        if self.name_key(key) || self.sidebar_key(key) {
+        if self.name_key(key) || self.share_key(key) || self.sidebar_key(key) {
             return;
         }
         if let (toolbar::Tool::Pen, Key::Char(c)) = (self.tool, key) {
@@ -1937,7 +1942,7 @@ impl App {
     /// True while the keyboard types into an item; shells then send typed
     /// characters to [`Self::text_input`] instead of shortcuts like Space.
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some() || self.name_edit.is_some() || self.sidebar_typing()
+        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some() || self.name_edit.is_some() || self.share_typing() || self.sidebar_typing()
     }
 
     /// Starts typing into an item's text, caret at the end.
@@ -2070,7 +2075,7 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
-        if self.name_text(s) || self.sidebar_text(s) {
+        if self.name_text(s) || self.share_text(s) || self.sidebar_text(s) {
             return true;
         }
         if let Some(e) = &mut self.panel_edit {

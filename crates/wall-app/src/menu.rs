@@ -102,6 +102,8 @@ pub enum ShellCommand {
     /// The name others on a shared board see for this person changed: keep
     /// it and tell the live connection.
     SetName(String),
+    /// The colour others see for this person (one of 8).
+    SetColor(u8),
 }
 
 impl Command {

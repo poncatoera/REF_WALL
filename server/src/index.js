@@ -176,6 +176,11 @@ async function mediaRequest(request, env, who, hash, url) {
 const no = (status, error) => ({ status, error });
 
 // A name others will see: one line, no control characters, not too long.
+// One of the 8 colours people can pick (an index), or null for "by id".
+function cleanColor(v) {
+  return Number.isInteger(v) && v >= 0 && v < 8 ? v : null;
+}
+
 // "Guest" (or the default given) for none, or one called "Guest" itself.
 function cleanName(v, fallback = "Guest") {
   const s = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "").trim() : "";
@@ -201,6 +206,10 @@ export class LibraryDO extends DurableObject {
         -- bytes as a file already here), so it may put them on its boards.
         CREATE TABLE IF NOT EXISTS grants (link TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (link, hash)) WITHOUT ROWID;
       `);
+      // Added later: the person a link is for ("Mia"); empty for anyone.
+      if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'person'").length) {
+        this.sql.exec("ALTER TABLE links ADD COLUMN person TEXT NOT NULL DEFAULT ''");
+      }
     });
     // Hashes a board-only link may read, kept while nothing changes.
     this.readable = new Map();
@@ -256,7 +265,7 @@ export class LibraryDO extends DurableObject {
   }
 
   peer(a) {
-    return { id: a.id, name: a.name, x: a.x ?? null, y: a.y ?? null };
+    return { id: a.id, name: a.name, color: a.color ?? null, x: a.x ?? null, y: a.y ?? null };
   }
 
   // What someone who gave no name is called: "Guest (Nike team)" for a
@@ -291,11 +300,15 @@ export class LibraryDO extends DurableObject {
       if (!access) return ws.close(4003, "this link doesn't work (any more)");
       a.who = who;
       a.guest = this.guestName(access);
-      a.name = cleanName(m.name, a.guest);
+      // A link made for one person carries their name; they can't change it.
+      const person = access.link ? cleanName(this.rows("SELECT person FROM links WHERE id = ?", access.link)[0]?.person, "") : "";
+      a.fixed = !!person;
+      a.name = person || cleanName(m.name, a.guest);
+      a.color = cleanColor(m.color);
       a.board = null;
       a.at = 0;
       ws.serializeAttachment(a);
-      this.send(ws, { t: "welcome", id: a.id, seq: this.seq() });
+      this.send(ws, { t: "welcome", id: a.id, seq: this.seq(), ...(a.fixed ? { name: a.name } : {}) });
       if (typeof m.board === "string") return this.join(ws, a, access, m.board);
       return;
     }
@@ -303,7 +316,8 @@ export class LibraryDO extends DurableObject {
     if (!access) return ws.close(4003, "this link doesn't work (any more)");
     if (m.t === "board" && typeof m.board === "string") return this.join(ws, a, access, m.board);
     if (m.t === "name") {
-      a.name = cleanName(m.name, a.guest || "Guest");
+      if (!a.fixed && "name" in m) a.name = cleanName(m.name, a.guest || "Guest");
+      if ("color" in m) a.color = cleanColor(m.color);
       ws.serializeAttachment(a);
       return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
     }
@@ -673,7 +687,7 @@ export class LibraryDO extends DurableObject {
 
   async listLinks(who) {
     if (this.access(who)?.role !== "owner") return no(403, "owner only");
-    return { links: this.rows("SELECT id, role, board, label, created FROM links WHERE revoked = 0 ORDER BY created") };
+    return { links: this.rows("SELECT id, role, board, label, person, created FROM links WHERE revoked = 0 ORDER BY created") };
   }
 
   async makeLink(who, req) {
@@ -685,8 +699,12 @@ export class LibraryDO extends DurableObject {
     if (board !== null && !this.rows("SELECT 1 FROM boards WHERE id = ? AND deleted = 0", board)[0]) return no(404, "sync that board first");
     const secret = newSecret();
     const id = crypto.randomUUID();
-    this.sql.exec("INSERT INTO links VALUES (?, ?, ?, ?, ?, ?, 0)", id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), Date.now());
-    return { id, secret, role, board };
+    const person = cleanName(req.person, "");
+    this.sql.exec(
+      "INSERT INTO links (id, secret, role, board, label, created, revoked, person) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+      id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), Date.now(), person,
+    );
+    return { id, secret, role, board, person };
   }
 
   async revokeLink(who, id) {

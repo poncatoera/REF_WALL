@@ -89,7 +89,7 @@ fn cloud_dir() -> Res<std::path::PathBuf> {
 fn cloud_key(lib: &Library) -> Res<String> {
     let dir = cloud_dir()?;
     let mut all = wall_cloud::Accounts::load(&dir);
-    let a = all.libraries.entry(lib.manifest().id).or_insert_with(|| wall_cloud::Account { server: String::new(), key: wall_cloud::new_key(), root: Some(full(lib.root())), name: None });
+    let a = all.libraries.entry(lib.manifest().id).or_insert_with(|| wall_cloud::Account { server: String::new(), key: wall_cloud::new_key(), root: Some(full(lib.root())), name: None, color: None });
     let hash = wall_cloud::key_hash(&a.key);
     all.save(&dir).map_err(|e| e.to_string())?;
     Ok(format!("{hash}\n"))
@@ -127,7 +127,7 @@ fn share(lib: &Library, board: &str, how: &str, label: &str) -> Res<String> {
     };
     let board = if board == "all" { None } else { Some(pick_board(&all_boards(lib)?, board)?.id) };
     let c = cloud_client(lib)?;
-    let l = c.make_link(board, edit, label).map_err(|e| e.to_string())?;
+    let l = c.make_link(board, edit, label, "").map_err(|e| e.to_string())?;
     let secret = l.secret.ok_or("the server gave no link")?;
     Ok(format!("{}\nAnyone with this address can {} it until: wall-cli unshare <library> {}\n", c.link_address(&secret), if edit { "change" } else { "look at" }, l.id))
 }

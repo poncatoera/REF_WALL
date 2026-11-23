@@ -39,6 +39,17 @@ extern "C" {
     fn live_my_name() -> String;
     #[wasm_bindgen(js_name = liveSetName)]
     fn live_set_name(name: &str);
+    #[wasm_bindgen(js_name = liveMyColor)]
+    fn live_my_color() -> i32;
+    #[wasm_bindgen(js_name = liveSetColor)]
+    fn live_set_color(c: u8);
+}
+
+/// A colour picked on the board.
+pub fn set_color(c: u8) {
+    if LIVE.with(|l| l.borrow().is_some()) {
+        live_set_color(c);
+    }
 }
 
 /// A name typed on the board (the app's own badge).
@@ -64,6 +75,8 @@ struct LivePeer {
     name: String,
     x: Option<f32>,
     y: Option<f32>,
+    #[serde(default)]
+    color: Option<u8>,
 }
 
 /// Each frame, on a page opened by a link: tells the others which board
@@ -75,11 +88,16 @@ pub fn tick(app: &mut App) {
         // Our badge shows the name chosen in this browser ("Guest" until then).
         if !app.name_typing() {
             let n = live_my_name();
+            let fixed = n.starts_with('=');
+            app.set_name_fixed(fixed);
+            let n = n.strip_prefix('=').map(str::to_owned).unwrap_or(n);
             let name = if n.trim().is_empty() { "Guest".to_owned() } else { n };
             if app.my_name() != Some(name.as_str()) {
                 app.set_my_name(Some(name));
             }
         }
+        let c = live_my_color();
+        app.set_my_color((0..8).contains(&c).then_some(c as u8));
         let board = app.board_id();
         if l.board != Some(board) {
             l.board = Some(board);
@@ -104,7 +122,7 @@ pub fn tick(app: &mut App) {
             app.set_peers(
                 peers
                     .into_iter()
-                    .map(|p| wall_app::presence::Peer { at: p.x.zip(p.y).map(|(x, y)| [x, y]), id: p.id, name: p.name })
+                    .map(|p| wall_app::presence::Peer { at: p.x.zip(p.y).map(|(x, y)| [x, y]), id: p.id, name: p.name, color: p.color })
                     .collect(),
             );
         }

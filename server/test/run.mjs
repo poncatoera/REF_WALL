@@ -464,6 +464,28 @@ test("live: no name gives the link's label; names can change", async () => {
   paul.close();
 });
 
+test("live: a link made for one person carries their name; colours are kept", async () => {
+  const mias = (await call(owner, "links", { method: "POST", json: { role: "view", board: A, label: "x", person: "  Mia  " } })).data;
+  assert.equal(mias.person, "Mia");
+  assert.ok((await call(owner, "links")).data.links.some((l) => l.id === mias.id && l.person === "Mia"));
+  const paul = live(owner, A, "Paul");
+  await paul.next((m) => m.t === "peers");
+  const mia = live(mias.secret, A, "Someone else");
+  mia.ws.addEventListener("open", () => {});
+  const w = await mia.next((m) => m.t === "welcome");
+  assert.equal(w.name, "Mia", "told the name the link carries");
+  const p = await paul.next((m) => m.t === "peer");
+  assert.deepEqual([p.peer.name, p.peer.color], ["Mia", null]);
+  await mia.next((m) => m.t === "peers");
+  mia.send({ t: "name", name: "Not Mia", color: 3 });
+  const q = await paul.next((m) => m.t === "peer");
+  assert.deepEqual([q.peer.name, q.peer.color], ["Mia", 3], "the name stays, the colour changes");
+  mia.send({ t: "name", color: 99 });
+  assert.equal((await paul.next((m) => m.t === "peer")).peer.color, null);
+  await call(owner, `links/${mias.id}`, { method: "DELETE" });
+  paul.close();
+});
+
 test("live: revoking a link disconnects whoever uses it", async () => {
   const temp = (await call(owner, "links", { method: "POST", json: { role: "edit", board: A } })).data;
   const paul = live(owner, A, "Paul");
