@@ -490,7 +490,15 @@ struct Cloud {
     worker: wall_cloud::Worker,
     stamp: u64,
     root: std::path::PathBuf,
+    /// Who else is on the board, and changes as they happen.
+    live: Option<wall_cloud::live::Live>,
+    live_board: Option<uuid::Uuid>,
+    live_cursor: Option<[f32; 2]>,
 }
+
+/// How often the window looks for news while others are on the board
+/// (their pointers move smoothly).
+const LIVE_LOOK: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// How often the window looks whether the cloud brought something.
 const CLOUD_LOOK: std::time::Duration = std::time::Duration::from_millis(300);
@@ -502,8 +510,10 @@ impl Cloud {
         let dir = wall_cloud::settings_dir()?;
         let lib = wall_format::Library::open(&root).ok()?;
         let account = wall_cloud::Accounts::load(&dir).find(&lib)?;
+        let name = account.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Owner".into());
+        let live = wall_cloud::live::Live::start(&account.server, &account.key, &name);
         match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
-            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root }),
+            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None }),
             Err(e) => {
                 eprintln!("wall: cloud: {e}");
                 None
@@ -513,6 +523,7 @@ impl Cloud {
 
     fn pump(&mut self, app: &mut App, window_title: &str, window: &Window) {
         use wall_cloud::{Event, Status};
+        self.live_tick(app);
         if app.busy_editing() {
             return; // merged when the drag or typing is over
         }
@@ -548,6 +559,46 @@ impl Cloud {
                 self.stamp = stamp;
                 self.worker.boards(b);
             }
+        }
+    }
+}
+
+impl Cloud {
+    /// Tells the others which board and where the pointer is, and shows who
+    /// else is here.
+    fn live_tick(&mut self, app: &mut App) {
+        use wall_cloud::live::LiveEvent;
+        let Some(live) = &self.live else { return };
+        let board = app.board_id();
+        if self.live_board != Some(board) {
+            live.board(board);
+            self.live_board = Some(board);
+            self.live_cursor = None;
+        }
+        let at = app.pointer_on_board();
+        // Less than a pixel on screen isn't worth a message.
+        let moved = match (at, self.live_cursor) {
+            (Some(a), Some(b)) => (a[0] - b[0]).abs().max((a[1] - b[1]).abs()) * app.camera.zoom >= 1.0,
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if moved {
+            live.cursor(at);
+            self.live_cursor = at;
+        }
+        let mut stop = false;
+        while let Some(e) = live.try_event() {
+            match e {
+                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at }).collect()),
+                LiveEvent::Changed => self.worker.poke(),
+                LiveEvent::Stopped(why) => {
+                    eprintln!("wall: live: {why}");
+                    stop = true;
+                }
+            }
+        }
+        if stop {
+            app.set_peers(Vec::new());
+            self.live = None;
         }
     }
 }
@@ -644,6 +695,7 @@ impl ApplicationHandler for Shell {
                 self.cursor = [position.x as f32, position.y as f32];
                 self.app.pointer_move(self.cursor);
             }
+            WindowEvent::CursorLeft { .. } => self.app.pointer_left(),
             WindowEvent::MouseWheel { delta, .. } => {
                 let w = match delta {
                     MouseScrollDelta::LineDelta(_, y) => Wheel::Lines(y),
@@ -876,7 +928,8 @@ impl ApplicationHandler for Shell {
         if self.app.needs_redraw {
             gfx.window.request_redraw();
         }
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(Instant::now() + CLOUD_LOOK));
+        let look = if self.app.peers().is_empty() { CLOUD_LOOK } else { LIVE_LOOK };
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(Instant::now() + look));
     }
 }
 

@@ -89,7 +89,7 @@ fn cloud_dir() -> Res<std::path::PathBuf> {
 fn cloud_key(lib: &Library) -> Res<String> {
     let dir = cloud_dir()?;
     let mut all = wall_cloud::Accounts::load(&dir);
-    let a = all.libraries.entry(lib.manifest().id).or_insert_with(|| wall_cloud::Account { server: String::new(), key: wall_cloud::new_key(), root: Some(full(lib.root())) });
+    let a = all.libraries.entry(lib.manifest().id).or_insert_with(|| wall_cloud::Account { server: String::new(), key: wall_cloud::new_key(), root: Some(full(lib.root())), name: None });
     let hash = wall_cloud::key_hash(&a.key);
     all.save(&dir).map_err(|e| e.to_string())?;
     Ok(format!("{hash}\n"))

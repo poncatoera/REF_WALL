@@ -68,7 +68,7 @@ fn client(key: &str) -> Client {
 }
 
 fn account(key: &str) -> Account {
-    Account { server: server(), key: key.into(), root: None }
+    Account { server: server(), key: key.into(), root: None, name: None }
 }
 
 /// One computer: an app, its library, and its sync worker.
@@ -309,9 +309,9 @@ fn libraries_stay_the_same_through_the_cloud() {
 #[test]
 fn a_key_never_goes_to_an_odd_address_and_isnt_printed() {
     for s in ["http://example.com", "ftp://x", "https://a@b.com", "https://x.dev/?a", "http://127.0.0.1.evil.com:80", "javascript:1"] {
-        assert!(Client::new(Account { server: s.into(), key: "k".into(), root: None }).is_err(), "{s}");
+        assert!(Client::new(Account { server: s.into(), key: "k".into(), root: None, name: None }).is_err(), "{s}");
     }
-    let a = Account { server: "https://x.dev".into(), key: "sesame".into(), root: None };
+    let a = Account { server: "https://x.dev".into(), key: "sesame".into(), root: None, name: None };
     assert!(!format!("{a:?}").contains("sesame"));
     let dir = tempfile::tempdir().unwrap();
     let id = Uuid::new_v4();
@@ -329,6 +329,6 @@ fn a_key_never_goes_to_an_odd_address_and_isnt_printed() {
     let (k1, k2) = (wall_cloud::new_key(), wall_cloud::new_key());
     assert!(k1 != k2 && k1.len() == 96 && wall_cloud::key_hash("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     // No server there: offline, not a lost key.
-    let c = Client::new(Account { server: "http://127.0.0.1:9".into(), key: "k".into(), root: None }).unwrap();
+    let c = Client::new(Account { server: "http://127.0.0.1:9".into(), key: "k".into(), root: None, name: None }).unwrap();
     assert!(matches!(c.me(), Err(CloudError::Offline(_))));
 }

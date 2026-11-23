@@ -6,6 +6,8 @@
 //! `cloud.json` holds each library's server and key, `cloud-<library>.json`
 //! what has been synced.
 
+pub mod live;
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -37,6 +39,9 @@ pub struct Account {
     /// same id, and opening it must not bring deleted boards back.
     #[serde(default)]
     pub root: Option<PathBuf>,
+    /// The name others on a shared board see for this person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 // Not derived: a key must not end up in a log.
@@ -314,6 +319,8 @@ pub enum Event {
 enum Msg {
     Boards(Vec<Board>),
     Applied(BTreeSet<Uuid>, Vec<Board>),
+    /// Someone changed something: look now.
+    Poke,
 }
 
 pub struct Worker {
@@ -331,7 +338,7 @@ impl Worker {
         let state = std::fs::read(&state_file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let (tx, inbox) = channel();
         let (out, rx) = channel();
-        let mut e = Engine { lib, client, state, state_file, memory: boards, files: HashMap::new(), sidecars: HashMap::new(), out, inbox, full: false, status: None, view: false };
+        let mut e = Engine { lib, client, state, state_file, memory: boards, files: HashMap::new(), sidecars: HashMap::new(), out, inbox, full: false, status: None, view: false, poked: false };
         std::thread::Builder::new().name("wall-cloud".into()).spawn(move || e.run()).map_err(|e| CloudError::Other(e.to_string()))?;
         Ok(Self { tx, rx })
     }
@@ -350,6 +357,11 @@ impl Worker {
     pub fn try_event(&self) -> Option<Event> {
         self.rx.try_recv().ok()
     }
+
+    /// Someone else changed something (see [`live`]): pull now.
+    pub fn poke(&self) {
+        let _ = self.tx.send(Msg::Poke);
+    }
 }
 
 struct Engine {
@@ -367,6 +379,8 @@ struct Engine {
     status: Option<Status>,
     /// The link can only look: nothing goes up.
     view: bool,
+    /// A change elsewhere was announced during a round: another one at once.
+    poked: bool,
 }
 
 /// The app went away.
@@ -390,6 +404,7 @@ impl Engine {
                     }
                     last_change = Instant::now();
                 }
+                Ok(Msg::Poke) => last_change = Instant::now(),
                 Ok(Msg::Applied(..)) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -399,7 +414,13 @@ impl Engine {
                     if changed {
                         last_change = Instant::now();
                     }
-                    wait = if last_change.elapsed() < LIVELY { SOON } else { IDLE };
+                    wait = if std::mem::take(&mut self.poked) {
+                        Duration::ZERO
+                    } else if last_change.elapsed() < LIVELY {
+                        SOON
+                    } else {
+                        IDLE
+                    };
                     let s = if self.full { Status::Full } else { Status::UpToDate };
                     if self.say(s).is_err() {
                         return;
@@ -577,6 +598,7 @@ impl Engine {
                             break kept;
                         }
                         Ok(Msg::Boards(b)) => self.memory = b,
+                        Ok(Msg::Poke) => self.poked = true,
                         Err(_) => return Err(Gone),
                     }
                 };

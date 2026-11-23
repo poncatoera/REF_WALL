@@ -13,6 +13,7 @@ serde_json.workspace = true
 uuid.workspace = true
 ureq = "3"
 sha2 = "0.10"
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 wall-app.workspace = true
