@@ -107,6 +107,8 @@ impl Placement {
 #[derive(Default)]
 pub struct Layout {
     pub boxes: Vec<PanelBox>,
+    /// The icons: thin strokes, drawn over the boxes.
+    pub curves: Vec<wall_render::CurveInstance>,
     pub texts: Vec<TextRun>,
     pub hits: Vec<([f32; 4], Tool)>,
     /// The whole rail; clicks inside it never reach the board.
@@ -134,10 +136,6 @@ impl Layout {
 
     fn fill(&mut self, rect: [f32; 4], color: [f32; 4], radius: f32) {
         self.rect(rect, color, [0.0; 4], radius);
-    }
-
-    fn outline(&mut self, rect: [f32; 4], color: [f32; 4], radius: f32) {
-        self.rect(rect, [0.0; 4], color, radius);
     }
 }
 
@@ -204,8 +202,8 @@ pub fn layout(
     }
     let ink = if side_open { t.accent_text } else if over { t.ink } else { t.dim };
     let c = [r[0] + BUTTON / 2.0, r[1] + BUTTON / 2.0];
-    l.outline([c[0] - 9.0, c[1] - 7.0, 18.0, 14.0], ink, 2.5);
-    l.fill([c[0] - 9.0, c[1] - 7.0, 6.0, 14.0], ink, 1.5);
+    rbox(&mut l, c, ink, 4.0, 5.0, 16.0, 14.0, 2.0);
+    poly(&mut l, c, ink, &[[9.5, 5.0], [9.5, 19.0]], false);
     if over {
         tip = Some(("Boards and library  ·  S".to_string(), r));
     }
@@ -299,69 +297,119 @@ fn ghost_size(tool: Tool) -> [f32; 2] {
     }
 }
 
-/// Draws a tool's icon centred on `c`, from boxes and glyphs.
-fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
-    let [x, y] = c;
-    match tool {
-        Tool::Select => glyph(l, "↖", c, 19.0, ink),
-        Tool::Arrow => glyph(l, "↗", c, 19.0, ink),
-        Tool::Text => glyph(l, "T", c, 19.0, ink),
-        Tool::Stamp => glyph(l, "★", c, 17.0, ink),
-        Tool::Comment => {
-            // A speech bubble.
-            l.outline([x - 9.0, y - 8.0, 18.0, 13.0], ink, 6.0);
-            l.fill([x - 6.0, y + 3.0, 4.0, 5.0], ink, 0.5);
-        }
-        Tool::Pen => {
-            // A slanted line of dots with a heavier tip.
-            for k in 0..5 {
-                let o = k as f32 * 3.2;
-                l.fill([x + 6.0 - o - 1.2, y - 7.0 + o - 1.2, 2.6, 2.6], ink, 1.3);
-            }
-            l.fill([x - 9.0, y + 6.0, 3.0, 3.0], ink, 0.5);
-        }
-        Tool::Palette => {
-            for k in 0..3 {
-                let a = [1.0, 0.75, 0.5][k];
-                l.fill([x - 9.0 + k as f32 * 6.5, y - 7.0, 5.0, 14.0], [ink[0], ink[1], ink[2], ink[3] * a], 1.0);
-            }
-        }
-        Tool::Link => {
-            // Two linked rings.
-            l.outline([x - 9.0, y - 4.0, 11.0, 8.0], ink, 4.0);
-            l.outline([x - 2.0, y - 4.0, 11.0, 8.0], ink, 4.0);
-        }
-        Tool::Note => {
-            l.outline([x - 7.0, y - 8.0, 14.0, 16.0], ink, 2.0);
-            l.fill([x - 3.5, y - 3.0, 7.0, 1.4], ink, 0.0);
-            l.fill([x - 3.5, y + 0.5, 7.0, 1.4], ink, 0.0);
-        }
-        Tool::Todo => {
-            for k in 0..3 {
-                let ry = y - 7.0 + k as f32 * 5.5;
-                l.outline([x - 8.0, ry, 3.5, 3.5], ink, 0.8);
-                l.fill([x - 2.0, ry + 1.1, 10.0, 1.4], ink, 0.0);
-            }
-        }
-        Tool::Group => {
-            l.outline([x - 9.0, y - 7.0, 18.0, 14.0], ink, 2.5);
-            l.fill([x - 9.0, y - 7.0, 18.0, 4.0], ink, 1.5);
-        }
-        Tool::Board => {
-            l.outline([x - 9.0, y - 7.0, 18.0, 14.0], ink, 2.5);
-            l.outline([x - 4.0, y - 2.5, 8.0, 5.0], ink, 1.0);
-        }
-        Tool::Import => {
-            l.outline([x - 9.0, y - 7.0, 18.0, 14.0], ink, 2.5);
-            l.fill([x + 2.0, y - 4.0, 4.0, 4.0], ink, 2.0);
-            l.fill([x - 6.0, y + 2.0, 12.0, 2.0], ink, 0.5);
-        }
+/// Icons are drawn on a 24-unit grid (like an SVG icon) as thin strokes.
+type P = [f32; 2];
+
+/// A stroke from `a` to `b` bending toward `ctrl`, in grid units.
+fn seg(l: &mut Layout, c: [f32; 2], ink: [f32; 4], a: P, ctrl: P, b: P) {
+    const SCALE: f32 = 0.78;
+    let m = |p: P| [c[0] + (p[0] - 12.0) * SCALE, c[1] + (p[1] - 12.0) * SCALE];
+    let (a, ctrl, b) = (m(a), m(ctrl), m(b));
+    l.curves.push(wall_render::CurveInstance { p01: [a[0], a[1], ctrl[0], ctrl[1]], p2w: [b[0], b[1], 0.8, 0.0], color: ink });
+}
+
+/// Straight strokes through `pts`, closed back to the start if `closed`.
+fn poly(l: &mut Layout, c: [f32; 2], ink: [f32; 4], pts: &[P], closed: bool) {
+    let n = pts.len();
+    let count = if closed { n } else { n - 1 };
+    for i in 0..count {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        seg(l, c, ink, a, [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], b);
     }
 }
 
-/// One glyph roughly centred on `c` (cap height is about 0.7 em).
-fn glyph(l: &mut Layout, s: &str, c: [f32; 2], size: f32, ink: [f32; 4]) {
-    l.texts.push(TextRun { text: s.into(), at: [c[0] - size * 0.32, c[1] + size * 0.35], size, color: ink });
+/// A circle from eight bent strokes.
+fn circle(l: &mut Layout, c: [f32; 2], ink: [f32; 4], o: P, r: f32) {
+    let step = std::f32::consts::TAU / 8.0;
+    let k = r / (step / 2.0).cos();
+    for i in 0..8 {
+        let (a0, a1) = (i as f32 * step, (i + 1) as f32 * step);
+        let am = (a0 + a1) / 2.0;
+        let p = |a: f32, rr: f32| [o[0] + rr * a.cos(), o[1] + rr * a.sin()];
+        seg(l, c, ink, p(a0, r), p(am, k), p(a1, r));
+    }
+}
+
+/// A rounded box outline (corner radius `r`) in grid units.
+fn rbox(l: &mut Layout, c: [f32; 2], ink: [f32; 4], x: f32, y: f32, w: f32, h: f32, r: f32) {
+    let (x1, y1) = (x + w, y + h);
+    poly(l, c, ink, &[[x + r, y], [x1 - r, y]], false);
+    seg(l, c, ink, [x1 - r, y], [x1, y], [x1, y + r]);
+    poly(l, c, ink, &[[x1, y + r], [x1, y1 - r]], false);
+    seg(l, c, ink, [x1, y1 - r], [x1, y1], [x1 - r, y1]);
+    poly(l, c, ink, &[[x1 - r, y1], [x + r, y1]], false);
+    seg(l, c, ink, [x + r, y1], [x, y1], [x, y1 - r]);
+    poly(l, c, ink, &[[x, y1 - r], [x, y + r]], false);
+    seg(l, c, ink, [x, y + r], [x, y], [x + r, y]);
+}
+
+/// Draws a tool's icon centred on `c`.
+fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
+    match tool {
+        Tool::Select => poly(l, c, ink, &[[6.5, 4.0], [6.5, 19.0], [10.5, 15.0], [17.0, 15.0]], true),
+        Tool::Arrow => {
+            poly(l, c, ink, &[[5.0, 19.0], [19.0, 5.0]], false);
+            poly(l, c, ink, &[[10.0, 5.0], [19.0, 5.0], [19.0, 14.0]], false);
+        }
+        Tool::Text => {
+            poly(l, c, ink, &[[5.0, 7.0], [5.0, 5.0], [19.0, 5.0], [19.0, 7.0]], false);
+            poly(l, c, ink, &[[12.0, 5.0], [12.0, 19.0]], false);
+            poly(l, c, ink, &[[9.0, 19.0], [15.0, 19.0]], false);
+        }
+        Tool::Note => {
+            poly(l, c, ink, &[[19.0, 14.0], [19.0, 4.0], [5.0, 4.0], [5.0, 20.0], [13.0, 20.0], [19.0, 14.0]], false);
+            poly(l, c, ink, &[[13.0, 20.0], [13.0, 14.0], [19.0, 14.0]], false);
+        }
+        Tool::Todo => {
+            poly(l, c, ink, &[[4.0, 7.0], [6.0, 9.0], [9.5, 5.5]], false);
+            poly(l, c, ink, &[[4.0, 15.0], [6.0, 17.0], [9.5, 13.5]], false);
+            poly(l, c, ink, &[[12.5, 7.5], [20.0, 7.5]], false);
+            poly(l, c, ink, &[[12.5, 15.5], [20.0, 15.5]], false);
+        }
+        Tool::Group => {
+            poly(l, c, ink, &[[4.0, 8.5], [4.0, 4.0], [8.5, 4.0]], false);
+            poly(l, c, ink, &[[15.5, 4.0], [20.0, 4.0], [20.0, 8.5]], false);
+            poly(l, c, ink, &[[20.0, 15.5], [20.0, 20.0], [15.5, 20.0]], false);
+            poly(l, c, ink, &[[8.5, 20.0], [4.0, 20.0], [4.0, 15.5]], false);
+        }
+        Tool::Pen => {
+            poly(l, c, ink, &[[4.5, 19.5], [5.5, 15.5], [16.0, 5.0], [19.0, 8.0], [8.5, 18.5]], true);
+            poly(l, c, ink, &[[13.5, 7.5], [16.5, 10.5]], false);
+        }
+        Tool::Comment => {
+            poly(l, c, ink, &[[5.0, 5.0], [19.0, 5.0], [19.0, 15.5], [10.5, 15.5], [5.0, 19.5]], true);
+        }
+        Tool::Stamp => {
+            let mut pts = Vec::new();
+            for i in 0..10 {
+                let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let r = if i % 2 == 0 { 8.5 } else { 3.8 };
+                pts.push([12.0 + r * a.cos(), 12.8 + r * a.sin()]);
+            }
+            poly(l, c, ink, &pts, true);
+        }
+        Tool::Board => {
+            for (x, y) in [(4.0, 4.0), (13.0, 4.0), (4.0, 13.0), (13.0, 13.0)] {
+                rbox(l, c, ink, x, y, 7.0, 7.0, 1.2);
+            }
+        }
+        Tool::Link => {
+            rbox(l, c, ink, 2.5, 8.5, 11.0, 7.0, 3.5);
+            rbox(l, c, ink, 10.5, 8.5, 11.0, 7.0, 3.5);
+        }
+        Tool::Palette => {
+            circle(l, c, ink, [12.0, 12.0], 8.5);
+            for (x, y) in [(8.5, 10.0), (12.0, 7.5), (15.5, 10.0)] {
+                let m = |v: f32, o: f32| o + (v - 12.0) * 0.78;
+                l.fill([m(x, c[0]) - 1.3, m(y, c[1]) - 1.3, 2.6, 2.6], ink, 1.3);
+            }
+        }
+        Tool::Import => {
+            poly(l, c, ink, &[[12.0, 4.0], [12.0, 15.0]], false);
+            poly(l, c, ink, &[[7.5, 10.5], [12.0, 15.0], [16.5, 10.5]], false);
+            poly(l, c, ink, &[[5.0, 19.5], [19.0, 19.5]], false);
+        }
+    }
 }
 
 #[cfg(test)]

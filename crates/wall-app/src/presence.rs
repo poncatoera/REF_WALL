@@ -326,13 +326,11 @@ impl App {
         let cam = self.camera;
         let vp = self.viewport;
         let to_screen = move |p: [f32; 2]| [(p[0] - cam.center[0]) * cam.zoom + vp[0] * 0.5, (p[1] - cam.center[1]) * cam.zoom + vp[1] * 0.5];
-        let title = self.breadcrumb().join("  ›  ");
         let caret = (self.now_ms / 530) % 2 == 0;
         let me = self.my_name.as_deref().map(|name| Me { name, editing: self.name_edit.as_deref(), caret, color: self.my_color, fixed: self.name_fixed });
         let font = &mut self.font;
-        // Left of the board's name at the right of the menu bar.
-        let name_w = panel::text_width(font, &title, 12.5).min(vp[0] * 0.4);
-        layout(&self.peers, me, &to_screen, vp, vp[0] - 12.0 - name_w - 14.0, &mut |s, size| panel::text_width(font, s, size))
+        // At the right of the menu bar, left of the Share button.
+        layout(&self.peers, me, &to_screen, vp, menu::badges_right(vp, self.desktop), &mut |s, size| panel::text_width(font, s, size))
     }
 
     pub(crate) fn draw_presence(&mut self, renderer: &mut Renderer) {
