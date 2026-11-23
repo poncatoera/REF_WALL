@@ -54,7 +54,56 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir={#OutDir}
 OutputBaseFilename=Wall-Setup
-; We check for a running Wall ourselves (see [Code]
+; We check for a running Wall ourselves (see the Code section): closing it
+; from here could skip its last save.
+CloseApplications=no
+ChangesAssociations=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+
+[Messages]
+WelcomeLabel2=This installs Wall {#AppVersion} on your computer.%n%nIf Wall is already installed, it is updated. Your libraries, boards, pictures and videos are not touched.
+FinishedLabel=Wall is installed. Open it from the Start menu.
+ConfirmUninstall=Remove Wall from this computer?%n%nYour libraries (boards, pictures and videos) and settings stay where they are.
+
+[Tasks]
+Name: desktopicon; Description: "Put Wall on the desktop"; Flags: unchecked
+Name: openwith; Description: "Add ""Open in Wall"" to the right-click menu of Wall libraries (.wall folders)"
+
+[InstallDelete]
+; Program files from an older version that this one may not ship any more.
+; Only program files: nothing else is ever stored in the app folder.
+Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\wall.exe"
+Type: files; Name: "{app}\ffmpeg.exe"
+Type: files; Name: "{app}\ffprobe.exe"
+; Left by the first installer, which this one replaces.
+Type: files; Name: "{app}\uninstall.ps1"
+Type: files; Name: "{app}\files.txt"
+Type: files; Name: "{app}\version.txt"
+
+[Files]
+Source: "{#Package}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\Wall"; Filename: "{app}\wall.exe"; WorkingDir: "{app}"; Comment: "Boards of pictures, videos and notes"
+Name: "{autodesktop}\Wall"; Filename: "{app}\wall.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+
+[Registry]
+; "Open in Wall" on folders named *.wall. A library is a folder, so this is
+; Wall's version of double-clicking a document.
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Wall"; ValueType: string; ValueName: ""; ValueData: "Open in Wall"; Flags: uninsdeletekey; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Wall"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\wall.exe"",0"; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Wall"; ValueType: string; ValueName: "AppliesTo"; ValueData: "System.FileName:""*.wall"""; Tasks: openwith
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Wall\command"; ValueType: string; ValueName: ""; ValueData: """{app}\wall.exe"" ""%1"""; Tasks: openwith
+; The first installer's entry in Settings > Apps; this one has its own.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\Wall"; ValueType: none; Flags: deletekey
+
+[Run]
+Filename: "{app}\wall.exe"; Description: "Open Wall"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+
+[Code]
 // A path as a WQL string: backslashes and quotes escaped.
 function Escaped(S: String): String;
 begin
