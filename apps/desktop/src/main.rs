@@ -1190,6 +1190,8 @@ mod tests {
         let last = settings::last_library().unwrap();
         assert_eq!(std::fs::canonicalize(last).unwrap(), std::fs::canonicalize(&lib).unwrap());
         assert_eq!(window_title(&lib), "Moods — Wall");
+        // Windows doesn't move a folder with an open file in it.
+        lock::release();
         // A library that was moved away isn't offered again.
         std::fs::rename(&lib, dir.path().join("gone.wall")).unwrap();
         assert_eq!(settings::last_library(), None);
