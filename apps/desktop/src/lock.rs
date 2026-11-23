@@ -51,14 +51,21 @@ pub fn keep(pending: Pending) {
     }
 }
 
+/// Lets go of the open library, as when Wall exits.
+#[cfg(test)]
+pub fn release() {
+    *HELD.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// `None` when `held` is already this library.
 fn lock(held: Option<&(PathBuf, File)>, library: &Path) -> Result<Option<(PathBuf, File)>, LockError> {
+    let dir = library.join("cache");
+    std::fs::create_dir_all(&dir).map_err(LockError::Io)?;
+    // After creating it: a new library's path can't be resolved before.
     let key = std::fs::canonicalize(library).unwrap_or_else(|_| library.to_path_buf());
     if held.is_some_and(|(p, _)| *p == key) {
         return Ok(None);
     }
-    let dir = library.join("cache");
-    std::fs::create_dir_all(&dir).map_err(LockError::Io)?;
     let file = File::options().create(true).truncate(false).write(true).open(dir.join("open.lock")).map_err(LockError::Io)?;
     match file.try_lock() {
         Ok(()) => Ok(Some((key, file))),
@@ -70,6 +77,14 @@ fn lock(held: Option<&(PathBuf, File)>, library: &Path) -> Result<Option<(PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_library_can_be_opened_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("New.wall");
+        let held = lock(None, &new).unwrap();
+        assert!(lock(held.as_ref(), &new).unwrap().is_none());
+    }
 
     #[test]
     fn a_second_wall_cannot_open_the_same_library() {

@@ -273,9 +273,19 @@ fn entries(i: usize, desktop: bool) -> Vec<(&'static str, &'static str, Option<C
     out
 }
 
+/// Width of the Share button at the right of the bar.
+const SHARE_W: f32 = 64.0;
+
+/// Where the people badges end on the right of the bar: left of the Share
+/// button when the shell can share (desktop), else at the edge.
+pub fn badges_right(viewport: [f32; 2], desktop: bool) -> f32 {
+    if desktop { viewport[0] - 12.0 - SHARE_W - 12.0 } else { viewport[0] - 12.0 }
+}
+
 /// The menu bar, with menu `open` dropped down and the entry under `hover`
-/// highlighted. `title` is shown at the right of the bar. `desktop` shows
-/// the entries only a desktop shell can carry out.
+/// highlighted. `title` (the board's path, parts joined by " › ") sits in
+/// the middle of the bar. `desktop` shows the entries only a desktop shell
+/// can carry out, and the Share button.
 pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str, viewport: [f32; 2], desktop: bool) -> Layout {
     let mut l = Layout::default();
     let bar = [0.0, 0.0, viewport[0], BAR];
@@ -298,9 +308,33 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
         title_x.push(x);
         x += w;
     }
-    let t = fit(font, title, 12.5, (viewport[0] - x - 24.0).max(0.0));
+    // Share: the one solid button up here.
+    if desktop {
+        let th = crate::theme::t();
+        let r = [viewport[0] - 12.0 - SHARE_W, 4.0, SHARE_W, BAR - 8.0];
+        let over = crate::panel::inside(r, hover);
+        let mut fill = th.accent;
+        if over {
+            fill = [fill[0] * 0.88, fill[1] * 0.88, fill[2] * 0.88, fill[3]];
+        }
+        l.rect(r, fill, [0.0; 4], crate::theme::radius::CONTROL);
+        let sw = text_width(font, "Share", 12.5);
+        l.text("Share", [r[0] + (SHARE_W - sw) / 2.0, 19.0], 12.5, th.accent_ink);
+        l.hits.push((r, Hit::Entry(Command::Share)));
+    }
+    // The board's path in the middle: parents dim, the board itself bright.
+    let room = (viewport[0] / 2.0 - x - 16.0).max(0.0) * 2.0;
+    let t = fit(font, title, 12.5, room.min(viewport[0] * 0.4));
     let tw = text_width(font, &t, 12.5);
-    l.text(t, [viewport[0] - 12.0 - tw, 19.5], 12.5, DIM());
+    let tx = (viewport[0] - tw) / 2.0;
+    match t.rfind(" › ") {
+        Some(k) if t == title => {
+            let (head, last) = t.split_at(k + " › ".len());
+            l.text(head.to_owned(), [tx, 19.5], 12.5, DIM());
+            l.text(last.to_owned(), [tx + text_width(font, head, 12.5), 19.5], 12.5, INK());
+        }
+        _ => l.text(t, [tx, 19.5], 12.5, INK()),
+    }
 
     if let Some(i) = open.filter(|i| *i < MENUS.len()) {
         let m = entries(i, desktop);

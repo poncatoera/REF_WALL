@@ -20,6 +20,7 @@ mod snap;
 pub mod theme;
 pub mod sidebar;
 pub mod toolbar;
+mod zoom_pill;
 mod grid;
 pub mod video;
 
@@ -1095,7 +1096,7 @@ impl App {
             }
             return;
         }
-        if self.share_press(pos) {
+        if self.share_press(pos) || self.zoom_pill_press(pos) {
             return;
         }
         if self.comment_card_press(pos) {
@@ -2465,6 +2466,7 @@ impl App {
             self.draw_library(renderer);
         }
         self.draw_comments(renderer);
+        self.draw_zoom_pill(renderer);
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);
         self.draw_share(renderer);
@@ -3156,6 +3158,7 @@ impl App {
             .map(|b| wall_render::BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] })
             .collect();
         renderer.draw_boxes(&view, &boxes);
+        renderer.draw_curves(&view, &l.curves);
         let mut glyphs = Vec::new();
         for t in &l.texts {
             scene::add_text(&mut self.font, &mut glyphs, &t.text, t.at, t.size, t.color);
@@ -3170,7 +3173,7 @@ impl App {
     // ---- menu bar ----------------------------------------------------------
 
     fn menu_layout(&mut self) -> menu::Layout {
-        let title = self.breadcrumb().join("  ›  ");
+        let title = self.breadcrumb().join(" › ");
         menu::layout(&mut self.font, self.menu_open, self.cursor, &title, self.viewport, self.desktop)
     }
 
