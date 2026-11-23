@@ -207,7 +207,7 @@ impl Scene {
                         rect,
                         fill: crate::theme::tinted_group(c).0,
                         stroke: crate::theme::tinted_group(c).1,
-                        shape: [10.0, 1.5],
+                        shape: [12.0, 1.0],
                     });
                     label = Some((name.as_str(), crate::theme::group_label(c)));
                 }
@@ -241,8 +241,8 @@ impl Scene {
                         run.boxes.push(BoxInstance { rect: b, fill, stroke, shape: [3.0, 1.5] });
                         if e.done {
                             // A tick: two short strokes.
-                            run.curves.push(CurveInstance { p01: [b[0] + 3.5, b[1] + 8.0, b[0] + 6.0, b[1] + 10.5], p2w: [b[0] + 6.5, b[1] + 11.5, 2.0, 0.0], color: [1.0; 4] });
-                            run.curves.push(CurveInstance { p01: [b[0] + 6.5, b[1] + 11.5, b[0] + 9.5, b[1] + 7.5], p2w: [b[0] + 12.5, b[1] + 4.0, 2.0, 0.0], color: [1.0; 4] });
+                            run.curves.push(CurveInstance { p01: [b[0] + 3.5, b[1] + 8.0, b[0] + 6.0, b[1] + 10.5], p2w: [b[0] + 6.5, b[1] + 11.5, 2.0, 0.0], color: crate::theme::t().accent_ink });
+                            run.curves.push(CurveInstance { p01: [b[0] + 6.5, b[1] + 11.5, b[0] + 9.5, b[1] + 7.5], p2w: [b[0] + 12.5, b[1] + 4.0, 2.0, 0.0], color: crate::theme::t().accent_ink });
                         }
                         let ink = if e.done { crate::theme::t().text_done } else { TEXT() };
                         let max = rect[2] - TODO_TEXT_X - 12.0;
@@ -263,7 +263,7 @@ impl Scene {
                     }
                 }
                 ItemKind::Board { board_id } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: ACCENT(), shape: [8.0, 1.5] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: ACCENT(), shape: [8.0, 1.0] });
                     // A small stack mark in the corner says "this opens".
                     let px = 10.0;
                     for k in 0..2 {
