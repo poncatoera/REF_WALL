@@ -72,6 +72,8 @@ struct Shell {
     cloud_asks: Vec<std::sync::mpsc::Receiver<wall_app::CloudAnswer>>,
     /// The pictures of the drop in progress (one undo step).
     batch: Option<ImportBatch>,
+    /// Files that couldn't be added, to be said once for the whole drop.
+    failed: Vec<String>,
     /// Light mode and grid as last saved to settings.
     saved_look: (bool, bool),
     /// Tool rail place and left panel, as last saved.
@@ -168,7 +170,7 @@ fn copy(app: &mut App, cut: bool) {
 
 /// Imports a picture or video file, as if it was dropped on the window.
 /// Returns the new picture's item (videos arrive later, once converted).
-fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathBuf) -> Option<uuid::Uuid> {
+fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathBuf, failed: &mut Vec<String>) -> Option<uuid::Uuid> {
     if video::is_video(&path) {
         videos.import(path);
         return None;
@@ -177,10 +179,21 @@ fn import_file(app: &mut App, videos: &mut video::Videos, path: std::path::PathB
     let result = std::fs::read(&path)
         .map_err(|e| e.to_string())
         .and_then(|bytes| app.import_image_bytes(&bytes, name.as_deref(), now_ms()).map_err(|e| e.to_string()));
+    // Kinds Wall doesn't keep itself come in as a still PNG.
+    let result = result.or_else(|e| {
+        let png = video::to_png(&path).ok_or(e)?;
+        app.import_image_bytes(&png, name.as_deref(), now_ms()).map_err(|e| e.to_string())
+    });
     match result {
         Ok(id) => Some(id),
         Err(e) => {
             eprintln!("wall: could not import {}: {e}", path.display());
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            let why = match ext.as_str() {
+                "heic" | "heif" => "HEIC photos aren't supported; save it as JPG first".to_owned(),
+                _ => e,
+            };
+            failed.push(format!("{}: {why}", name.unwrap_or_else(|| path.display().to_string())));
             None
         }
     }
@@ -201,11 +214,11 @@ const BATCH_MS: u128 = 1500;
 
 /// Imports files as one batch with any batch still open: one undo step,
 /// the pictures in rows from where the first one landed, all selected.
-fn import_files(app: &mut App, videos: &mut video::Videos, batch: &mut Option<ImportBatch>, paths: Vec<std::path::PathBuf>) {
+fn import_files(app: &mut App, videos: &mut video::Videos, batch: &mut Option<ImportBatch>, paths: Vec<std::path::PathBuf>, failed: &mut Vec<String>) {
     let open = batch.take().filter(|b| b.at.elapsed().as_millis() < BATCH_MS && app.doc.undo_depth() >= b.undo_from);
     let mut b = open.unwrap_or_else(|| ImportBatch { undo_from: app.doc.undo_depth(), ids: Vec::new(), at: Instant::now(), centre: None });
     for path in paths {
-        if let Some(id) = import_file(app, videos, path) {
+        if let Some(id) = import_file(app, videos, path, failed) {
             b.ids.push(id);
         }
     }
@@ -220,7 +233,7 @@ fn import_files(app: &mut App, videos: &mut video::Videos, batch: &mut Option<Im
 fn pick_files() -> Vec<std::path::PathBuf> {
     rfd::FileDialog::new()
         .set_title("Import into Wall")
-        .add_filter("Pictures and videos", &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "mp4", "mov", "webm", "m4v", "mkv", "avi"])
+        .add_filter("Pictures and videos", &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "mp4", "mov", "webm", "m4v", "mkv", "avi"])
         .pick_files()
         .unwrap_or_default()
 }
@@ -560,7 +573,7 @@ fn switch_library(app: &mut App, videos: &mut video::Videos, posters: &mut Libra
 
 /// Pictures and videos directly inside a folder, by name.
 fn media_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "mp4", "mov", "webm", "m4v", "mkv", "avi"];
+    const EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "mp4", "mov", "webm", "m4v", "mkv", "avi"];
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
         .unwrap_or_default();
@@ -595,7 +608,7 @@ impl ApplicationHandler for Shell {
                 self.gfx = Some(gfx);
                 // WALL_IMPORT="a.png;b.mp4" imports files at start, like a drop (for tests).
                 let paths = std::env::var("WALL_IMPORT").unwrap_or_default().split(';').filter(|p| !p.is_empty()).map(std::path::PathBuf::from).collect();
-                import_files(&mut self.app, &mut self.videos, &mut self.batch, paths);
+                import_files(&mut self.app, &mut self.videos, &mut self.batch, paths, &mut self.failed);
             }
             Err(e) => {
                 eprintln!("wall: could not start graphics: {e}");
@@ -689,9 +702,13 @@ impl ApplicationHandler for Shell {
                     switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
                 } else if path.is_dir() {
                     // Any other folder: import the pictures and videos in it.
-                    import_files(&mut self.app, &mut self.videos, &mut self.batch, media_in(&path));
+                    let files = media_in(&path);
+                    if files.is_empty() {
+                        self.failed.push(format!("{}: no pictures or videos in this folder", path.display()));
+                    }
+                    import_files(&mut self.app, &mut self.videos, &mut self.batch, files, &mut self.failed);
                 } else {
-                    import_files(&mut self.app, &mut self.videos, &mut self.batch, vec![path]);
+                    import_files(&mut self.app, &mut self.videos, &mut self.batch, vec![path], &mut self.failed);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -708,7 +725,7 @@ impl ApplicationHandler for Shell {
                         wall_app::ShellCommand::Import => {
                             let paths = pick_files();
                             self.batch = None;
-                            import_files(&mut self.app, &mut self.videos, &mut self.batch, paths);
+                            import_files(&mut self.app, &mut self.videos, &mut self.batch, paths, &mut self.failed);
                         }
                         wall_app::ShellCommand::OpenLibrary { new } => {
                             if let Some(path) = pick_library(new) {
@@ -833,6 +850,17 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.failed.append(&mut self.videos.failed);
+        // Each dropped file is an event of its own: wait for the last one.
+        let dropping = self.batch.as_ref().is_some_and(|b| b.at.elapsed().as_millis() < 500);
+        if !self.failed.is_empty() && self.screenshot.is_none() && !dropping {
+            let all = std::mem::take(&mut self.failed);
+            let mut text = format!("Couldn't add:\n\n{}", all.iter().take(10).cloned().collect::<Vec<_>>().join("\n"));
+            if all.len() > 10 {
+                text.push_str(&format!("\nand {} more", all.len() - 10));
+            }
+            show_error(&text);
+        }
         let Some(gfx) = &self.gfx else { return };
         // Another library was opened: its own sync, or none.
         if self.cloud.as_ref().is_some_and(|c| Some(c.root.as_path()) != self.app.library_root()) || (self.cloud.is_none() && self.cloud_for.as_deref() != self.app.library_root()) {
@@ -840,7 +868,7 @@ impl ApplicationHandler for Shell {
             self.cloud_for = self.app.library_root().map(|p| p.to_owned());
         }
         let Some(cloud) = &mut self.cloud else {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            event_loop.set_control_flow(if self.failed.is_empty() { winit::event_loop::ControlFlow::Wait } else { winit::event_loop::ControlFlow::WaitUntil(Instant::now() + CLOUD_LOOK) });
             return;
         };
         self.app.set_time(now_ms());
@@ -1019,6 +1047,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         title,
         old_import: None,
         batch: None,
+        failed: Vec::new(),
         cloud: None,
         cloud_for: None,
         cloud_asks: Vec::new(),

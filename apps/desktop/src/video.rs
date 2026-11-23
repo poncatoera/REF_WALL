@@ -64,6 +64,23 @@ pub fn poster(path: &Path, w: u32, h: u32, at: f64) -> Option<Vec<u8>> {
     (out.stdout.len() == (w * h * 4) as usize).then_some(out.stdout)
 }
 
+/// A picture Wall doesn't keep itself (GIF, BMP, TIFF, AVIF…), as a still
+/// PNG. Not HEIC: ffmpeg may give only a tile of it.
+pub fn to_png(path: &Path) -> Option<Vec<u8>> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "gif" | "bmp" | "tif" | "tiff" | "avif" | "tga" | "psd") {
+        return None;
+    }
+    let out = command(ffmpeg()?)
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-an", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.stdout.starts_with(b"\x89PNG").then_some(out.stdout)
+}
+
 /// A decoded frame: generation (bumped on every seek), time in seconds, RGBA.
 type Frame = (u64, f64, Vec<u8>);
 
@@ -631,6 +648,8 @@ pub struct Videos {
     paths: std::collections::HashMap<wall_app::ContentHash, PathBuf>,
     /// When the last import finished.
     settled_at: Option<std::time::Instant>,
+    /// Files that couldn't be added, and why; the window takes them.
+    pub failed: Vec<String>,
 }
 
 impl Videos {
@@ -667,9 +686,15 @@ impl Videos {
                             self.paths.insert(hash, p.path);
                         }
                     }
-                    Err(e) => eprintln!("wall: could not import {name}: {e}"),
+                    Err(e) => {
+                        eprintln!("wall: could not import {name}: {e}");
+                        self.failed.push(format!("{name}: {e}"));
+                    }
                 },
-                Ok((name, Err(e))) => eprintln!("wall: could not import {name}: {e}"),
+                Ok((name, Err(e))) => {
+                    eprintln!("wall: could not import {name}: {e}");
+                    self.failed.push(format!("{name}: {e}"));
+                }
                 Err(mpsc::TryRecvError::Empty) => still.push(rx),
                 Err(mpsc::TryRecvError::Disconnected) => {}
             }

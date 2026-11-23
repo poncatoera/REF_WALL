@@ -51,6 +51,64 @@ extern "C" {
     fn is_backup(text: &str) -> bool;
 }
 
+#[wasm_bindgen(module = "/js/drop.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = notice)]
+    fn notice(text: &str);
+    #[wasm_bindgen(js_name = toPng, catch)]
+    fn to_png(file: &web_sys::File) -> Result<js_sys::Promise, JsValue>;
+}
+
+/// Says why a file couldn't be added, where the person can see it.
+fn import_failed(name: &str, why: &str) {
+    web_sys::console::warn_1(&format!("wall: could not import {name}: {why}").into());
+    notice(&format!("Couldn't add {name}: {why}"));
+}
+
+/// Adds a picture file: as it is, or through the browser if it's a kind
+/// only the browser reads.
+async fn add_picture(s: &Rc<RefCell<State>>, file: &web_sys::File) -> Option<uuid::Uuid> {
+    let name = file.name();
+    let buf = match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
+        Ok(b) => b,
+        Err(_) => {
+            // What a dropped folder looks like here.
+            import_failed(&name, "a folder can't be dropped in the browser; drop the files in it");
+            return None;
+        }
+    };
+    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+    if bytes.is_empty() {
+        import_failed(&name, "it's empty, or a folder (drop the files in it)");
+        return None;
+    }
+    let now = js_sys::Date::now() as u64;
+    let first = s.borrow_mut().app.import_image_bytes(&bytes, Some(&name), now);
+    if let Ok(id) = first {
+        return Some(id);
+    }
+    let png = match to_png(file) {
+        Ok(p) => wasm_bindgen_futures::JsFuture::from(p).await.ok().filter(|v| v.is_object()).map(|v| js_sys::Uint8Array::new(&v).to_vec()),
+        Err(_) => None,
+    };
+    let Some(png) = png else {
+        let ext = name.rsplit('.').next().unwrap_or_default().to_lowercase();
+        import_failed(&name, match ext.as_str() {
+            "heic" | "heif" => "HEIC photos aren't supported; save it as JPG first",
+            _ => "Wall can't read this kind of file",
+        });
+        return None;
+    };
+    let second = s.borrow_mut().app.import_image_bytes(&png, Some(&name), now);
+    match second {
+        Ok(id) => Some(id),
+        Err(e) => {
+            import_failed(&name, &e.to_string());
+            None
+        }
+    }
+}
+
 async fn get(key: &str) -> Result<JsValue, JsValue> {
     wasm_bindgen_futures::JsFuture::from(store_get(key)?).await
 }
@@ -703,12 +761,7 @@ fn import_many(s: Rc<RefCell<State>>, files: Vec<web_sys::File>) {
             let from = s.borrow().app.doc.undo_depth();
             let mut ids = Vec::new();
             for file in pictures {
-                let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { continue };
-                let bytes = js_sys::Uint8Array::new(&buf).to_vec();
-                match s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), js_sys::Date::now() as u64) {
-                    Ok(id) => ids.push(id),
-                    Err(err) => web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into()),
-                }
+                ids.extend(add_picture(&s, &file).await);
             }
             s.borrow_mut().app.arrange_imported(&ids, from, None);
         }),
@@ -719,13 +772,13 @@ fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
     if file.name().to_lowercase().ends_with(".json") {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = restore_backup(file).await {
-                web_sys::console::warn_1(&format!("wall: could not restore the backup: {}", err_text(&e)).into());
+                import_failed("the backup", &err_text(&e));
             }
         });
     } else if file.type_().starts_with("video/") {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = import_video(s, &file).await {
-                web_sys::console::warn_1(&format!("wall: could not import {}: {}", file.name(), e.as_string().unwrap_or_else(|| format!("{e:?}"))).into());
+                import_failed(&file.name(), &err_text(&e));
             }
         });
     } else {
@@ -743,7 +796,7 @@ async fn import_video_blob(s: Rc<RefCell<State>>, file: &web_sys::Blob, name: &s
     const MAX_BYTES: f64 = 20_000_000.0;
     if file.size() > MAX_BYTES {
         // Converting in the browser (WebCodecs) comes with the cloud library.
-        return Err(format!("{:.1} MB is over the 20 MB limit; convert it first", file.size() / 1e6).into());
+        return Err(format!("{:.1} MB is over the 20 MB limit here; the desktop app makes it smaller", file.size() / 1e6).into());
     }
     let video = video_element(file).await?;
     let buf = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await?;
@@ -802,12 +855,7 @@ async fn attach_player(s: Rc<RefCell<State>>, blob: &web_sys::Blob, hash: wall_a
 /// Reads a dropped or pasted file and imports it as a picture.
 fn import_file(s: Rc<RefCell<State>>, file: web_sys::File) {
     wasm_bindgen_futures::spawn_local(async move {
-        let Ok(buf) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else { return };
-        let bytes = js_sys::Uint8Array::new(&buf).to_vec();
-        let now = js_sys::Date::now() as u64;
-        if let Err(err) = s.borrow_mut().app.import_image_bytes(&bytes, Some(&file.name()), now) {
-            web_sys::console::warn_1(&format!("wall: could not import {}: {err}", file.name()).into());
-        }
+        add_picture(&s, &file).await;
     });
 }
 
