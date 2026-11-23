@@ -150,7 +150,12 @@ impl App {
         self.parked.remove(&blank);
         self.board_meta.remove(&blank);
         self.board_names.remove(&blank);
-        self.fit_view();
+        // It can arrive before the window's size is known.
+        if self.viewport[0] > 1.0 {
+            self.fit_view();
+        } else {
+            self.fit_on_resize = true;
+        }
         self.doc.board.id == top
     }
 
@@ -360,6 +365,13 @@ mod tests {
         assert!(!a.sync_media_bytes(&sc, &png).unwrap());
         assert!(a.sync_missing_here().is_empty());
         assert!(a.sync_media_bytes(&sc, b"not a picture").is_err());
+        // The same before the window's size is known: it fits when it is.
+        let mut b = App::new(Board::new("Wall", 0), "web");
+        let blank = b.board_id();
+        b.sync_apply(&inc, &State::default()).unwrap();
+        assert!(b.sync_open_top(blank));
+        b.resize([1000.0, 800.0]);
+        assert!(b.camera.zoom > 0.9, "not a speck: {}", b.camera.zoom);
         // Out of reach now: the board goes, what's left opens.
         let gone = Incoming { out_of_reach: vec![top.id], ..Default::default() };
         a.sync_apply(&gone, &State::default()).unwrap();
