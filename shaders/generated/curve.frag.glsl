@@ -22,9 +22,9 @@ vec4 i_u002e_color_1 = vec4(0.0);
 vec4 entryPointParam_fs_main = vec4(0.0);
 
 smooth in vec2 _vs2fs_location0;
-smooth in vec4 _vs2fs_location1;
-smooth in vec4 _vs2fs_location2;
-smooth in vec4 _vs2fs_location3;
+flat in vec4 _vs2fs_location1;
+flat in vec4 _vs2fs_location2;
+flat in vec4 _vs2fs_location3;
 layout(location = 0) out vec4 _fs2p_location0;
 
 void fs_main_1() {
@@ -76,6 +76,15 @@ void fs_main_1() {
             vec2 _e128 = (_e54 + ((_e53 + (_e40 * _e119)) * _e119));
             local_1 = min(dot(_e123, _e123), dot(_e128, _e128));
         }
+        vec2 ch = (_e30 - _e26);
+        float tn = clamp((dot((_e35 - _e26), ch) / max(dot(ch, ch), 1e-12)), 0.0, 1.0);
+        for (int k = 0; k < 3; k++) {
+            vec2 qn = (_e54 + ((_e53 + (_e40 * tn)) * tn));
+            vec2 dqn = (_e53 + ((_e40 * 2.0) * tn));
+            tn = clamp((tn - (dot(qn, dqn) / max((dot(dqn, dqn) + (2.0 * dot(qn, _e40))), 1e-12))), 0.0, 1.0);
+        }
+        vec2 rn = (_e54 + ((_e53 + (_e40 * tn)) * tn));
+        local_1 = min(local_1, dot(rn, rn));
         float _e131 = local_1;
         local = sqrt(_e131);
         break;
@@ -114,7 +123,17 @@ void fs_main_1() {
     float _e225 = _group_0_binding_0.pixel;
     float _e228 = d;
     vec4 _e231 = i_u002e_color_1;
-    entryPointParam_fs_main = (_e231 * (1.0 - smoothstep((_e225 * -0.5), (_e225 * 0.5), _e228)));
+    float coverage = (1.0 - smoothstep((_e225 * -0.5), (_e225 * 0.5), _e228));
+    if ((i_u002e_p2w_1.w < 0.0)) {
+        if ((coverage < 0.5)) {
+            discard;
+        }
+        coverage = 1.0;
+    }
+    if ((coverage <= 0.0)) {
+        discard;
+    }
+    entryPointParam_fs_main = (_e231 * coverage);
     return;
 }
 

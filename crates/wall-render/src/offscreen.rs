@@ -22,7 +22,7 @@ impl Renderer {
         if w == 0 || h == 0 || w > self.max_picture_size() || h > self.max_picture_size() {
             return Err(RenderError::Gl(format!("picture size {w}×{h} is not possible here")));
         }
-        let (fbo, tex) = unsafe {
+        let (fbo, tex, rb) = unsafe {
             let gl = self.gl();
             let tex = gl.create_texture().map_err(RenderError::Gl)?;
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -30,16 +30,25 @@ impl Renderer {
             let fbo = gl.create_framebuffer().map_err(RenderError::Gl)?;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+            // A stencil buffer for see-through strokes.
+            let rb = gl.create_renderbuffer().map_err(RenderError::Gl)?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH24_STENCIL8, w as i32, h as i32);
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_STENCIL_ATTACHMENT, glow::RENDERBUFFER, Some(rb));
             let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             if status != glow::FRAMEBUFFER_COMPLETE {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 gl.delete_framebuffer(fbo);
                 gl.delete_texture(tex);
+                gl.delete_renderbuffer(rb);
                 return Err(RenderError::Gl(format!("off-screen picture incomplete ({status:#x})")));
             }
-            (fbo, tex)
+            (fbo, tex, rb)
         };
+        let window_stencil = self.has_stencil();
+        self.set_stencil(true);
         draw(self);
+        self.set_stencil(window_stencil);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
         unsafe {
             let gl = self.gl();
@@ -48,6 +57,7 @@ impl Renderer {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.delete_framebuffer(fbo);
             gl.delete_texture(tex);
+            gl.delete_renderbuffer(rb);
         }
         // GL's rows run bottom-up.
         let row = (w * 4) as usize;

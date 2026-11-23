@@ -42,7 +42,7 @@ pub const TOOLS: &[Option<(Tool, &str)>] = &[
     Some((Tool::Todo, "To-do list  ·  T")),
     Some((Tool::Group, "Group")),
     Some((Tool::Arrow, "Arrow  ·  or Alt-drag")),
-    Some((Tool::Pen, "Pen  ·  Esc to stop")),
+    Some((Tool::Pen, "Draw  ·  D, Esc to stop")),
     Some((Tool::Board, "Board  ·  B")),
     Some((Tool::Link, "Link  ·  or paste an address")),
     Some((Tool::Palette, "Palette  ·  from the selected pictures")),

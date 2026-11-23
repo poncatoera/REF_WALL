@@ -40,9 +40,9 @@ layout(location = 0) in vec4 _p2vs_location0;
 layout(location = 1) in vec4 _p2vs_location1;
 layout(location = 2) in vec4 _p2vs_location2;
 smooth out vec2 _vs2fs_location0;
-smooth out vec4 _vs2fs_location1;
-smooth out vec4 _vs2fs_location2;
-smooth out vec4 _vs2fs_location3;
+flat out vec4 _vs2fs_location1;
+flat out vec4 _vs2fs_location2;
+flat out vec4 _vs2fs_location3;
 
 void vs_main_1() {
     uint local = 0u;

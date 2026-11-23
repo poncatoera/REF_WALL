@@ -269,6 +269,13 @@ pub enum ItemKind {
         width: f32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<String>,
+        /// "pen" (when missing), "pencil", "brush" or "marker".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brush: Option<String>,
+        /// Width at each point as a share (0–1) of `width`, for lines that
+        /// swell and taper. Missing: `width` all along.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        widths: Vec<f32>,
     },
     /// A row of colours ("#rrggbb"), with an optional name.
     Palette {

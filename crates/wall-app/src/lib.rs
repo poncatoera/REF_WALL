@@ -3,7 +3,9 @@
 //! Shells (apps/desktop, apps/web) only create the window or canvas, forward
 //! input here and call [`App::render`].
 
+pub mod brush;
 pub mod doc;
+mod drawing;
 pub mod menu;
 pub mod panel;
 mod library_view;
@@ -146,8 +148,13 @@ enum Gesture {
     /// A board row in the left panel pressed: a click opens it, a drag
     /// reorders it.
     SideRow { id: Uuid, start: [f32; 2], moved: bool },
-    /// Drawing with the pen: the line so far, in board units.
-    Draw { points: Vec<[f32; 2]> },
+    /// Drawing: the line so far in board units, pressure at each point
+    /// (from speed), the smoothed speed, when the last point came, and
+    /// whether Shift makes it a straight line.
+    Draw { points: Vec<[f32; 2]>, pressures: Vec<f32>, velocity: f32, last_ms: u64, straight: bool },
+    /// Rubbing out; `depth` is the undo depth at the start, so the whole
+    /// drag becomes one undo step.
+    Erase { depth: usize },
 }
 
 /// Text being typed into an item. The item shows the live text through
@@ -287,6 +294,8 @@ pub struct App {
     tool: toolbar::Tool,
     /// Where the tool rail floats (shells remember it).
     rail_place: toolbar::Placement,
+    /// Drawing tool settings (brush, colour, sizes).
+    pen: brush::PenState,
     /// The boards and library panel on the left, while open.
     sidebar: Option<sidebar::Sidebar>,
     /// Every board's parent, dates and thumbnail picture.
@@ -371,6 +380,7 @@ impl App {
             show_grid: true,
             tool: toolbar::Tool::Select,
             rail_place: toolbar::Placement::default(),
+            pen: brush::PenState::default(),
             sidebar: None,
             board_meta: [(board_id, root_meta)].into(),
             board_order: Vec::new(),
@@ -1034,6 +1044,9 @@ impl App {
             }
             return;
         }
+        if self.pen_bar_press(pos) {
+            return;
+        }
         if self.sidebar_press(pos) {
             return;
         }
@@ -1061,8 +1074,7 @@ impl App {
             self.end_edit();
         }
         if self.tool == toolbar::Tool::Pen {
-            self.selection.clear();
-            self.gesture = Gesture::Draw { points: vec![board] };
+            self.start_draw(board, mods.shift);
             return;
         }
         if mods.alt || self.tool == toolbar::Tool::Arrow {
@@ -1211,8 +1223,8 @@ impl App {
         let board = self.camera.screen_to_board(pos, self.viewport);
         match &mut self.gesture {
             Gesture::Idle => {
-                // Tooltips on the rail follow the pointer.
-                if self.rail_layout().contains(pos) || self.rail_layout().contains(last) {
+                // Tooltips on the rail and the size ring follow the pointer.
+                if self.tool == toolbar::Tool::Pen || self.rail_layout().contains(pos) || self.rail_layout().contains(last) {
                     self.needs_redraw = true;
                 }
                 return;
@@ -1230,12 +1242,9 @@ impl App {
                 self.needs_redraw = true;
                 return;
             }
-            Gesture::Draw { points } => {
-                // A new point every 2 screen pixels keeps lines smooth and small.
-                let last = points.last().copied().unwrap_or(board);
-                if ((board[0] - last[0]).powi(2) + (board[1] - last[1]).powi(2)).sqrt() * self.camera.zoom >= 2.0 {
-                    points.push(board);
-                }
+            Gesture::Draw { .. } | Gesture::Erase { .. } => {
+                self.draw_move(board);
+                return;
             }
             Gesture::Connect { now, .. } => *now = board,
             Gesture::Crop { original, start, left, top } => {
@@ -1302,9 +1311,9 @@ impl App {
                     }
                 }
             }
-            Gesture::Draw { mut points } => {
-                points.push(self.camera.screen_to_board(pos, self.viewport));
-                self.add_stroke(&points);
+            g @ (Gesture::Draw { .. } | Gesture::Erase { .. }) => {
+                let board = self.camera.screen_to_board(pos, self.viewport);
+                self.finish_draw(board, g);
             }
             Gesture::SideRow { id, moved, .. } => self.sidebar_release(id, moved, pos),
             Gesture::RailMove => {
@@ -1380,6 +1389,11 @@ impl App {
         }
         if self.sidebar_key(key) {
             return;
+        }
+        if let (toolbar::Tool::Pen, Key::Char(c)) = (self.tool, key) {
+            if !self.is_editing() && self.pen_key(c) {
+                return;
+            }
         }
         if let Some(e) = &mut self.panel_edit {
             match key {
@@ -1504,6 +1518,7 @@ impl App {
             Key::Char('z' | 'Z') => self.run_command(menu::Command::ActualSize),
             Key::Char('l' | 'L') => self.toggle_sidebar(sidebar::Tab::Library),
             Key::Char('s' | 'S') => self.toggle_sidebar(sidebar::Tab::Boards),
+            Key::Char('d' | 'D') => self.toggle_drawing(),
             Key::Char('g' | 'G') => self.set_grid(!self.show_grid),
             Key::Char('r' | 'R') => self.run_command(menu::Command::RotateRight),
             Key::Char('h' | 'H') => self.run_command(menu::Command::Mirror),
@@ -1528,9 +1543,7 @@ impl App {
             })
             .map(|pts| scene::arrow_curve(pts, accent, scene::ARROW_WIDTH + 1.0))
             .collect();
-        if let Gesture::Draw { points } = &self.gesture {
-            out.extend(scene::pen_curves(points, PEN_PX / self.camera.zoom, theme::t().text));
-        }
+        out.extend(self.drawing_preview().0);
         if let Gesture::Connect { from, now, .. } = &self.gesture {
             let to = ArrowEnd::Point { x: now[0] as f64, y: now[1] as f64 };
             if let Some(pts) = scene::arrow_points(&self.doc, from, &to) {
@@ -2300,6 +2313,7 @@ impl App {
         }
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
+        renderer.draw_curves_once(&view, &self.drawing_preview().1);
         if let Some((query, at, total)) = self.search_status() {
             // Search box: top centre, constant size on screen.
             let px = 1.0 / self.camera.zoom;
@@ -2356,6 +2370,7 @@ impl App {
             self.draw_library(renderer);
         }
         self.draw_rail(renderer);
+        self.draw_pen_ui(renderer);
         // The menu bar and its drop-downs go over everything.
         self.draw_menu(renderer);
     }
@@ -2833,11 +2848,15 @@ impl App {
             Some(sidebar::Tab::Library) => "library",
             None => "",
         };
-        format!("{};{side}", self.rail_place.to_setting())
+        format!("{};{side}|{}", self.rail_place.to_setting(), self.pen.to_setting())
     }
 
     /// Restores [`Self::ui_setting`].
     pub fn set_ui_setting(&mut self, s: &str) {
+        let (s, pen) = s.split_once('|').unwrap_or((s, ""));
+        if let Some(p) = brush::PenState::from_setting(pen) {
+            self.pen = p;
+        }
         let (rail, side) = s.split_once(';').unwrap_or((s, ""));
         self.set_rail_setting(rail);
         match side {
@@ -2925,7 +2944,7 @@ impl App {
         let (x, y, w, h) = (b[0] - pad, b[1] - pad, b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad);
         let points = line.iter().map(|p| [(p[0] - x) / w, (p[1] - y) / h]).collect();
         let frame = Frame { x: x as f64, y: y as f64, w: w as f64, h: h as f64, z: self.doc.top_z() + 1.0, ..Default::default() };
-        let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None })])[0];
+        let id = self.doc.add(vec![(frame, ItemKind::Stroke { points, width, color: None, brush: None, widths: Vec::new() })])[0];
         self.needs_redraw = true;
         Some(id)
     }
@@ -3109,6 +3128,7 @@ impl App {
             C::TogglePanel => self.panel_open = !self.panel_open,
             C::ToggleLibrary => self.toggle_sidebar(sidebar::Tab::Library),
             C::ToggleBoards => self.toggle_sidebar(sidebar::Tab::Boards),
+            C::ToggleDrawing => self.toggle_drawing(),
             C::ToggleTheme => self.set_light_mode(!theme::is_light()),
             C::ToggleGrid => self.set_grid(!self.show_grid),
             C::RotateRight => self.change_look(|l| l.turns = (l.turns + 1) % 4),

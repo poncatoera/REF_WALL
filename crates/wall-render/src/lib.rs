@@ -151,6 +151,11 @@ pub struct Renderer {
     curve_tex: glow::Texture,
     band_tex: glow::Texture,
     view_ubo: glow::Buffer,
+    /// The target has a stencil buffer, so see-through strokes can blend
+    /// once (see [`Renderer::draw_curves_once`]).
+    stencil: bool,
+    /// Stencil value of the last see-through stroke this frame.
+    stencil_ref: u8,
 }
 
 impl Renderer {
@@ -172,7 +177,53 @@ impl Renderer {
 
         let curve_tex = data_texture(&gl, glow::RGBA32F, glow::RGBA)?;
         let band_tex = data_texture(&gl, glow::R32F, glow::RED)?;
-        Ok(Self { gl, boxes, glyphs, images, curves, curve_tex, band_tex, view_ubo })
+        // Older desktop GL reports the window's stencil size this way; where
+        // it can't, the shell says with `set_stencil`.
+        let bits = gl.get_parameter_i32(glow::STENCIL_BITS);
+        while gl.get_error() != glow::NO_ERROR {}
+        Ok(Self { gl, boxes, glyphs, images, curves, curve_tex, band_tex, view_ubo, stencil: bits > 0, stencil_ref: 0 })
+    }
+
+    /// Tells the renderer whether the window has a stencil buffer.
+    pub fn set_stencil(&mut self, on: bool) {
+        self.stencil = on;
+    }
+
+    pub fn has_stencil(&self) -> bool {
+        self.stencil
+    }
+
+    /// Draws the pieces of one see-through stroke so that each pixel is
+    /// blended once, even where pieces overlap (their round ends always
+    /// do). Pieces must not carry arrowheads. Without a stencil buffer it
+    /// draws them plainly.
+    pub fn draw_curves_once(&mut self, view: &ViewUniform, curves: &[CurveInstance]) {
+        if curves.is_empty() {
+            return;
+        }
+        if !self.stencil {
+            return self.draw_curves(view, curves);
+        }
+        self.set_view(view);
+        self.stencil_ref = self.stencil_ref.wrapping_add(1);
+        let gl = &self.gl;
+        unsafe {
+            if self.stencil_ref == 0 {
+                gl.clear(glow::STENCIL_BUFFER_BIT);
+                self.stencil_ref = 1;
+            }
+            gl.enable(glow::STENCIL_TEST);
+            gl.stencil_mask(0xff);
+            gl.stencil_func(glow::NOTEQUAL, self.stencil_ref as i32, 0xff);
+            gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+            // First the inside of the stroke at full strength (a negative
+            // fourth number tells the shader: solid, no soft edge), then the
+            // soft edge where nothing of this stroke was drawn yet.
+            let solid: Vec<CurveInstance> = curves.iter().map(|c| CurveInstance { p2w: [c.p2w[0], c.p2w[1], c.p2w[2], -1.0], ..*c }).collect();
+            self.curves.draw(gl, bytemuck::cast_slice(&solid), solid.len());
+            self.curves.draw(gl, bytemuck::cast_slice(curves), curves.len());
+            gl.disable(glow::STENCIL_TEST);
+        }
     }
 
     /// Uploads the glyph curve and band arrays (from `wall_text::Atlas`),
@@ -205,7 +256,9 @@ impl Renderer {
         unsafe {
             self.gl.viewport(0, 0, size_px[0] as i32, size_px[1] as i32);
             self.gl.clear_color(rgba[0], rgba[1], rgba[2], rgba[3]);
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.clear_stencil(0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT | if self.stencil { glow::STENCIL_BUFFER_BIT } else { 0 });
+            self.stencil_ref = 0;
         }
     }
 

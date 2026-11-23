@@ -347,8 +347,11 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
         .get_element_by_id(canvas_id)
         .ok_or("canvas not found")?
         .dyn_into()?;
+    // A stencil buffer lets see-through pen strokes blend once.
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"stencil".into(), &true.into());
     let webgl: WebGl2RenderingContext = canvas
-        .get_context("webgl2")?
+        .get_context_with_context_options("webgl2", &options)?
         .ok_or("WebGL2 is not available in this browser")?
         .dyn_into()?;
     let gl = glow::Context::from_webgl2_context(webgl);

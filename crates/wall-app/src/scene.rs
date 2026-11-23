@@ -49,6 +49,9 @@ struct Run {
     boxes: Vec<BoxInstance>,
     images: Vec<(ContentHash, ImageInstance)>,
     curves: Vec<CurveInstance>,
+    /// See-through pen lines (marker, pencil). Lines in one run never
+    /// overlap, so one blend-once draw covers them all.
+    see_through: Vec<CurveInstance>,
     glyphs: Vec<GlyphInstance>,
     /// Spatial hash of the run's item rects, for the overlap test.
     cells: HashMap<(i32, i32), Vec<[f32; 4]>>,
@@ -161,7 +164,7 @@ impl Scene {
             }
             let mut label = None;
             let run = if is_group { &mut self.back } else { self.runs.last_mut().unwrap() };
-            let marks = (run.boxes.len(), run.glyphs.len(), run.curves.len());
+            let marks = (run.boxes.len(), run.glyphs.len(), run.curves.len(), run.see_through.len());
             match &item.kind {
                 ItemKind::Group { name, color } => {
                     let c = parse_hex(color.as_deref()).unwrap_or([0.6, 0.6, 0.65]);
@@ -257,9 +260,17 @@ impl Scene {
                         }
                     }
                 }
-                ItemKind::Stroke { points, width, color } => {
+                ItemKind::Stroke { points, width, color, brush, widths } => {
+                    let a = crate::brush::Brush::from_name(brush.as_deref()).profile().alpha;
                     let ink = parse_hex(color.as_deref()).map_or(TEXT(), |c| [c[0], c[1], c[2], 1.0]);
-                    run.curves.extend(stroke_curves(points, rect, *width, ink));
+                    // Premultiplied.
+                    let ink = [ink[0] * a, ink[1] * a, ink[2] * a, a];
+                    let curves = stroke_curves(points, widths, rect, *width, ink);
+                    if a < 1.0 {
+                        run.see_through.extend(curves);
+                    } else {
+                        run.curves.extend(curves);
+                    }
                 }
                 ItemKind::Link { url, title } => {
                     run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
@@ -300,7 +311,8 @@ impl Scene {
                 for g in &mut run.glyphs[marks.1..] {
                     g.rect = grow(g.rect);
                 }
-                for c in &mut run.curves[marks.2..] {
+                let (curves, see) = (&mut run.curves, &mut run.see_through);
+                for c in curves[marks.2..].iter_mut().chain(see[marks.3..].iter_mut()) {
                     let (a, b, e) = (at(c.p01[0], c.p01[1]), at(c.p01[2], c.p01[3]), at(c.p2w[0], c.p2w[1]));
                     c.p01 = [a[0], a[1], b[0], b[1]];
                     c.p2w = [e[0], e[1], c.p2w[2] * scale, c.p2w[3] * scale];
@@ -338,6 +350,7 @@ impl Scene {
                 .collect();
             renderer.draw_images(view, &images);
             renderer.draw_curves(view, &run.curves);
+            renderer.draw_curves_once(view, &run.see_through);
             renderer.draw_glyphs(view, &run.glyphs);
         }
     }
@@ -760,23 +773,26 @@ pub fn link_site(url: &str) -> String {
     host.strip_prefix("www.").unwrap_or(host).to_owned()
 }
 
-/// A pen line as quadratic pieces through the midpoints of its points
-/// (`pts` in board units), so it bends smoothly. Ends are round.
-pub fn pen_curves(pts: &[[f32; 2]], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
-    let curve = |a: [f32; 2], c: [f32; 2], b: [f32; 2]| CurveInstance { p01: [a[0], a[1], c[0], c[1]], p2w: [b[0], b[1], width / 2.0, 0.0], color: ink };
+/// A drawn line as quadratic pieces through the midpoints of its points
+/// (`pts` in board units), so it bends smoothly; ends are round. `factors`
+/// give a width (0–1 of `width`) per point (missing: full width); each
+/// piece takes the factor of the point it bends around.
+pub fn pen_curves_varying(pts: &[[f32; 2]], factors: &[f32], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
+    let f = |i: usize| factors.get(i).copied().unwrap_or(1.0).max(0.02);
+    let curve = |a: [f32; 2], c: [f32; 2], b: [f32; 2], k: f32| CurveInstance { p01: [a[0], a[1], c[0], c[1]], p2w: [b[0], b[1], width * k / 2.0, 0.0], color: ink };
     let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
     match pts {
         [] => Vec::new(),
-        [p] => vec![curve(*p, *p, [p[0] + 0.01, p[1]])],
-        [a, b] => vec![curve(*a, mid(*a, *b), *b)],
+        [p] => vec![curve(*p, *p, [p[0] + 0.01, p[1]], f(0))],
+        [a, b] => vec![curve(*a, mid(*a, *b), *b, (f(0) + f(1)) / 2.0)],
         _ => {
             let n = pts.len();
             let mut out = Vec::with_capacity(n);
-            out.push(curve(pts[0], mid(pts[0], pts[1]), mid(pts[0], pts[1])));
+            out.push(curve(pts[0], mid(pts[0], pts[1]), mid(pts[0], pts[1]), f(0)));
             for i in 1..n - 1 {
-                out.push(curve(mid(pts[i - 1], pts[i]), pts[i], mid(pts[i], pts[i + 1])));
+                out.push(curve(mid(pts[i - 1], pts[i]), pts[i], mid(pts[i], pts[i + 1]), f(i)));
             }
-            out.push(curve(mid(pts[n - 2], pts[n - 1]), pts[n - 1], pts[n - 1]));
+            out.push(curve(mid(pts[n - 2], pts[n - 1]), pts[n - 1], pts[n - 1], f(n - 1)));
             out
         }
     }
@@ -787,8 +803,8 @@ pub fn stroke_points(points: &[[f32; 2]], rect: [f32; 4]) -> Vec<[f32; 2]> {
     points.iter().map(|p| [rect[0] + p[0] * rect[2], rect[1] + p[1] * rect[3]]).collect()
 }
 
-fn stroke_curves(points: &[[f32; 2]], rect: [f32; 4], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
-    pen_curves(&stroke_points(points, rect), width, ink)
+fn stroke_curves(points: &[[f32; 2]], factors: &[f32], rect: [f32; 4], width: f32, ink: [f32; 4]) -> Vec<CurveInstance> {
+    pen_curves_varying(&stroke_points(points, rect), factors, width, ink)
 }
 
 /// Where a palette card's colour swatches sit: one row across the card,

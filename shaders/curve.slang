@@ -22,9 +22,11 @@ struct VsOut
 {
     float4 position : SV_Position;
     float2 board : BOARD;
-    float4 p01 : P01;
-    float4 p2w : P2W;
-    float4 color : COLOR;
+    // The same for every corner: not interpolated, so a nearly straight
+    // piece stays exactly as given (interpolation noise made it bend).
+    nointerpolation float4 p01 : P01;
+    nointerpolation float4 p2w : P2W;
+    nointerpolation float4 color : COLOR;
 };
 
 float2 quad_corner(uint vid)
@@ -95,6 +97,17 @@ float sd_bezier(float2 pos, float2 A, float2 B, float2 C)
         float t1 = clamp((-n - m) * z - kx, 0.0, 1.0);
         res = min(dot2(d + (c + b * t0) * t0), dot2(d + (c + b * t1) * t1));
     }
+    // The closed form loses precision when the piece barely bends (thin pen
+    // lines showed gaps), so also refine from the nearest point on the chord.
+    float2 ch = C - A;
+    float t = clamp(dot(pos - A, ch) / max(dot(ch, ch), 1e-12), 0.0, 1.0);
+    for (int k = 0; k < 3; k++)
+    {
+        float2 q = d + (c + b * t) * t;
+        float2 dq = c + 2.0 * b * t;
+        t = clamp(t - dot(q, dq) / max(dot(dq, dq) + 2.0 * dot(q, b), 1e-12), 0.0, 1.0);
+    }
+    res = min(res, dot2(d + (c + b * t) * t));
     return sqrt(res);
 }
 
@@ -130,5 +143,15 @@ float4 fs_main(VsOut i) : SV_Target
     }
     float aa = view.pixel;
     float coverage = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
+    // A negative fourth number: the solid inside of a see-through stroke
+    // (drawn once through the stencil, then its soft edge).
+    if (head < 0.0)
+    {
+        if (coverage < 0.5)
+            discard;
+        coverage = 1.0;
+    }
+    if (coverage <= 0.0)
+        discard;
     return i.color * coverage;
 }

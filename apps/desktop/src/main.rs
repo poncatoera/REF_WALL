@@ -734,7 +734,7 @@ fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn 
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
-    let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_transparency(false).with_api(api);
+    let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_stencil_size(8).with_transparency(false).with_api(api);
     let preference = if angle { glutin_winit::ApiPreference::PreferEgl } else { glutin_winit::ApiPreference::FallbackEgl };
     let (window, config) = DisplayBuilder::new()
         .with_preference(preference)
@@ -768,7 +768,8 @@ fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn 
         glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s) as *const _)
     };
     let target = if gles { GlslTarget::Es300 } else { GlslTarget::Core330 };
-    let renderer = unsafe { Renderer::new(gl, target)? };
+    let mut renderer = unsafe { Renderer::new(gl, target)? };
+    renderer.set_stencil(config.stencil_size() > 0);
     Ok(Gfx { window, surface, context, renderer })
 }
 
@@ -788,7 +789,11 @@ fn is_egl(_display: &glutin::display::Display) -> bool {
 
 fn pick_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
     configs
-        .reduce(|best, c| if c.num_samples() > best.num_samples() && c.num_samples() <= 4 { c } else { best })
+        // A stencil buffer first (see-through pen strokes), then up to 4x MSAA.
+        .reduce(|best, c| {
+            let score = |c: &Config| (c.stencil_size() > 0, if c.num_samples() <= 4 { c.num_samples() } else { 0 });
+            if score(&c) > score(&best) { c } else { best }
+        })
         .expect("no OpenGL config available")
 }
 
