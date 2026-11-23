@@ -45,6 +45,7 @@ pub enum Command {
     NewLibrary,
     ImportOldWall,
     ExportImage,
+    Share,
     NewNote,
     NewBoard,
     NewTodo,
@@ -96,12 +97,14 @@ pub enum ShellCommand {
     OpenUrl(String),
     /// Put this text on the clipboard (a palette colour's hex code).
     CopyText(String),
+    /// Something to do in the cloud; answer with `App::cloud_answer`.
+    Cloud(crate::share::CloudAsk),
 }
 
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall)
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::Share)
     }
 }
 
@@ -124,6 +127,7 @@ pub const MENUS: &[Menu] = &[
             ("Import old Wall library…", "", Some(Command::ImportOldWall)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
+            ("Share this board…", "", Some(Command::Share)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),

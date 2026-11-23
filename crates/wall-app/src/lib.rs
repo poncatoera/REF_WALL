@@ -4,6 +4,7 @@
 //! input here and call [`App::render`].
 
 pub mod brush;
+pub mod share;
 pub mod doc;
 mod drawing;
 pub mod menu;
@@ -32,6 +33,7 @@ mod batch;
 pub use batch::grid_layout;
 pub use snapshot::NewMedia;
 pub use menu::ShellCommand;
+pub use share::{CloudAnswer, CloudAsk, ShareLink};
 pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
 use scene::Scene;
@@ -288,6 +290,8 @@ pub struct App {
     menu_open: Option<usize>,
     /// Menu commands waiting for the shell (file picker, clipboard).
     shell_commands: Vec<menu::ShellCommand>,
+    /// The share card, while open.
+    share: Option<share::ShareCard>,
     /// Set by the desktop shell: shows the menu entries only it can carry out.
     pub desktop: bool,
     /// The library drawer, while open (L).
@@ -380,6 +384,7 @@ impl App {
             tag_filter: None,
             menu_open: None,
             shell_commands: Vec::new(),
+            share: None,
             desktop: false,
             library_view: None,
             show_grid: true,
@@ -1049,6 +1054,9 @@ impl App {
             }
             return;
         }
+        if self.share_press(pos) {
+            return;
+        }
         if self.pen_bar_press(pos) {
             return;
         }
@@ -1532,6 +1540,7 @@ impl App {
                 self.prune_selection();
             }
             Key::SelectAll => self.selection = self.doc.board.live_items().map(|i| i.id).collect(),
+            Key::Escape if self.share.is_some() => self.share = None,
             Key::Escape if self.tool != toolbar::Tool::Select => self.tool = toolbar::Tool::Select,
             Key::Escape if self.library_is_open() => self.close_sidebar(),
             Key::Escape if self.selection.is_empty() && self.tag_filter.is_some() => self.filter_by_tag(None),
@@ -2402,6 +2411,7 @@ impl App {
         }
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);
+        self.draw_share(renderer);
         // The menu bar and its drop-downs go over everything.
         self.draw_menu(renderer);
     }
@@ -3124,6 +3134,7 @@ impl App {
             C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
+            C::Share => self.open_share(),
             C::ImportOldWall => self.shell_commands.push(S::ImportOldWall),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),

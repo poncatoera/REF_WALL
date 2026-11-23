@@ -256,7 +256,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
             });
         }
         // Libraries are folders on disk; the web menus don't offer them.
-        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall => {}
+        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::Cloud(_) => {}
         wall_app::ShellCommand::CopyText(text) => {
             let _ = window.navigator().clipboard().write_text(&text);
         }

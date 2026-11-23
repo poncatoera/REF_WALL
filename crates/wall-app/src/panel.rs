@@ -202,6 +202,40 @@ pub fn fit(font: &mut Font, text: &str, size: f32, max: f32) -> String {
     "…".into()
 }
 
+/// As [`fit`], measuring with `width(text, size)`.
+pub fn fit_with(width: &mut dyn FnMut(&str, f32) -> f32, text: &str, size: f32, max: f32) -> String {
+    if width(text, size) <= max {
+        return text.to_owned();
+    }
+    let mut s: String = text.to_owned();
+    while !s.is_empty() {
+        s.pop();
+        let t = format!("{}…", s.trim_end());
+        if width(&t, size) <= max {
+            return t;
+        }
+    }
+    "…".into()
+}
+
+/// `text` broken into lines of at most `max` pixels, at spaces.
+pub fn wrap_with(width: &mut dyn FnMut(&str, f32) -> f32, text: &str, size: f32, max: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let tried = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+        if width(&tried, size) <= max || line.is_empty() {
+            line = tried;
+        } else {
+            lines.push(std::mem::replace(&mut line, word.to_owned()));
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 pub fn parse_hex(c: &str) -> Option<[f32; 4]> {
     let c = c.strip_prefix('#')?;
     if c.len() != 6 {

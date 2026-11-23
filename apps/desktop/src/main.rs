@@ -68,6 +68,8 @@ struct Shell {
     cloud: Option<Cloud>,
     /// The library [`Self::cloud`] was last tried for.
     cloud_for: Option<std::path::PathBuf>,
+    /// Answers from the share card's requests, running in the background.
+    cloud_asks: Vec<std::sync::mpsc::Receiver<wall_app::CloudAnswer>>,
     /// The pictures of the drop in progress (one undo step).
     batch: Option<ImportBatch>,
     /// Light mode and grid as last saved to settings.
@@ -437,6 +439,36 @@ fn device_name() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "desktop".into())
 }
 
+/// Does what the share card asked, with this library's owner key.
+fn cloud_ask(root: Option<&std::path::Path>, ask: wall_app::CloudAsk) -> wall_app::CloudAnswer {
+    use wall_app::{CloudAnswer, CloudAsk};
+    let account = root
+        .and_then(|r| wall_format::Library::open(r).ok())
+        .and_then(|lib| Some(wall_cloud::Accounts::load(&wall_cloud::settings_dir()?).find(&lib)?))
+        .filter(|a| !a.server.is_empty());
+    let Some(account) = account else { return CloudAnswer::NotConnected };
+    let client = match wall_cloud::Client::new(account) {
+        Ok(c) => c,
+        Err(e) => return CloudAnswer::Failed(e.to_string()),
+    };
+    let r = match ask {
+        CloudAsk::Links => client.links().map(|links| {
+            let me = client.me().ok();
+            CloudAnswer::Links {
+                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label }).collect(),
+                used: me.as_ref().and_then(|m| m.media_bytes),
+                max: me.as_ref().and_then(|m| m.max_media_bytes),
+            }
+        }),
+        CloudAsk::Make { board, edit, label } => client.make_link(board, edit, &label).and_then(|k| {
+            let secret = k.secret.ok_or_else(|| wall_cloud::CloudError::Other("the server gave no link".into()))?;
+            Ok(CloudAnswer::Made { url: client.link_address(&secret), edit })
+        }),
+        CloudAsk::Revoke(id) => client.revoke_link(id).map(|_| CloudAnswer::Revoked(id)),
+    };
+    r.unwrap_or_else(|e| CloudAnswer::Failed(e.to_string()))
+}
+
 /// Cloud sync of the open library (see `wall_cloud`).
 struct Cloud {
     worker: wall_cloud::Worker,
@@ -704,7 +736,27 @@ impl ApplicationHandler for Shell {
                                 export_png(&mut self.app, &mut gfx.renderer, &path);
                             }
                         }
+                        wall_app::ShellCommand::Cloud(ask) => {
+                            let root = self.app.library_root().map(|p| p.to_owned());
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(cloud_ask(root.as_deref(), ask));
+                            });
+                            self.cloud_asks.push(rx);
+                        }
                     }
+                }
+                let mut answers = Vec::new();
+                self.cloud_asks.retain(|rx| match rx.try_recv() {
+                    Ok(a) => {
+                        answers.push(a);
+                        false
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => true,
+                    Err(_) => false,
+                });
+                for a in answers {
+                    self.app.cloud_answer(a);
                 }
                 if let Some(result) = self.old_import.as_ref().and_then(|rx| rx.try_recv().ok()) {
                     self.old_import = None;
@@ -769,7 +821,7 @@ impl ApplicationHandler for Shell {
             }
             _ => {}
         }
-        if self.app.needs_redraw || self.videos.busy() || self.app.library_waiting() || self.old_import.is_some() {
+        if self.app.needs_redraw || self.videos.busy() || self.app.library_waiting() || self.old_import.is_some() || !self.cloud_asks.is_empty() {
             gfx.window.request_redraw();
         }
         if let Err(e) = self.app.save_if_dirty() {
@@ -962,6 +1014,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         batch: None,
         cloud: None,
         cloud_for: None,
+        cloud_asks: Vec::new(),
         saved_look: (light, grid),
         saved_ui: settings::get_str("ui").unwrap_or_default(),
     };
