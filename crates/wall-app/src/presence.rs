@@ -109,7 +109,7 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         let name = panel::fit_with(width, &p.name, 12.0, 160.0);
         let w = width(&name, 12.0);
         let tag = [s[0] + 9.0, s[1] + 9.0, w + 14.0, 20.0];
-        boxes.push(PanelBox { rect: tag, fill: color, stroke: [0.0; 4], radius: 10.0, stroke_w: 0.0 });
+        boxes.push(PanelBox { rect: tag, fill: color, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         texts.push(TextRun { text: name, at: [tag[0] + 7.0, tag[1] + 14.0], size: 12.0, color: WHITE });
     }
 

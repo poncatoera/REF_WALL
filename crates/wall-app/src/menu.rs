@@ -301,8 +301,8 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
         let x0 = title_x[i].min(viewport[0] - DROP_W - 4.0).max(0.0);
         let drop = [x0, BAR, DROP_W, h];
         let drop = [drop[0], drop[1] + 4.0, drop[2], drop[3]];
-        l.boxes.push(crate::theme::shadow(drop, 10.0));
-        l.rect(drop, DROP_BG(), LINE(), 10.0);
+        l.boxes.push(crate::theme::shadow(drop, crate::theme::radius::PANEL));
+        l.rect(drop, DROP_BG(), LINE(), crate::theme::radius::PANEL);
         l.hits.push((drop, Hit::None));
         let mut y = BAR + 8.0;
         for (label, keys, cmd) in &m {

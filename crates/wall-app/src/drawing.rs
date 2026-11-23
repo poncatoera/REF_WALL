@@ -73,7 +73,7 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
         let r = [x, cy, *cw, CHIP_H];
         let on = pen.brush == *b;
         let fill = if on { t.accent_soft } else if panel::inside(r, hover) { t.hover } else { [0.0; 4] };
-        l.boxes.push(PanelBox { rect: r, fill, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
+        l.boxes.push(PanelBox { rect: r, fill, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         l.texts.push(TextRun { text: b.label().into(), at: [x + 11.0, cy + 18.5], size: 12.5, color: if on { t.accent_text } else { t.ink } });
         l.hits.push((r, BarHit::Brush(*b)));
         x += cw + gap;
@@ -101,7 +101,7 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     let plus = [x + size_w - 24.0, cy, 24.0, CHIP_H];
     for (r, s, hit) in [(minus, "−", BarHit::Smaller), (plus, "+", BarHit::Bigger)] {
         if panel::inside(r, hover) {
-            l.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
+            l.boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
         }
         l.texts.push(TextRun { text: s.into(), at: [r[0] + 7.0, cy + 19.5], size: 15.0, color: t.ink });
         l.hits.push((r, hit));
@@ -110,7 +110,7 @@ pub fn bar_layout(pen: &brush::PenState, hover: [f32; 2], viewport: [f32; 2], le
     l.texts.push(TextRun { text: size_label, at: [x + (size_w - lw) / 2.0, cy + 18.5], size: 12.5, color: t.dim });
     x += size_w + sep;
     let r = [x, cy, done_w, CHIP_H];
-    l.boxes.push(PanelBox { rect: r, fill: if panel::inside(r, hover) { t.field } else { [0.0; 4] }, stroke: t.line, radius: 7.0, stroke_w: 1.0 });
+    l.boxes.push(PanelBox { rect: r, fill: if panel::inside(r, hover) { t.field } else { [0.0; 4] }, stroke: t.line, radius: crate::theme::radius::CONTROL, stroke_w: 1.0 });
     l.texts.push(TextRun { text: "Done".into(), at: [x + 11.0, cy + 18.5], size: 12.5, color: t.ink });
     l.hits.push((r, BarHit::Done));
     l

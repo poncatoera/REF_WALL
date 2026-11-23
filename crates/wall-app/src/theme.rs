@@ -60,11 +60,11 @@ pub struct Theme {
 /// Corner radii shared by all the chrome, in screen pixels.
 pub mod radius {
     /// Floating panels, menus' drop-downs, cards over the board.
-    pub const PANEL: f32 = 12.0;
+    pub const PANEL: f32 = 6.0;
     /// Fields, buttons, segmented controls.
-    pub const CONTROL: f32 = 8.0;
+    pub const CONTROL: f32 = 4.0;
     /// Rows and items inside a control.
-    pub const INNER: f32 = 6.0;
+    pub const INNER: f32 = 3.0;
     /// Tags and badges.
     pub const PILL: f32 = 999.0;
 }

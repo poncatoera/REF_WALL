@@ -282,7 +282,7 @@ pub fn layout(
         let g = [hover[0] - 20.0, hover[1] - 20.0, w, h];
         let mut fill = t.card_fill;
         fill[3] = 0.75;
-        l.rect(g, fill, t.accent, 8.0);
+        l.rect(g, fill, t.accent, crate::theme::radius::CONTROL);
         icon(&mut l, tool, [g[0] + 22.0, g[1] + 20.0], t.dim);
     }
     l

@@ -140,7 +140,7 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
         texts.push(TextRun { text: "FOR (OPTIONAL)".into(), at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
         y += 14.0;
         let field = [x0 + PAD, y, inner, 30.0];
-        l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: if card.typing { t.accent } else { t.line }, radius: 6.0, stroke_w: if card.typing { 1.5 } else { 1.0 } });
+        l.boxes.push(PanelBox { rect: field, fill: t.field, stroke: if card.typing { t.accent } else { t.line }, radius: crate::theme::radius::CONTROL, stroke_w: if card.typing { 1.5 } else { 1.0 } });
         let (shown, ink) = if card.person.is_empty() && !card.typing { ("Anyone: they type their own name".to_owned(), t.dim) } else { (panel::fit_with(text_width, &card.person, 13.0, inner - 20.0), t.ink) };
         let tw = if card.person.is_empty() { 0.0 } else { text_width(&shown, 13.0) };
         texts.push(TextRun { text: if card.person.is_empty() && card.typing { String::new() } else { shown }, at: [field[0] + 9.0, field[1] + 20.0], size: 13.0, color: ink });

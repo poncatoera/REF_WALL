@@ -2403,7 +2403,7 @@ impl App {
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
             let tl = self.camera.screen_to_board([self.viewport[0] / 2.0 - w / 2.0, menu::BAR + 12.0], self.viewport);
-            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: theme::t().search_bg, stroke: theme::t().accent, shape: [8.0 * px, 1.5 * px] };
+            let bx = wall_render::BoxInstance { rect: [tl[0], tl[1], w * px, h * px], fill: theme::t().search_bg, stroke: theme::t().accent, shape: [theme::radius::CONTROL * px, 1.5 * px] };
             renderer.draw_boxes(&view, &[bx]);
             let shown = if query.is_empty() { "Search this board".to_owned() } else { query.clone() };
             let colour = if query.is_empty() { theme::t().dim } else { theme::t().ink };

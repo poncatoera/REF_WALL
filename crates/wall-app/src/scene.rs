@@ -207,17 +207,17 @@ impl Scene {
                         rect,
                         fill: crate::theme::tinted_group(c).0,
                         stroke: crate::theme::tinted_group(c).1,
-                        shape: [12.0, 1.0],
+                        shape: [6.0, 1.0],
                     });
                     label = Some((name.as_str(), crate::theme::group_label(c)));
                 }
                 ItemKind::Media { hash, crop, look } => {
                     // Placeholder under the picture, seen until its pixels (or a
                     // video's first frame) arrive.
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [6.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [3.0, 1.0] });
                     run.images.push((hash.clone(), ImageInstance {
                         rect,
-                        params: [1.0, 6.0, look_bits(look), if look.grayscale { 1.0 } else { 0.0 }],
+                        params: [1.0, 3.0, look_bits(look), if look.grayscale { 1.0 } else { 0.0 }],
                         uv_rect: crop.map_or([0.0, 0.0, 1.0, 1.0], |c| [c.x as f32, c.y as f32, c.w as f32, c.h as f32]),
                     }));
                 }
@@ -225,14 +225,14 @@ impl Scene {
                     let tint = parse_hex(color.as_deref());
                     let fill = tint.map(|c| crate::theme::tinted_note(c).0).unwrap_or(NOTE_FILL());
                     let stroke = tint.map(|c| crate::theme::tinted_note(c).1).unwrap_or(NOTE_STROKE());
-                    run.boxes.push(BoxInstance { rect, fill, stroke, shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill, stroke, shape: [4.0, 1.0] });
                     label = Some((text.as_str(), TEXT()));
                 }
                 ItemKind::Label { text } => {
                     label = Some((text.as_str(), TEXT()));
                 }
                 ItemKind::Todo { title, entries } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [4.0, 1.0] });
                     // Title on top, then one row per entry with a tick box.
                     let shown = todo_rows_that_fit(rect[3], entries.len());
                     for (k, e) in entries.iter().take(shown).enumerate() {
@@ -263,7 +263,7 @@ impl Scene {
                     }
                 }
                 ItemKind::Board { board_id } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: ACCENT(), shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: ACCENT(), shape: [4.0, 1.0] });
                     // A small stack mark in the corner says "this opens".
                     let px = 10.0;
                     for k in 0..2 {
@@ -280,7 +280,7 @@ impl Scene {
                     label = Some((name, TEXT()));
                 }
                 ItemKind::Palette { colors, name } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [4.0, 1.0] });
                     if !name.is_empty() {
                         let t = clip_line(font, name, 15.0, rect[2] - 28.0);
                         add_text(font, &mut run.glyphs, &t, [rect[0] + 12.0, rect[1] + 24.0], 15.0, TEXT());
@@ -308,7 +308,7 @@ impl Scene {
                     }
                 }
                 ItemKind::Link { url, title } => {
-                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [8.0, 1.0] });
+                    run.boxes.push(BoxInstance { rect, fill: NOTE_FILL(), stroke: NOTE_STROKE(), shape: [4.0, 1.0] });
                     if title.is_empty() {
                         // Untitled (or being typed): the address itself, wrapped.
                         label = Some((url.as_str(), TEXT()));

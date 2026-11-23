@@ -359,9 +359,9 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
         let del_w = panel::text_width(font, "Delete", 12.0) + 14.0;
         let cancel = [right - cancel_w, r[1] + 4.0, cancel_w, r[3] - 8.0];
         let del = [cancel[0] - 6.0 - del_w, cancel[1], del_w, cancel[3]];
-        l.rect(del, t.accent, [0.0; 4], 5.0);
+        l.rect(del, t.accent, [0.0; 4], crate::theme::radius::CONTROL);
         l.text("Delete", [del[0] + 7.0, r[1] + 19.0], 12.0, t.accent_ink);
-        l.rect(cancel, [0.0; 4], t.line, 5.0);
+        l.rect(cancel, [0.0; 4], t.line, crate::theme::radius::CONTROL);
         l.text("Cancel", [cancel[0] + 7.0, r[1] + 19.0], 12.0, t.ink);
         l.hits.insert(0, (r, Action::None));
         l.hits.push((del, Action::ConfirmDelete(row.id)));
@@ -380,7 +380,7 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
     if renaming {
         let Some((_, text)) = &v.state.typing else { unreachable!() };
         let fr = [x - 4.0, r[1] + 3.0, right - x + 4.0, r[3] - 6.0];
-        l.rect(fr, t.field, t.accent, 5.0);
+        l.rect(fr, t.field, t.accent, crate::theme::radius::CONTROL);
         l.text(text.clone(), [x, r[1] + 19.5], 12.5, t.ink);
         let w = panel::text_width(font, text, 12.5);
         l.caret = Some([x + w + 1.0, r[1] + 8.0, 1.5, 14.0]);

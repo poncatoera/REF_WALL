@@ -200,7 +200,7 @@ pub fn layout_in(font: &mut Font, view: &LibraryView, area: [f32; 4], compact: b
         let (c, r) = ((k % cols) as f32, (k / cols) as f32);
         let tile = [gx + c * (tile_w + GAP), gy + r * (tile_h + GAP), tile_w, tile_h];
         let area = [tile[0], tile[1], tile_w, image_h];
-        l.rect(area, TILE(), LINE(), 6.0);
+        l.rect(area, TILE(), LINE(), crate::theme::radius::CONTROL);
         l.visible.push(sc.hash.clone());
         let inner = [area[0] + 4.0, area[1] + 4.0, area[2] - 8.0, area[3] - 8.0];
         // Pictures, and videos' preview frames once the shell sends them.
