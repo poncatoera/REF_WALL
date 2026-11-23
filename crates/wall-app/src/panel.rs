@@ -319,7 +319,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             l.rect(r, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
             let t = format!("{}×", trim_float(s));
             let tw = text_width(font, &t, 12.0);
-            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { [1.0; 4] } else { INK() });
+            l.text(t, [r[0] + (bw - tw) / 2.0, r[1] + 18.5], 12.0, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((r, Action::Speed(s)));
             x += bw + 4.0;
         }
@@ -345,7 +345,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let on = v.at_marker == Some(k);
             let tr = [left, y, 58.0, 24.0];
             l.rect(tr, if on { ACCENT() } else { FIELD() }, if on { ACCENT() } else { LINE() }, 6.0);
-            l.text(crate::video::format_time(*t), [tr[0] + 8.0, tr[1] + 16.5], 12.0, if on { [1.0; 4] } else { INK() });
+            l.text(crate::video::format_time(*t), [tr[0] + 8.0, tr[1] + 16.5], 12.0, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((tr, Action::SeekMarker(k)));
             let nr = [left + 64.0, y, inner - 64.0 - 28.0, 24.0];
             let typing = edit.filter(|e| e.field == Field::Marker(k));
@@ -416,7 +416,7 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
             l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
+            l.text(label, [x + 10.0, y + 16.5], size, if on { crate::theme::t().accent_ink } else { INK() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             let xr = [x + w - 22.0, y + 2.0, 20.0, 20.0];
             l.text("×", [xr[0] + 4.0, xr[1] + 15.0], 14.0, DIM());
@@ -489,8 +489,8 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
             let r = [x, y, w, h];
             let on = info.filter.as_ref() == Some(tag);
             l.rect(r, if on { ACCENT() } else { CHIP() }, [0.0; 4], h / 2.0);
-            l.text(label, [x + 10.0, y + 16.5], size, if on { [1.0; 4] } else { INK() });
-            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { [1.0; 4] } else { DIM() });
+            l.text(label, [x + 10.0, y + 16.5], size, if on { crate::theme::t().accent_ink } else { INK() });
+            l.text(count, [x + w - 10.0 - cw, y + 16.5], 11.5, if on { crate::theme::t().accent_ink } else { DIM() });
             l.hits.push((r, Action::FilterTag(tag.clone())));
             x += w + 6.0;
         }
@@ -512,7 +512,8 @@ pub fn layout(font: &mut Font, info: &PanelInfo, edit: Option<&FieldEdit>, viewp
 
     let h = (y - TOP).max(60.0).min(viewport[1] - TOP - MARGIN);
     l.rect = [x0, TOP, WIDTH, h];
-    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG(), stroke: LINE(), radius: 10.0, stroke_w: 1.0 });
+    l.boxes.insert(0, PanelBox { rect: l.rect, fill: BG(), stroke: LINE(), radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
+    l.boxes.insert(0, crate::theme::shadow(l.rect, crate::theme::radius::PANEL));
     l
 }
 

@@ -21,7 +21,7 @@ fn LINE() -> [f32; 4] {
 }
 #[allow(non_snake_case)]
 fn HOVER() -> [f32; 4] {
-    crate::theme::t().accent
+    crate::theme::t().accent_soft
 }
 #[allow(non_snake_case)]
 fn INK() -> [f32; 4] {
@@ -271,10 +271,13 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
     for (i, m) in MENUS.iter().enumerate() {
         let w = text_width(font, m.title, 13.0) + 20.0;
         let r = [x, 3.0, w, BAR - 6.0];
+        let over = crate::panel::inside(r, hover);
         if open == Some(i) {
-            l.rect(r, DROP_BG(), [0.0; 4], 5.0);
+            l.rect(r, crate::theme::t().chip, [0.0; 4], crate::theme::radius::INNER);
+        } else if over {
+            l.rect(r, crate::theme::t().hover, [0.0; 4], crate::theme::radius::INNER);
         }
-        l.text(m.title, [x + 10.0, 19.5], 13.0, INK());
+        l.text(m.title, [x + 10.0, 19.5], 13.0, if open == Some(i) || over { INK() } else { DIM() });
         l.hits.push((r, Hit::Title(i)));
         title_x.push(x);
         x += w;
@@ -288,9 +291,11 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
         let h: f32 = m.iter().map(|e| if e.0.is_empty() { 9.0 } else { ENTRY_H }).sum::<f32>() + 8.0;
         let x0 = title_x[i].min(viewport[0] - DROP_W - 4.0).max(0.0);
         let drop = [x0, BAR, DROP_W, h];
-        l.rect(drop, DROP_BG(), LINE(), 6.0);
+        let drop = [drop[0], drop[1] + 4.0, drop[2], drop[3]];
+        l.boxes.push(crate::theme::shadow(drop, 10.0));
+        l.rect(drop, DROP_BG(), LINE(), 10.0);
         l.hits.push((drop, Hit::None));
-        let mut y = BAR + 4.0;
+        let mut y = BAR + 8.0;
         for (label, keys, cmd) in &m {
             if label.is_empty() {
                 l.rect([x0 + 8.0, y + 4.0, DROP_W - 16.0, 1.0], LINE(), [0.0; 4], 0.0);
@@ -300,13 +305,13 @@ pub fn layout(font: &mut Font, open: Option<usize>, hover: [f32; 2], title: &str
             let r = [x0 + 4.0, y, DROP_W - 8.0, ENTRY_H];
             let hot = cmd.is_some() && crate::panel::inside(r, hover);
             if hot {
-                l.rect(r, HOVER(), [0.0; 4], 4.0);
+                l.rect(r, HOVER(), [0.0; 4], crate::theme::radius::INNER);
             }
-            let ink = if cmd.is_none() { DIM() } else if hot { [1.0; 4] } else { INK() };
+            let ink = if cmd.is_none() { DIM() } else if hot { crate::theme::t().accent_text } else { INK() };
             let kw = text_width(font, keys, 12.0);
             let label = fit(font, label, 13.0, DROP_W - 36.0 - kw);
             l.text(label, [r[0] + 10.0, y + 18.5], 13.0, ink);
-            l.text(*keys, [r[0] + r[2] - 10.0 - kw, y + 18.5], 12.0, if hot { [1.0; 4] } else { DIM() });
+            l.text(*keys, [r[0] + r[2] - 10.0 - kw, y + 18.5], 12.0, if hot { crate::theme::t().accent_text } else { DIM() });
             if let Some(c) = cmd {
                 l.hits.push((r, Hit::Entry(*c)));
             }

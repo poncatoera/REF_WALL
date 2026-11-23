@@ -237,18 +237,19 @@ pub fn layout(font: &mut Font, v: &View, viewport: [f32; 2]) -> Layout {
     l.rect(l.rect, t.panel_bg, [0.0; 4], 0.0);
     l.rect([WIDTH - 1.0, y0, 1.0, h], t.line, [0.0; 4], 0.0);
 
-    // Tabs and close.
-    let mut x = x0 + PAD;
-    let ty = y0 + 26.0;
-    for (label, tab) in [("BOARDS", Tab::Boards), ("LIBRARY", Tab::Library)] {
+    // Tabs (a segmented control) and close.
+    let seg = [x0 + PAD - 4.0, y0 + 7.0, WIDTH - 2.0 * PAD - 26.0, 28.0];
+    l.rect(seg, if theme::is_light() { t.chip } else { t.field }, [0.0; 4], theme::radius::CONTROL);
+    let half = (seg[2] - 6.0) / 2.0;
+    for (k, (label, tab)) in [("Boards", Tab::Boards), ("Library", Tab::Library)].into_iter().enumerate() {
         let on = v.state.tab == tab;
-        let tw = panel::text_width(font, label, 12.5);
-        l.text(label, [x, ty], 12.5, if on { t.ink } else { t.dim });
+        let r = [seg[0] + 3.0 + k as f32 * half, seg[1] + 3.0, half, seg[3] - 6.0];
         if on {
-            l.rect([x, ty + 6.0, tw, 2.0], t.accent, [0.0; 4], 1.0);
+            l.rect(r, if theme::is_light() { t.panel_bg } else { t.chip }, [0.0; 4], theme::radius::INNER);
         }
-        l.hits.push(([x - 6.0, y0 + 6.0, tw + 12.0, 30.0], Action::Tab(tab)));
-        x += tw + 24.0;
+        let tw = panel::text_width(font, label, 12.5);
+        l.text(label, [r[0] + (r[2] - tw) / 2.0, r[1] + 15.5], 12.5, if on { t.ink } else { t.dim });
+        l.hits.push((r, Action::Tab(tab)));
     }
     let close = [x0 + WIDTH - PAD - 20.0, y0 + 9.0, 22.0, 22.0];
     l.text("×", [close[0] + 5.0, close[1] + 16.0], 18.0, t.dim);
@@ -265,7 +266,7 @@ pub fn layout(font: &mut Font, v: &View, viewport: [f32; 2]) -> Layout {
     let inner = WIDTH - 2.0 * PAD;
     let sr = [x0 + PAD, y, inner - 34.0, 28.0];
     let typing_search = matches!(v.state.typing, Some((Field::Search, _)));
-    l.rect(sr, t.field, if typing_search { t.accent } else { t.line }, 6.0);
+    l.rect(sr, t.field, if typing_search { t.accent } else { t.line }, theme::radius::CONTROL);
     let (shown, colour) = match &v.state.typing {
         Some((Field::Search, s)) => (s.clone(), t.ink),
         _ if v.state.search.is_empty() => ("Search boards".to_owned(), t.dim),
@@ -280,14 +281,14 @@ pub fn layout(font: &mut Font, v: &View, viewport: [f32; 2]) -> Layout {
     l.hits.push((sr, Action::Search));
     let plus = [x0 + PAD + inner - 28.0, y, 28.0, 28.0];
     let over = panel::inside(plus, v.hover);
-    l.rect(plus, if over { t.field } else { [0.0; 4] }, t.line, 6.0);
+    l.rect(plus, if over { t.hover } else { [0.0; 4] }, t.line, theme::radius::CONTROL);
     l.text("+", [plus[0] + 8.5, plus[1] + 20.0], 17.0, t.ink);
     l.hits.push((plus, Action::New));
     y += 28.0 + 14.0;
 
     let searching = !v.state.search.is_empty() || typing_search;
     if !searching && !v.recent.is_empty() {
-        l.text("RECENT", [x0 + PAD, y + 10.0], 11.0, t.dim);
+        l.text("Recent", [x0 + PAD, y + 10.0], 11.0, t.dim);
         y += 18.0;
         for row in v.recent {
             let r = [x0 + 6.0, y, WIDTH - 12.0, ROW_H];
@@ -296,7 +297,7 @@ pub fn layout(font: &mut Font, v: &View, viewport: [f32; 2]) -> Layout {
         }
         y += 10.0;
     }
-    l.text(if searching { "FOUND" } else { "ALL BOARDS" }, [x0 + PAD, y + 10.0], 11.0, t.dim);
+    l.text(if searching { "Found" } else { "All boards" }, [x0 + PAD, y + 10.0], 11.0, t.dim);
     y += 18.0;
     let bottom = y0 + h - 30.0;
     let fits = (((bottom - y) / ROW_H).floor() as usize).max(1);
@@ -328,8 +329,8 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
     match drop {
         Some((_, None)) => l.rect(r, t.chip, t.accent, 6.0),
         Some((_, Some(after))) => l.rect([r[0] + 4.0, if after { r[1] + r[3] - 1.0 } else { r[1] - 1.0 }, r[2] - 8.0, 2.0], t.accent, [0.0; 4], 1.0),
-        None if row.current => l.rect(r, t.chip, [0.0; 4], 6.0),
-        None if over && v.dragging.is_none() => l.rect(r, t.field, [0.0; 4], 6.0),
+        None if row.current => l.rect(r, t.accent_soft, [0.0; 4], theme::radius::INNER),
+        None if over && v.dragging.is_none() => l.rect(r, t.hover, [0.0; 4], theme::radius::INNER),
         None => {}
     }
     let indent = if tree { row.depth as f32 * INDENT } else { 0.0 };
@@ -345,7 +346,7 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
     }
     // Tiny thumbnail (or an empty card).
     let th = [x, r[1] + (r[3] - THUMB[1]) / 2.0, THUMB[0], THUMB[1]];
-    l.rect(th, t.tile, t.line, 3.0);
+    l.rect(th, t.tile, [0.0; 4], 4.0);
     if let Some(h) = &row.thumb {
         l.images.push((h.clone(), [th[0] + 1.0, th[1] + 1.0, th[2] - 2.0, th[3] - 2.0]));
     }
@@ -359,7 +360,7 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
         let cancel = [right - cancel_w, r[1] + 4.0, cancel_w, r[3] - 8.0];
         let del = [cancel[0] - 6.0 - del_w, cancel[1], del_w, cancel[3]];
         l.rect(del, t.accent, [0.0; 4], 5.0);
-        l.text("Delete", [del[0] + 7.0, r[1] + 19.0], 12.0, t.panel_bg);
+        l.text("Delete", [del[0] + 7.0, r[1] + 19.0], 12.0, t.accent_ink);
         l.rect(cancel, [0.0; 4], t.line, 5.0);
         l.text("Cancel", [cancel[0] + 7.0, r[1] + 19.0], 12.0, t.ink);
         l.hits.insert(0, (r, Action::None));
@@ -375,7 +376,7 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
         right = xr[0] - 4.0;
     }
     let renaming = matches!(&v.state.typing, Some((Field::Rename(id), _)) if *id == row.id) && tree;
-    let ink = if row.current { t.accent } else { t.ink };
+    let ink = if row.current { t.accent_text } else { t.ink };
     if renaming {
         let Some((_, text)) = &v.state.typing else { unreachable!() };
         let fr = [x - 4.0, r[1] + 3.0, right - x + 4.0, r[3] - 6.0];

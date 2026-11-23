@@ -172,7 +172,8 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
     let y0 = (p[1] - PIN).min(vp[1] - h - 8.0).max(BAR + 8.0);
     let c = [x0, y0, CARD_W, h];
     l.card = Some(c);
-    l.boxes.push(PanelBox { rect: c, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
+    l.boxes.push(crate::theme::shadow(c, crate::theme::radius::PANEL));
+    l.boxes.push(PanelBox { rect: c, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
 
     // Header: what it is, and its buttons on the right.
     let title = match (card.id, resolved) {
@@ -232,9 +233,9 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
     let send = [x0 + CARD_W - pad - 70.0, by, 70.0, 30.0];
     let empty = card.text.trim().is_empty();
     let fill = if empty { t.field } else { t.accent };
-    l.boxes.push(PanelBox { rect: send, fill, stroke: [0.0; 4], radius: 7.0, stroke_w: 0.0 });
+    l.boxes.push(PanelBox { rect: send, fill, stroke: [0.0; 4], radius: crate::theme::radius::CONTROL, stroke_w: 0.0 });
     let sw = width("Send", 12.5);
-    l.texts.push(TextRun { text: "Send".into(), at: [send[0] + (70.0 - sw) / 2.0, send[1] + 19.5], size: 12.5, color: if empty { t.dim } else { t.panel_bg } });
+    l.texts.push(TextRun { text: "Send".into(), at: [send[0] + (70.0 - sw) / 2.0, send[1] + 19.5], size: 12.5, color: if empty { t.dim } else { t.accent_ink } });
     l.hits.push((send, CardHit::Send));
     l
 }
@@ -258,7 +259,8 @@ pub fn stamp_bar(picked: usize, hover: [f32; 2], left: f32, right: f32, width: &
     let x0 = (left + (right - left - w) / 2.0).max(left + 8.0);
     let y0 = BAR + 8.0;
     b.rect = [x0, y0, w, cell + 12.0];
-    b.boxes.push(PanelBox { rect: b.rect, fill: t.panel_bg, stroke: t.line, radius: 10.0, stroke_w: 1.0 });
+    b.boxes.push(crate::theme::shadow(b.rect, crate::theme::radius::PANEL));
+    b.boxes.push(PanelBox { rect: b.rect, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
     let mut x = x0 + 8.0;
     for (k, (mark, color)) in MARKS.iter().enumerate() {
         let r = [x, y0 + 6.0, cell, cell];

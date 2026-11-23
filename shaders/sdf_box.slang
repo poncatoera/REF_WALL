@@ -73,9 +73,15 @@ float4 fs_main(VsOut i) : SV_Target
 {
     float radius = min(i.shape.x, min(i.half_size.x, i.half_size.y));
     float d = sd_round_box(i.local, i.half_size, radius);
-    float aa = view.pixel;
-    float coverage = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
-    float in_stroke = smoothstep(-aa * 0.5, aa * 0.5, d + i.shape.y);
+    // A negative stroke width s makes a soft box (drop shadows): it fades
+    // to nothing over 2s board units inside its edge instead of over one
+    // pixel. Give such a box the same fill and stroke.
+    float soft = max(-i.shape.y, 0.0);
+    float k = step(0.0001, soft);
+    float lo = lerp(view.pixel * -0.5, -2.0 * soft, k);
+    float hi = lerp(view.pixel * 0.5, 0.0, k);
+    float coverage = 1.0 - smoothstep(lo, hi, d);
+    float in_stroke = smoothstep(lo, hi, d + max(i.shape.y, 0.0));
     float4 color = lerp(i.fill, i.stroke, in_stroke);
     return color * coverage;
 }
