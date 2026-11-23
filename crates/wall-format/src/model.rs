@@ -301,6 +301,30 @@ pub enum ItemKind {
     Board {
         board_id: Uuid,
     },
+    /// A comment pinned to the board at the frame's corner (the frame has no
+    /// size: the pin is the same size on screen at any zoom). Replies follow
+    /// the first message.
+    Comment {
+        messages: Vec<CommentMessage>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
+    },
+    /// A reaction stamped on the board: one of a few marks ("+1", "♥", "★",
+    /// "✓", "?", "!"), and the name of who stamped it.
+    Stamp {
+        mark: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+    },
+}
+
+/// One message in a comment thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommentMessage {
+    /// The name the writer showed as.
+    pub by: String,
+    pub text: String,
+    pub at_ms: u64,
 }
 
 /// One thing on a board. `rev` and `updated_by` let two people (or the desktop

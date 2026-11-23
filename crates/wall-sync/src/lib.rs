@@ -158,6 +158,16 @@ impl State {
     /// What must go up from these boards and sidecars (pass at least the ones
     /// that changed), and boards deleted here.
     pub fn collect<'a>(&self, boards: impl IntoIterator<Item = &'a Board>, sidecars: &[ItemSidecar], deleted: &[Uuid]) -> Push {
+        self.collect_where(boards, sidecars, deleted, false)
+    }
+
+    /// What a view-only link may send: new or changed comments and stamps,
+    /// nothing else (no boards, no picture details).
+    pub fn collect_marks<'a>(&self, boards: impl IntoIterator<Item = &'a Board>) -> Push {
+        self.collect_where(boards, &[], &[], true)
+    }
+
+    fn collect_where<'a>(&self, boards: impl IntoIterator<Item = &'a Board>, sidecars: &[ItemSidecar], deleted: &[Uuid], marks_only: bool) -> Push {
         let mut p = Push { since: self.seq, known: self.scope.iter().flatten().copied().collect(), ..Default::default() };
         let mut room = (MAX_ROWS, MAX_CHARS);
         let mut fits = |size: usize, p: &mut Push| {
@@ -169,7 +179,7 @@ impl State {
             true
         };
         let boards: Vec<&Board> = boards.into_iter().collect();
-        for b in &boards {
+        for b in boards.iter().filter(|_| !marks_only) {
             let base = self.boards.get(&b.id);
             let meta = Meta::of(b);
             // A new library's empty first board isn't worth a place in the
@@ -189,6 +199,13 @@ impl State {
         for b in &boards {
             let base = self.boards.get(&b.id);
             for i in b.items.values() {
+                if marks_only && !matches!(i.kind, wall_format::ItemKind::Comment { .. } | wall_format::ItemKind::Stamp { .. }) {
+                    continue;
+                }
+                // A board this link can't see (one made here): nowhere to send to.
+                if marks_only && base.is_none() {
+                    continue;
+                }
                 let known = base.and_then(|x| x.items.get(&i.id));
                 if known.is_some_and(|(rev, by)| !newer((i.rev, &i.updated_by), (*rev, by))) {
                     continue;
@@ -447,6 +464,30 @@ mod tests {
         assert_eq!(a.boards[&id].live_items().count(), 2);
         assert!(matches!(&a.boards[&id].items[&ids[0]].kind, ItemKind::Note { text, .. } if text == "from b"), "a tie goes the same way everywhere");
         assert_eq!((a.go(&mut s), b.go(&mut s)), (0, 0), "nothing to say any more");
+    }
+
+    #[test]
+    fn a_view_link_sends_only_its_comments_and_stamps() {
+        let (mut s, mut a, mut b) = (Server::default(), Copy::default(), Copy::default());
+        let home = board("Home", vec![note("x", 1, "a")]);
+        let id = home.id;
+        a.boards.insert(id, home);
+        a.go(&mut s);
+        b.go(&mut s);
+        let bb = b.boards.get_mut(&id).unwrap();
+        bb.name = "renamed".into();
+        bb.items.values_mut().next().unwrap().rev = 9;
+        let mut c = note("c", 1, "b");
+        c.kind = wall_format::ItemKind::Comment { messages: vec![wall_format::CommentMessage { by: "Mia".into(), text: "hi".into(), at_ms: 1 }], resolved: false };
+        bb.items.insert(c.id, c.clone());
+        let mut elsewhere = board("Mine", vec![]);
+        let mut st = note("s", 1, "b");
+        st.kind = wall_format::ItemKind::Stamp { mark: "★".into(), by: String::new() };
+        elsewhere.items.insert(st.id, st);
+        b.boards.insert(elsewhere.id, elsewhere);
+        let p = b.state.collect_marks(b.boards.values());
+        assert!(p.boards.is_empty() && p.sidecars.is_empty());
+        assert_eq!(p.items.iter().map(|i| i.item.id).collect::<Vec<_>>(), vec![c.id], "the comment, not the note, not a board the server lacks");
     }
 
     #[test]

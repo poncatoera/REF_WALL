@@ -5,6 +5,7 @@
 
 pub mod brush;
 pub mod share;
+pub mod comments;
 pub mod presence;
 pub mod doc;
 mod drawing;
@@ -303,6 +304,11 @@ pub struct App {
     /// Typing a new name for ourselves.
     name_edit: Option<String>,
     my_color: Option<u8>,
+    comment_card: Option<comments::CommentCard>,
+    /// Which mark the Stamp tool puts down.
+    stamp_mark: usize,
+    /// A view-only link: only comments and stamps are kept.
+    view_only: bool,
     /// Our name comes with the link we opened.
     name_fixed: bool,
     /// Set by the desktop shell: shows the menu entries only it can carry out.
@@ -403,6 +409,9 @@ impl App {
             my_name: None,
             name_edit: None,
             my_color: None,
+            comment_card: None,
+            stamp_mark: 0,
+            view_only: false,
             name_fixed: false,
             desktop: false,
             library_view: None,
@@ -1079,7 +1088,10 @@ impl App {
         if self.share_press(pos) {
             return;
         }
-        if self.pen_bar_press(pos) {
+        if self.comment_card_press(pos) {
+            return;
+        }
+        if self.pen_bar_press(pos) || self.stamp_bar_press(pos) {
             return;
         }
         if self.sidebar_press(pos) {
@@ -1095,6 +1107,9 @@ impl App {
         }
         if self.panel_edit.is_some() {
             self.commit_panel_edit();
+        }
+        if self.comment_board_press(pos, board) {
+            return;
         }
         let hit = self.hit(board);
         let double = self
@@ -1449,7 +1464,7 @@ impl App {
         if self.menu_open.take().is_some() && key == Key::Escape {
             return;
         }
-        if self.name_key(key) || self.share_key(key) || self.sidebar_key(key) {
+        if self.name_key(key) || self.share_key(key) || self.comment_key(key) || self.sidebar_key(key) {
             return;
         }
         if let (toolbar::Tool::Pen, Key::Char(c)) = (self.tool, key) {
@@ -1571,7 +1586,10 @@ impl App {
             Key::Escape => self.selection.clear(),
             Key::Space { pressed } => self.space_held = pressed,
             Key::Left | Key::Right | Key::Home | Key::End => {}
+            Key::Char(c) if self.stamp_key(c) => {}
             Key::Char(c @ '0'..='7') => self.set_color(c),
+            Key::Char('c' | 'C') => self.rail_click(toolbar::Tool::Comment),
+            Key::Char('e' | 'E') => self.rail_click(toolbar::Tool::Stamp),
             Key::Char('b' | 'B') => {
                 self.new_board();
             }
@@ -1942,7 +1960,7 @@ impl App {
     /// True while the keyboard types into an item; shells then send typed
     /// characters to [`Self::text_input`] instead of shortcuts like Space.
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some() || self.name_edit.is_some() || self.share_typing() || self.sidebar_typing()
+        self.editing.is_some() || self.search.is_some() || self.panel_edit.is_some() || self.name_edit.is_some() || self.share_typing() || self.comment_typing() || self.sidebar_typing()
     }
 
     /// Starts typing into an item's text, caret at the end.
@@ -2075,7 +2093,7 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
-        if self.name_text(s) || self.share_text(s) || self.sidebar_text(s) {
+        if self.name_text(s) || self.share_text(s) || self.comment_text(s) || self.sidebar_text(s) {
             return true;
         }
         if let Some(e) = &mut self.panel_edit {
@@ -2432,6 +2450,7 @@ impl App {
             // Sets needs_redraw again while thumbnails are still loading.
             self.draw_library(renderer);
         }
+        self.draw_comments(renderer);
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);
         self.draw_share(renderer);
@@ -2590,6 +2609,19 @@ impl App {
                 };
                 info.rows.push(("From".into(), end(from)));
                 info.rows.push(("To".into(), end(to)));
+            }
+            ItemKind::Comment { messages, resolved } => {
+                info.kind = "Comment".into();
+                info.rows.push(("Messages".into(), messages.len().to_string()));
+                if let Some(m) = messages.first() {
+                    info.rows.push(("Started by".into(), m.by.clone()));
+                }
+                info.rows.push(("State".into(), if *resolved { "Resolved" } else { "Open" }.into()));
+            }
+            ItemKind::Stamp { mark, by } => {
+                info.kind = "Stamp".into();
+                info.rows.push(("Mark".into(), mark.clone()));
+                info.rows.push(("By".into(), if by.is_empty() { "—".into() } else { by.clone() }));
             }
         }
         info.filter = self.tag_filter.clone();
@@ -2947,7 +2979,7 @@ impl App {
         self.end_edit();
         match tool {
             Tool::Select => self.tool = Tool::Select,
-            Tool::Arrow | Tool::Pen => self.tool = if self.tool == tool { Tool::Select } else { tool },
+            Tool::Arrow | Tool::Pen | Tool::Comment | Tool::Stamp => self.tool = if self.tool == tool { Tool::Select } else { tool },
             Tool::Import => self.run_command(menu::Command::Import),
             t => self.gesture = Gesture::RailDrag { tool: t },
         }
@@ -2990,7 +3022,7 @@ impl App {
                 self.new_board();
                 self.cursor = cursor;
             }
-            Tool::Select | Tool::Arrow | Tool::Pen | Tool::Import => {}
+            Tool::Select | Tool::Arrow | Tool::Pen | Tool::Comment | Tool::Stamp | Tool::Import => {}
         }
         self.needs_redraw = true;
     }

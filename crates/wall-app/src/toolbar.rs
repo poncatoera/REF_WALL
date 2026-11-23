@@ -22,6 +22,10 @@ pub enum Tool {
     Link,
     /// A colour palette card (from the selected pictures' colours).
     Palette,
+    /// While on, a click on the board starts a comment there (C).
+    Comment,
+    /// While on, clicks on the board put down stamps (E).
+    Stamp,
     /// Pictures or videos from disk.
     Import,
 }
@@ -46,6 +50,9 @@ pub const TOOLS: &[Option<(Tool, &str)>] = &[
     Some((Tool::Board, "Board  ·  B")),
     Some((Tool::Link, "Link  ·  or paste an address")),
     Some((Tool::Palette, "Palette  ·  from the selected pictures")),
+    None,
+    Some((Tool::Comment, "Comment  ·  C")),
+    Some((Tool::Stamp, "Stamp a reaction  ·  E")),
     None,
     Some((Tool::Import, "Pictures or videos…")),
 ];
@@ -297,6 +304,12 @@ fn icon(l: &mut Layout, tool: Tool, c: [f32; 2], ink: [f32; 4]) {
         Tool::Select => glyph(l, "↖", c, 19.0, ink),
         Tool::Arrow => glyph(l, "↗", c, 19.0, ink),
         Tool::Text => glyph(l, "T", c, 19.0, ink),
+        Tool::Stamp => glyph(l, "★", c, 17.0, ink),
+        Tool::Comment => {
+            // A speech bubble.
+            l.outline([x - 9.0, y - 8.0, 18.0, 13.0], ink, 6.0);
+            l.fill([x - 6.0, y + 3.0, 4.0, 5.0], ink, 0.5);
+        }
         Tool::Pen => {
             // A slanted line of dots with a heavier tip.
             for k in 0..5 {

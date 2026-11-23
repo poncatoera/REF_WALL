@@ -160,6 +160,40 @@ test("a view link can't change anything", async () => {
   }
 });
 
+test("a view link can comment and stamp, and not change what others wrote", async () => {
+  const k = view.secret;
+  const c = randomUUID(), st = randomUUID();
+  const msg = (by, text) => ({ by, text, at_ms: 1 });
+  const comment = (rev, messages, more = {}) => ({ id: c, frame: { x: 5, y: 5, w: 0, h: 0 }, type: "comment", messages, rev, updated_ms: rev, updated_by: "web-1", ...more });
+  const ok = async (item) => {
+    const r = await sync(k, { since: 0, items: [{ board: A, item }] });
+    assert.equal(r.status, 200);
+    return r.data.refused;
+  };
+  assert.deepEqual(await ok(comment(1, [msg("Mia", "Love it")])), []);
+  assert.deepEqual(await ok(comment(2, [msg("Mia", "Love it"), msg("Mia", "More of this")])), [], "a reply");
+  assert.deepEqual(await ok(comment(3, [msg("Mia", "Love it"), msg("Mia", "More of this")], { resolved: true })), [], "resolved");
+  assert.deepEqual(await ok(comment(4, [msg("Mia", "Hate it")])), [c], "can't rewrite a message");
+  assert.deepEqual(await ok(comment(4, [])), [c], "can't drop messages");
+  assert.deepEqual(await ok(comment(4, [msg("Mia", "Love it"), msg("Mia", "More of this")], { deleted: true })), [c], "can't delete the thread");
+  assert.equal((await sync(k, { since: 0, items: [{ board: A, item: note(c, 5, "x") }] })).status, 403, "only comments and stamps");
+  // Stamps: put down, moved, taken away.
+  const stamp = (rev, more = {}) => ({ id: st, frame: { x: 0, y: 0, w: 40, h: 40 }, type: "stamp", mark: "♥", by: "Mia", rev, updated_ms: rev, updated_by: "web-1", ...more });
+  assert.deepEqual(await ok(stamp(1)), []);
+  assert.deepEqual(await ok(stamp(2, { frame: { x: 9, y: 9, w: 40, h: 40 } })), []);
+  assert.deepEqual(await ok(stamp(3, { deleted: true })), []);
+  // Not someone's note turned into a stamp, nor a comment on another board.
+  assert.deepEqual(await ok({ ...stamp(100), id: n1 }), [n1]);
+  assert.deepEqual(await ok({ ...comment(1, [msg("x", "y")]), id: randomUUID() }).then(() => "same board"), "same board");
+  let r = await sync(k, { since: 0, items: [{ board: PRIVATE, item: { ...comment(1, [msg("x", "y")]), id: randomUUID() } }] });
+  assert.equal(r.data.refused.length, 1, "only its own board");
+  // The owner sees the thread as it was before the refused changes.
+  const all = (await sync(owner, { since: 0 })).data.items.map((e) => e.item);
+  const got = all.find((i) => i.id === c);
+  assert.deepEqual([got.messages.length, got.resolved, !!got.deleted], [2, true, false]);
+  assert.equal(all.find((i) => i.id === n1).type, "note");
+});
+
 test("an edit link changes its board and nothing outside it", async () => {
   const k = edit.secret;
   let r = await sync(k, { since: 0, items: [{ board: B, item: note(n3, 1, "from client", "client") }] });

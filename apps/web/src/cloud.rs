@@ -218,6 +218,7 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
         let done = async {
             if !known {
                 view = json::<Me>(&key, "GET", "me", None).await?.role == "view";
+                s.borrow_mut().app.set_view_only(view);
                 known = true;
             }
             let moved = round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
@@ -234,7 +235,7 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
                 quiet = if moved { 0 } else { quiet + 1 };
                 note(match (opened, view) {
                     (false, _) => "There's nothing on this link.",
-                    (true, true) => "View only: changes you make here aren't saved",
+                    (true, true) => "View only: comments (C) and stamps (E) are kept; other changes aren't saved",
                     (true, false) => "",
                 });
             }
@@ -280,9 +281,6 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
             if wasm_bindgen_futures::JsFuture::from(live_wait(step, sync.seq as f64)).await.ok().and_then(|v| v.as_bool()) == Some(true) {
                 quiet = 0;
                 break;
-            }
-            if view {
-                continue;
             }
             let changed = {
                 let st = s.borrow();
@@ -333,7 +331,7 @@ async fn round(s: &Rc<RefCell<State>>, key: &str, sync: &mut Sync, view: bool, u
             }
             uploads.remove(0);
         }
-        let mut push = if view { sync.collect([], &[], &[]) } else { sync.collect(&boards, &sidecars, &[]) };
+        let mut push = if view { sync.collect_marks(&boards) } else { sync.collect(&boards, &sidecars, &[]) };
         let more_to_send = push.more;
         moved |= !push.is_empty();
         let before = sync.clone();

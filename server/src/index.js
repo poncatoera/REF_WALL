@@ -177,6 +177,23 @@ const no = (status, error) => ({ status, error });
 
 // A name others will see: one line, no control characters, not too long.
 // One of the 8 colours people can pick (an index), or null for "by id".
+// What a view link may put on a board.
+const MARKS = new Set(["comment", "stamp"]);
+
+// A view link may start a comment, reply to one, resolve or reopen it, and
+// put down, move or take away stamps. It can't change what anyone wrote,
+// delete a thread, or turn something else into a comment.
+function viewMayWrite(old, i) {
+  if (!MARKS.has(i.type)) return false;
+  if (!old) return !i.deleted;
+  if (old.type !== i.type) return false;
+  if (i.type === "stamp") return true;
+  if (i.deleted && !old.deleted) return false;
+  const was = Array.isArray(old.messages) ? old.messages : [];
+  const now = Array.isArray(i.messages) ? i.messages : [];
+  return now.length >= was.length && was.every((m, k) => JSON.stringify(m) === JSON.stringify(now[k]));
+}
+
 function cleanColor(v) {
   return Number.isInteger(v) && v >= 0 && v < 8 ? v : null;
 }
@@ -461,7 +478,8 @@ export class LibraryDO extends DurableObject {
     const sidecars = Array.isArray(req.sidecars) ? req.sidecars : [];
     const pushing = boards.length + items.length + sidecars.length;
     if (pushing > MAX_PUSH) return no(413, "too much at once");
-    if (pushing && a.role === "view") return no(403, "this link can only look");
+    // A view link may only comment and stamp.
+    if (a.role === "view" && (boards.length || sidecars.length || items.some((e) => !MARKS.has(e?.item?.type)))) return no(403, "this link can only look");
     if (pushing && this.sql.databaseSize > MAX_LIBRARY_DB) return no(507, "the library is full");
     let refused = [];
     if (pushing) {
@@ -573,8 +591,12 @@ export class LibraryDO extends DurableObject {
       }
       const by = typeof i.updated_by === "string" ? i.updated_by : "";
       const hash = i.type === "media" && HASH.test(i.hash) ? i.hash : null;
-      const old = this.rows("SELECT rev, updated_by, hash FROM items WHERE board = ? AND id = ?", e.board, i.id)[0];
+      const old = this.rows("SELECT rev, updated_by, hash, json FROM items WHERE board = ? AND id = ?", e.board, i.id)[0];
       if (old && !(i.rev > old.rev || (i.rev === old.rev && by > old.updated_by))) continue;
+      if (a.role === "view" && !viewMayWrite(old && JSON.parse(old.json), i)) {
+        refused.push(i.id);
+        continue;
+      }
       // A link mustn't reach a file by naming its hash in a new item: it may
       // only use files it can already read or that it uploads itself.
       if (scope && hash && hash !== old?.hash && !this.mayUse(a, scope, hash)) {

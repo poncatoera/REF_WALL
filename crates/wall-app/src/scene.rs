@@ -150,6 +150,10 @@ impl Scene {
         let mut items: Vec<_> = doc.board.live_items().collect();
         items.sort_by(|a, b| a.frame.z.total_cmp(&b.frame.z));
         for item in items {
+            // Comments are pins drawn over the board at screen size (comments.rs).
+            if matches!(item.kind, ItemKind::Comment { .. }) {
+                continue;
+            }
             let f = item.frame;
             let mut rect = [f.x as f32, f.y as f32, f.w as f32, f.h as f32];
             let arrow = match &item.kind {
@@ -318,6 +322,17 @@ impl Scene {
                         add_text(font, &mut run.glyphs, &site, [rect[0] + 14.0, y], 12.5, crate::theme::t().text_done);
                     }
                     add_text(font, &mut run.glyphs, "↗", [rect[0] + rect[2] - 24.0, rect[1] + 24.0], 14.0, ACCENT());
+                }
+                ItemKind::Comment { .. } => {}
+                ItemKind::Stamp { mark, .. } => {
+                    // A coloured disc with its mark in white.
+                    let c = crate::comments::stamp_color(mark);
+                    let d = rect[2].min(rect[3]);
+                    let r = [rect[0] + (rect[2] - d) / 2.0, rect[1] + (rect[3] - d) / 2.0, d, d];
+                    run.boxes.push(BoxInstance { rect: r, fill: c, stroke: [1.0, 1.0, 1.0, 1.0], shape: [d / 2.0, d * 0.05] });
+                    let size = if mark.chars().count() > 1 { d * 0.42 } else { d * 0.55 };
+                    let w = font.layout_line(mark).width * size;
+                    add_text(font, &mut run.glyphs, mark, [r[0] + (d - w) / 2.0, r[1] + d / 2.0 + size * 0.36], size, [1.0; 4]);
                 }
                 ItemKind::Arrow { .. } => {
                     if let Some(pts) = arrow {
