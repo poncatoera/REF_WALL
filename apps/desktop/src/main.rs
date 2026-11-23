@@ -20,6 +20,11 @@
 //! Usage: `wall [path/to/Library.wall]`. Without a path it opens (or creates)
 //! `Wall/Library.wall` in the home folder. Boards save automatically.
 
+// Release builds on Windows have no console window; see console.rs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod console;
+mod lock;
 mod video;
 
 use std::num::NonZeroU32;
@@ -343,6 +348,7 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
     }
     println!("wall: library {}", path.display());
     let mut app = App::open_library(path, &device_name(), now_ms())?;
+    lock::take(path)?;
     app.desktop = true;
     settings::remember_library(path);
     Ok(app)
@@ -990,9 +996,18 @@ fn want_angle() -> bool {
     }
 }
 
+/// The app icon for the title bar and taskbar (wall.exe carries the same
+/// picture as wall.ico, see build.rs). Made by tools/make-icon.py.
+fn window_icon() -> Option<winit::window::Icon> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
         .with_title(title)
+        .with_window_icon(window_icon())
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
@@ -1073,6 +1088,7 @@ fn save_screenshot(renderer: &Renderer, w: u32, h: u32, path: &str) -> Result<()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    console::attach();
     let event_loop = EventLoop::new()?;
     let mut title = "Wall".to_owned();
     let mut app = match std::env::var("WALL_DEMO").ok() {
@@ -1086,7 +1102,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .or_else(settings::last_library)
                 .unwrap_or_else(default_library);
             title = window_title(&path);
-            open_library(&path)?
+            // Installed Wall has no console: say why it can't start.
+            match open_library(&path) {
+                Ok(app) => app,
+                Err(e) => {
+                    show_error(&format!("Could not open {}: {e}", path.display()));
+                    return Ok(());
+                }
+            }
         }
     };
     app.desktop = true;
