@@ -347,8 +347,10 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
         std::fs::create_dir_all(parent)?;
     }
     println!("wall: library {}", path.display());
+    // Locked before reading, so another Wall can't save it in between.
+    let lock = lock::take(path)?;
     let mut app = App::open_library(path, &device_name(), now_ms())?;
-    lock::take(path)?;
+    lock::keep(lock);
     app.desktop = true;
     settings::remember_library(path);
     Ok(app)
@@ -1009,6 +1011,9 @@ fn create_gfx(event_loop: &ActiveEventLoop, title: &str) -> Result<Gfx, Box<dyn 
         .with_title(title)
         .with_window_icon(window_icon())
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
+    // Windows takes the big taskbar and Alt-Tab icon separately.
+    #[cfg(windows)]
+    let attrs = winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(attrs, window_icon());
     let angle = want_angle();
     let api = if angle { glutin::config::Api::GLES3 } else { glutin::config::Api::OPENGL };
     let template = ConfigTemplateBuilder::new().with_alpha_size(8).with_stencil_size(8).with_transparency(false).with_api(api);

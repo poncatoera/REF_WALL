@@ -32,28 +32,39 @@ impl std::fmt::Display for LockError {
 
 impl std::error::Error for LockError {}
 
-/// Locks `library` for this Wall and lets go of the library it had before.
-/// Locking the library it already holds is fine.
-pub fn take(library: &Path) -> Result<(), LockError> {
-    lock_into(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()), library)
+/// A lock on a library that this Wall hasn't switched to yet.
+pub struct Pending(Option<(PathBuf, File)>);
+
+/// Locks `library` before Wall reads it, so no other Wall can save it in
+/// between. The library Wall had open stays locked until `keep`. Locking
+/// the library this Wall already holds is fine.
+pub fn take(library: &Path) -> Result<Pending, LockError> {
+    let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    lock(held.as_ref(), library).map(Pending)
 }
 
-fn lock_into(held: &mut Option<(PathBuf, File)>, library: &Path) -> Result<(), LockError> {
+/// Switches this Wall to the library of `pending` and lets go of the old one.
+pub fn keep(pending: Pending) {
+    if let Some(new) = pending.0 {
+        // Dropping the old handle releases the old library.
+        *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(new);
+    }
+}
+
+/// `None` when `held` is already this library.
+fn lock(held: Option<&(PathBuf, File)>, library: &Path) -> Result<Option<(PathBuf, File)>, LockError> {
     let key = std::fs::canonicalize(library).unwrap_or_else(|_| library.to_path_buf());
-    if held.as_ref().is_some_and(|(p, _)| *p == key) {
-        return Ok(());
+    if held.is_some_and(|(p, _)| *p == key) {
+        return Ok(None);
     }
     let dir = library.join("cache");
     std::fs::create_dir_all(&dir).map_err(LockError::Io)?;
     let file = File::options().create(true).truncate(false).write(true).open(dir.join("open.lock")).map_err(LockError::Io)?;
     match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Err(LockError::Busy),
-        Err(std::fs::TryLockError::Error(e)) => return Err(LockError::Io(e)),
+        Ok(()) => Ok(Some((key, file))),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Busy),
+        Err(std::fs::TryLockError::Error(e)) => Err(LockError::Io(e)),
     }
-    // Dropping the old handle releases the old library.
-    *held = Some((key, file));
-    Ok(())
 }
 
 #[cfg(test)]
@@ -67,15 +78,21 @@ mod tests {
         let b = dir.path().join("B.wall");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        // A slot of its own, so tests running at the same time don't mix.
-        let mut held = None;
-        lock_into(&mut held, &a).unwrap();
-        lock_into(&mut held, &a).unwrap(); // the same Wall again: fine
+        // Its own slot, so tests running at the same time don't mix.
+        let mut held = lock(None, &a).unwrap();
+        assert!(lock(held.as_ref(), &a).unwrap().is_none()); // the same Wall again: fine
         // Another process: a separate handle on the same lock file.
         let other = File::options().write(true).open(a.join("cache").join("open.lock")).unwrap();
         assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
         // Switching to B lets go of A.
-        lock_into(&mut held, &b).unwrap();
-        other.try_lock().unwrap();
+        held = lock(held.as_ref(), &b).unwrap();
+        assert!(held.is_some());
+        // Retried: on Linux a child process another test is starting can
+        // share the handle for a moment between fork and exec.
+        let freed = (0..50).any(|_| other.try_lock().is_ok() || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        });
+        assert!(freed);
     }
 }
