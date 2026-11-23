@@ -333,7 +333,7 @@ fn known_kind(ext: &str) -> bool {
 }
 
 /// A position and size that can be drawn.
-fn sane(i: &BoardItem) -> bool {
+pub fn sane(i: &BoardItem) -> bool {
     let f = &i.frame;
     [f.x, f.y, f.w, f.h, f.z].iter().all(|v| v.is_finite() && v.abs() <= MAX_COORD) && f.w >= 0.0 && f.h >= 0.0 && i.rev > 0 && i.rev < (1 << 52) && i.updated_by.len() <= 200
 }

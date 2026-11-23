@@ -273,7 +273,7 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).at(path)?;
     // Windows tools (PowerShell 5, Notepad) often save UTF-8 with a BOM;
     // serde_json refuses it, so skip it rather than fail on another app's file.

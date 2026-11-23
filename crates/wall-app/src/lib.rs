@@ -5,6 +5,7 @@
 
 pub mod brush;
 pub mod share;
+pub mod history;
 pub mod comments;
 pub mod presence;
 pub mod doc;
@@ -36,6 +37,7 @@ pub use batch::grid_layout;
 pub use snapshot::NewMedia;
 pub use menu::ShellCommand;
 pub use share::{CloudAnswer, CloudAsk, ShareLink};
+pub use history::{DeletedBoard, HistoryAnswer, HistoryAsk};
 pub use presence::Peer;
 pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
@@ -335,6 +337,8 @@ pub struct App {
     loader: picture_loader::Loader,
     /// Media imported with no library open, for the shell to store.
     new_media: Vec<snapshot::NewMedia>,
+    /// Versions kept, and the history card (see `history`).
+    history: history::History,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -425,6 +429,7 @@ impl App {
             board_thumbs: HashMap::new(),
             loader: Default::default(),
             new_media: Vec::new(),
+            history: Default::default(),
         }
     }
 
@@ -871,10 +876,11 @@ impl App {
     /// Writes the board to the library if it changed and no drag is in
     /// progress. Returns true when it saved.
     pub fn save_if_dirty(&mut self) -> Result<bool, AppError> {
-        let Some(lib) = &self.library else { return Ok(false) };
-        if self.saved_version == self.doc.version || !matches!(self.gesture, Gesture::Idle) || self.editing.is_some() {
+        if self.library.is_none() || self.saved_version == self.doc.version || !matches!(self.gesture, Gesture::Idle) || self.editing.is_some() {
             return Ok(false);
         }
+        self.keep_history(self.doc.board.id);
+        let Some(lib) = &self.library else { return Ok(false) };
         lib.write_board(&self.doc.board)?;
         self.saved_version = self.doc.version;
         Ok(true)
@@ -1059,6 +1065,9 @@ impl App {
         self.needs_redraw = true;
         if button == Button::Middle || (button == Button::Primary && self.space_held) {
             self.gesture = Gesture::Pan;
+            return;
+        }
+        if self.history_press(button, pos) {
             return;
         }
         if button != Button::Primary {
@@ -1452,7 +1461,7 @@ impl App {
             Wheel::Lines(l) => l,
             Wheel::Pixels(p) => p / 100.0,
         };
-        if self.sidebar_wheel(steps) || self.library_wheel(steps) {
+        if self.history_wheel(steps) || self.sidebar_wheel(steps) || self.library_wheel(steps) {
             return;
         }
         self.camera.zoom_at(1.15f32.powf(steps), self.cursor, self.viewport);
@@ -1464,7 +1473,7 @@ impl App {
         if self.menu_open.take().is_some() && key == Key::Escape {
             return;
         }
-        if self.name_key(key) || self.share_key(key) || self.comment_key(key) || self.sidebar_key(key) {
+        if self.history_key(key) || self.name_key(key) || self.share_key(key) || self.comment_key(key) || self.sidebar_key(key) {
             return;
         }
         if let (toolbar::Tool::Pen, Key::Char(c)) = (self.tool, key) {
@@ -2093,7 +2102,7 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
-        if self.name_text(s) || self.share_text(s) || self.comment_text(s) || self.sidebar_text(s) {
+        if self.history_previewing() || self.name_text(s) || self.share_text(s) || self.comment_text(s) || self.sidebar_text(s) {
             return true;
         }
         if let Some(e) = &mut self.panel_edit {
@@ -2329,6 +2338,8 @@ impl App {
     }
 
     pub fn render(&mut self, renderer: &mut Renderer, size_px: [u32; 2]) {
+        // A version from the history card is drawn in place of the board.
+        let swapped = self.history_swap();
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
         self.pump_pictures(renderer);
         let caret = self.caret_rect();
@@ -2454,6 +2465,10 @@ impl App {
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);
         self.draw_share(renderer);
+        if swapped {
+            self.history_swap();
+        }
+        self.draw_history(renderer);
         // The menu bar and its drop-downs go over everything, but for the
         // badges of who's here, which sit in the bar.
         self.draw_menu(renderer);
@@ -3192,6 +3207,8 @@ impl App {
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
             C::Share => self.open_share(),
+            C::History => self.open_history(history::Tab::Versions),
+            C::DeletedBoards => self.open_history(history::Tab::Deleted),
             C::ImportOldWall => self.shell_commands.push(S::ImportOldWall),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),

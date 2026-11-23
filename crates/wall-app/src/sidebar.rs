@@ -693,7 +693,7 @@ impl App {
 
     /// Runs `f` on any board's document (open, kept in memory, or read from
     /// the library) and saves it. False if the board can't be found or saved.
-    fn edit_board(&mut self, id: Uuid, f: impl FnOnce(&mut crate::doc::Document)) -> bool {
+    pub(crate) fn edit_board(&mut self, id: Uuid, f: impl FnOnce(&mut crate::doc::Document)) -> bool {
         if id == self.doc.board.id {
             f(&mut self.doc);
             self.scene.invalidate();

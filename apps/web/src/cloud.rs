@@ -59,6 +59,81 @@ pub fn set_name(name: &str) {
     }
 }
 
+/// History questions from the app (versions of a board, deleted boards),
+/// answered by the server.
+pub fn history(s: Rc<RefCell<State>>, ask: wall_app::HistoryAsk) {
+    let Some(key) = link() else { return };
+    wasm_bindgen_futures::spawn_local(async move {
+        let answer = history_call(&key, ask).await;
+        s.borrow_mut().app.history_answer(answer);
+    });
+}
+
+#[derive(Deserialize)]
+struct Times {
+    times: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct DeletedRow {
+    id: Uuid,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    parent: Option<Uuid>,
+    #[serde(default)]
+    deleted_ms: u64,
+    #[serde(default)]
+    items: usize,
+    #[serde(default)]
+    inside: usize,
+}
+
+async fn history_call(key: &str, ask: wall_app::HistoryAsk) -> wall_app::HistoryAnswer {
+    use wall_app::{HistoryAnswer as A, HistoryAsk as Q};
+    let failed = |f: Fail| {
+        A::Failed(match f {
+            Fail::Offline => "Can't reach the cloud right now. Try again in a moment.".into(),
+            Fail::Refused(s) | Fail::Other(s) => s,
+            Fail::Full => "The library is full.".into(),
+            Fail::Missing => "That isn't there any more.".into(),
+        })
+    };
+    match ask {
+        Q::Versions { board } => match json::<Times>(key, "GET", &format!("history?board={board}"), None).await {
+            Ok(t) => A::Versions { board, times: t.times },
+            Err(f) => failed(f),
+        },
+        Q::Version { board, at_ms } => match call(key, "GET", &format!("history?board={board}&at={at_ms}"), &JsValue::NULL).await {
+            Ok(gz) => match wall_format::history::board_from_gz(&gz, std::path::Path::new("version")) {
+                Ok(mut version) if version.id == board => {
+                    // Written by other people: only what can be drawn.
+                    version.items.retain(|_, i| wall_sync::sane(i));
+                    A::Version { board, at_ms, version }
+                }
+                Ok(_) => A::Failed("The cloud sent the wrong board.".into()),
+                Err(e) => A::Failed(e.to_string()),
+            },
+            Err(f) => failed(f),
+        },
+        Q::Deleted => match json::<Vec<DeletedRow>>(key, "GET", "deleted", None).await {
+            Ok(rows) => A::Deleted(
+                rows.into_iter()
+                    .map(|r| wall_app::DeletedBoard { id: r.id, name: r.name.chars().filter(|c| !c.is_control()).take(200).collect(), parent: r.parent, deleted_ms: r.deleted_ms, items: r.items, inside: r.inside })
+                    .collect(),
+            ),
+            Err(f) => failed(f),
+        },
+        Q::Restore { board } => {
+            let body = serde_json::json!({ "board": board }).to_string();
+            match call(key, "POST", "undelete", &JsValue::from_str(&body)).await {
+                Ok(_) => A::Restored(board),
+                Err(f) => failed(f),
+            }
+        }
+    }
+}
+
 /// What this page last told the live connection.
 struct Live {
     board: Option<Uuid>,

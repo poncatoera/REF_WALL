@@ -2832,6 +2832,7 @@ name = "wall-format"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "serde",
  "serde_json",
  "tempfile",
