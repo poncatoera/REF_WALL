@@ -11,6 +11,12 @@
 // Merging is the file format's rule (BoardItem::supersedes): the higher
 // `rev` wins, then the larger `updated_by`. Every accepted row gets the next
 // `seq`; clients ask for rows after the last seq they have.
+//
+// Live (/api/live, a WebSocket): who else is on a board and where their
+// pointer is, and a "poke" after every accepted push so the others pull at
+// once instead of at their next poll. The key comes in the first message,
+// since a browser can't set headers on a WebSocket. Sockets hibernate, so
+// a quiet one costs nothing; the free plan counts 20 messages as a request.
 import { DurableObject } from "cloudflare:workers";
 
 const SHARDS = 8;
@@ -23,6 +29,10 @@ const PAGE = 500; // rows in one pull
 const PAGE_CHARS = 3_000_000;
 const PENDING_MS = 60 * 60 * 1000; // an upload that never finished is forgotten
 const MAX_LIBRARY_DB = 700_000_000;
+const MAX_SOCKETS = 64; // people connected at once
+const MAX_MESSAGE = 1000; // characters in one live message
+const CURSOR_MS = 40; // pointer updates closer together than this are dropped
+const MAX_NAME = 40;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -80,8 +90,12 @@ export default {
       // Keys never over plain http (except on this computer, for tests).
       if (url.protocol !== "https:" && !["127.0.0.1", "localhost"].includes(url.hostname)) throw new Refuse(403, "use https");
       if (!url.pathname.startsWith("/api/")) return new Response("Not found", { status: 404 });
-      const who = await bearer(request);
       const path = url.pathname.slice(5);
+      if (path === "live") {
+        if (request.method !== "GET" || (request.headers.get("upgrade") || "").toLowerCase() !== "websocket") throw new Refuse(426, "a WebSocket only");
+        return await library(env).fetch(request);
+      }
+      const who = await bearer(request);
       const media = /^media\/([0-9a-f]{64})$/.exec(path);
       if (media) return await mediaRequest(request, env, who, media[1], url);
       const lib = library(env);
@@ -150,6 +164,12 @@ async function mediaRequest(request, env, who, hash, url) {
 
 const no = (status, error) => ({ status, error });
 
+// A name others will see: one line, no control characters, not too long.
+function cleanName(v) {
+  const s = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "").trim() : "";
+  return [...s].slice(0, MAX_NAME).join("") || "Guest";
+}
+
 export class LibraryDO extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -168,6 +188,135 @@ export class LibraryDO extends DurableObject {
     });
     // Hashes a board-only link may read, kept while nothing changes.
     this.readable = new Map();
+    // Keep-alives are answered without waking the object (and aren't billed).
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  // ---- live: presence and pokes -----------------------------------------
+
+  async fetch(request) {
+    if (this.ctx.getWebSockets().length >= MAX_SOCKETS) return new Response("too many people at once", { status: 503 });
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    // id: what others see; who/board/name once it said hello.
+    server.serializeAttachment({ id: crypto.randomUUID().slice(0, 13), who: null });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // The sockets that said hello, with what they said.
+  live() {
+    const out = [];
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = ws.deserializeAttachment();
+      if (a && a.who) out.push([ws, a]);
+    }
+    return out;
+  }
+
+  send(ws, msg) {
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch {
+      // Closing already.
+    }
+  }
+
+  // To everyone else on `board`.
+  tell(board, msg, except) {
+    if (!board) return;
+    for (const [ws, a] of this.live()) {
+      if (ws !== except && a.board === board) this.send(ws, msg);
+    }
+  }
+
+  peer(a) {
+    return { id: a.id, name: a.name, x: a.x ?? null, y: a.y ?? null };
+  }
+
+  // May `access` look at `board`?
+  reaches(access, board) {
+    if (!UUID.test(board)) return false;
+    const scope = this.scope(access);
+    return scope ? scope.has(board) : true;
+  }
+
+  async webSocketMessage(ws, text) {
+    if (typeof text !== "string" || text.length > MAX_MESSAGE) return ws.close(1009, "too big");
+    let m;
+    try {
+      m = JSON.parse(text);
+    } catch {
+      return ws.close(1003, "not JSON");
+    }
+    if (!m || typeof m !== "object") return;
+    const a = ws.deserializeAttachment();
+    if (!a.who) {
+      if (m.t !== "hello" || typeof m.key !== "string" || !/^[A-Za-z0-9_-]{20,200}$/.test(m.key)) return ws.close(4001, "say hello with a key");
+      const who = await sha256(m.key);
+      const access = this.access(who);
+      if (!access) return ws.close(4003, "this link doesn't work (any more)");
+      a.who = who;
+      a.name = cleanName(m.name);
+      a.board = null;
+      a.at = 0;
+      ws.serializeAttachment(a);
+      this.send(ws, { t: "welcome", id: a.id, seq: this.seq() });
+      if (typeof m.board === "string") return this.join(ws, a, access, m.board);
+      return;
+    }
+    const access = this.access(a.who);
+    if (!access) return ws.close(4003, "this link doesn't work (any more)");
+    if (m.t === "board" && typeof m.board === "string") return this.join(ws, a, access, m.board);
+    if (m.t === "name") {
+      a.name = cleanName(m.name);
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+    }
+    if (m.t === "cursor") {
+      const now = Date.now();
+      if (now - a.at < CURSOR_MS) return;
+      const ok = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e9;
+      const off = m.x === null || m.y === null;
+      if (!off && !(ok(m.x) && ok(m.y))) return;
+      a.x = off ? null : m.x;
+      a.y = off ? null : m.y;
+      a.at = now;
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "cursor", id: a.id, x: a.x, y: a.y }, ws);
+    }
+  }
+
+  // Moves a socket to `board` (or nowhere, if it may not look at it).
+  join(ws, a, access, board) {
+    if (a.board === board) return;
+    if (a.board) this.tell(a.board, { t: "leave", id: a.id }, ws);
+    a.board = this.reaches(access, board) ? board : null;
+    a.x = a.y = null;
+    ws.serializeAttachment(a);
+    if (!a.board) return this.send(ws, { t: "peers", board, peers: [] });
+    const peers = this.live().filter(([w, o]) => w !== ws && o.board === a.board).map(([, o]) => this.peer(o));
+    this.send(ws, { t: "peers", board: a.board, peers });
+    this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+  }
+
+  async webSocketClose(ws) {
+    const a = ws.deserializeAttachment();
+    if (a && a.board) this.tell(a.board, { t: "leave", id: a.id }, ws);
+    try {
+      ws.close(1000, "bye");
+    } catch {
+      // Already closed.
+    }
+  }
+
+  async webSocketError(ws) {
+    return this.webSocketClose(ws);
+  }
+
+  // After rows were accepted: everyone pulls now.
+  poke() {
+    const msg = { t: "poke", seq: this.seq() };
+    for (const [ws] of this.live()) this.send(ws, msg);
   }
 
   rows(q, ...args) {
@@ -254,7 +403,9 @@ export class LibraryDO extends DurableObject {
     let refused = [];
     if (pushing) {
       try {
+        const before = this.seq();
         refused = this.ctx.storage.transactionSync(() => this.accept(a, boards, items, sidecars));
+        if (this.seq() !== before) this.poke();
       } catch (e) {
         if (e instanceof Refuse) return no(e.status, e.message);
         throw e;
@@ -469,7 +620,16 @@ export class LibraryDO extends DurableObject {
 
   async revokeLink(who, id) {
     if (this.access(who)?.role !== "owner") return no(403, "owner only");
+    const secret = this.rows("SELECT secret FROM links WHERE id = ?", id)[0]?.secret;
     this.sql.exec("UPDATE links SET revoked = 1 WHERE id = ?", id);
+    // Whoever is connected with it is gone too.
+    for (const [ws, a] of this.live()) {
+      if (secret && a.who === secret) {
+        if (a.board) this.tell(a.board, { t: "leave", id: a.id }, ws);
+        ws.serializeAttachment({ id: a.id, who: null });
+        ws.close(4003, "this link doesn't work any more");
+      }
+    }
     return { revoked: true };
   }
 }

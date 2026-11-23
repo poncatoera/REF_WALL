@@ -272,6 +272,119 @@ test("deleting the last picture that uses a file closes the file to the link", a
   assert.equal((await call(view.secret, `media/${hPub}`)).status, 200);
 });
 
+// A live connection: collects what the server says; `next` waits for a
+// message that matches.
+function live(key, board, name) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/live`);
+  const got = [];
+  const waiters = [];
+  let closed = null;
+  const check = () => {
+    for (const w of [...waiters]) {
+      const i = got.findIndex(w.pred);
+      if (i >= 0) {
+        waiters.splice(waiters.indexOf(w), 1);
+        w.resolve(got.splice(i, 1)[0]);
+      }
+    }
+  };
+  ws.addEventListener("message", (e) => {
+    got.push(JSON.parse(e.data));
+    check();
+  });
+  ws.addEventListener("close", (e) => {
+    closed = e.code;
+    got.push({ t: "closed", code: e.code });
+    check();
+  });
+  ws.addEventListener("open", () => key !== undefined && ws.send(JSON.stringify({ t: "hello", key, board, name })));
+  return {
+    ws,
+    send: (m) => ws.send(typeof m === "string" ? m : JSON.stringify(m)),
+    next: (pred, ms = 5000) =>
+      new Promise((resolve, reject) => {
+        const w = { pred, resolve };
+        waiters.push(w);
+        check();
+        setTimeout(() => reject(new Error("waited for a message: " + pred + "\n got: " + JSON.stringify(got))), ms);
+      }),
+    nothing: async (pred, ms = 400) => {
+      await new Promise((r) => setTimeout(r, ms));
+      assert.equal(got.filter(pred).length, 0, "unexpected: " + JSON.stringify(got.filter(pred)));
+    },
+    get closed() {
+      return closed;
+    },
+    close: () => ws.close(),
+  };
+}
+
+test("live: people on a board see each other and their pointers, and nobody else does", async () => {
+  const paul = live(owner, A, "Paul");
+  const w = await paul.next((m) => m.t === "welcome");
+  assert.ok(w.id && Number.isInteger(w.seq));
+  assert.deepEqual((await paul.next((m) => m.t === "peers")).peers, []);
+  const mia = live(edit.secret, A, "  Mia‮\u0007  ");
+  const seen = await mia.next((m) => m.t === "peers");
+  assert.deepEqual(seen.peers.map((p) => p.name), ["Paul"]);
+  const joined = await paul.next((m) => m.t === "peer");
+  assert.equal(joined.peer.name, "Mia", "names are one clean line");
+  // An edit link for A can't watch the private board, and isn't shown there.
+  const sneak = live(edit.secret, PRIVATE, "Sneak");
+  assert.deepEqual((await sneak.next((m) => m.t === "peers")).peers, []);
+  const owner2 = live(owner, PRIVATE, "Owner on private");
+  assert.deepEqual((await owner2.next((m) => m.t === "peers")).peers, [], "the sneak isn't on the private board");
+
+  mia.send({ t: "cursor", x: 12.5, y: -3 });
+  const c = await paul.next((m) => m.t === "cursor");
+  assert.deepEqual([c.id, c.x, c.y], [joined.peer.id, 12.5, -3]);
+  await owner2.nothing((m) => m.t === "cursor");
+  mia.send({ t: "cursor", x: "1", y: 2 });
+  mia.send({ t: "cursor", x: null, y: null });
+  const off = await paul.next((m) => m.t === "cursor");
+  assert.deepEqual([off.x, off.y], [null, null], "bad numbers are dropped; null means off the board");
+
+  // A push pokes everyone, so they pull now.
+  await sync(owner, { since: 0, items: [{ board: A, item: note(randomUUID(), 1, "poke") }] });
+  const poke = await mia.next((m) => m.t === "poke");
+  assert.equal(poke.seq, (await call(owner, "me")).data.seq);
+  await paul.next((m) => m.t === "poke");
+
+  // Moving to another board: the old one hears they left.
+  mia.send({ t: "board", board: B });
+  assert.equal((await paul.next((m) => m.t === "leave")).id, joined.peer.id);
+  mia.close();
+  for (const x of [paul, sneak, owner2]) x.close();
+});
+
+test("live: no key, a wrong key or junk is shut out", async () => {
+  const none = live(undefined);
+  await new Promise((r) => none.ws.addEventListener("open", r));
+  none.send({ t: "cursor", x: 1, y: 1 });
+  assert.equal((await none.next((m) => m.t === "closed")).code, 4001);
+  const wrong = live(randomBytes(32).toString("base64url"), A, "x");
+  assert.equal((await wrong.next((m) => m.t === "closed")).code, 4003);
+  const junk = live(owner, A, "x");
+  await junk.next((m) => m.t === "peers");
+  junk.send("x".repeat(5000));
+  assert.equal((await junk.next((m) => m.t === "closed")).code, 1009);
+  const r = await fetch(`http://127.0.0.1:${port}/api/live`);
+  assert.equal(r.status, 426, "plain requests are turned away");
+});
+
+test("live: revoking a link disconnects whoever uses it", async () => {
+  const temp = (await call(owner, "links", { method: "POST", json: { role: "edit", board: A } })).data;
+  const paul = live(owner, A, "Paul");
+  await paul.next((m) => m.t === "peers");
+  const guest = live(temp.secret, A, "Guest");
+  const p = await paul.next((m) => m.t === "peer");
+  await guest.next((m) => m.t === "peers");
+  await call(owner, `links/${temp.id}`, { method: "DELETE" });
+  assert.equal((await guest.next((m) => m.t === "closed")).code, 4003);
+  assert.equal((await paul.next((m) => m.t === "leave")).id, p.peer.id);
+  paul.close();
+});
+
 test("a revoked link stops at once; a deleted board's link shows nothing", async () => {
   await call(owner, `links/${view.id}`, { method: "DELETE" });
   assert.equal((await sync(view.secret, { since: 0 })).status, 403);

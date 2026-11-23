@@ -23,6 +23,75 @@ extern "C" {
     fn note(text: &str);
 }
 
+#[wasm_bindgen(module = "/js/live.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = liveStart)]
+    fn live_start(key: &str);
+    #[wasm_bindgen(js_name = liveBoard)]
+    fn live_board(board: &str);
+    #[wasm_bindgen(js_name = liveCursor)]
+    fn live_cursor(x: JsValue, y: JsValue);
+    #[wasm_bindgen(js_name = liveTake)]
+    fn live_take() -> JsValue;
+    #[wasm_bindgen(js_name = liveWait)]
+    fn live_wait(ms: i32, have: f64) -> js_sys::Promise;
+}
+
+/// What this page last told the live connection.
+struct Live {
+    board: Option<Uuid>,
+    cursor: Option<[f32; 2]>,
+}
+
+thread_local! {
+    static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+}
+
+#[derive(Deserialize)]
+struct LivePeer {
+    id: String,
+    name: String,
+    x: Option<f32>,
+    y: Option<f32>,
+}
+
+/// Each frame, on a page opened by a link: tells the others which board
+/// and where the pointer is, and shows who else is here.
+pub fn tick(app: &mut App) {
+    LIVE.with(|l| {
+        let mut l = l.borrow_mut();
+        let Some(l) = l.as_mut() else { return };
+        let board = app.board_id();
+        if l.board != Some(board) {
+            l.board = Some(board);
+            l.cursor = None;
+            live_board(&board.to_string());
+        }
+        let at = app.pointer_on_board();
+        // Small moves (less than a pixel on screen) aren't worth a message.
+        let moved = match (at, l.cursor) {
+            (Some(a), Some(b)) => (a[0] - b[0]).abs().max((a[1] - b[1]).abs()) * app.camera.zoom >= 1.0,
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if moved {
+            l.cursor = at;
+            match at {
+                Some([x, y]) => live_cursor(x.into(), y.into()),
+                None => live_cursor(JsValue::NULL, JsValue::NULL),
+            }
+        }
+        if let Some(text) = live_take().as_string() {
+            let peers: Vec<LivePeer> = serde_json::from_str(&text).unwrap_or_default();
+            app.set_peers(
+                peers
+                    .into_iter()
+                    .map(|p| wall_app::presence::Peer { at: p.x.zip(p.y).map(|(x, y)| [x, y]), id: p.id, name: p.name })
+                    .collect(),
+            );
+        }
+    });
+}
+
 /// The secret in this page's address, if it was opened by a link.
 pub fn link() -> Option<String> {
     let hash = web_sys::window()?.location().hash().ok()?;
@@ -95,6 +164,8 @@ struct Page {
 
 pub async fn run(s: Rc<RefCell<State>>, key: String) {
     note("Opening…");
+    live_start(&key);
+    LIVE.with(|l| *l.borrow_mut() = Some(Live { board: None, cursor: None }));
     let mut view = true;
     let mut known = false;
     let mut sync = Sync::default();
@@ -153,7 +224,10 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
             (false, true) => 5_000,
             (false, false) => 30_000,
         };
-        sleep(wait).await;
+        // Someone else's change cuts the wait short.
+        if wasm_bindgen_futures::JsFuture::from(live_wait(wait, sync.seq as f64)).await.ok().and_then(|v| v.as_bool()) == Some(true) {
+            quiet = 0;
+        }
     }
 }
 

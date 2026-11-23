@@ -5,6 +5,7 @@
 
 pub mod brush;
 pub mod share;
+pub mod presence;
 pub mod doc;
 mod drawing;
 pub mod menu;
@@ -34,6 +35,7 @@ pub use batch::grid_layout;
 pub use snapshot::NewMedia;
 pub use menu::ShellCommand;
 pub use share::{CloudAnswer, CloudAsk, ShareLink};
+pub use presence::Peer;
 pub use video::{VideoCommand, VideoStatus};
 pub use wall_format::ContentHash;
 use scene::Scene;
@@ -292,6 +294,10 @@ pub struct App {
     shell_commands: Vec<menu::ShellCommand>,
     /// The share card, while open.
     share: Option<share::ShareCard>,
+    /// Other people on this board (see `presence`).
+    peers: Vec<presence::Peer>,
+    /// The pointer left the window since it last moved.
+    cursor_out: bool,
     /// Set by the desktop shell: shows the menu entries only it can carry out.
     pub desktop: bool,
     /// The library drawer, while open (L).
@@ -385,6 +391,8 @@ impl App {
             menu_open: None,
             shell_commands: Vec::new(),
             share: None,
+            peers: Vec::new(),
+            cursor_out: false,
             desktop: false,
             library_view: None,
             show_grid: true,
@@ -1242,6 +1250,7 @@ impl App {
     pub fn pointer_move(&mut self, pos: [f32; 2]) {
         let last = self.cursor;
         self.cursor = pos;
+        self.cursor_out = false;
         if self.menu_open.is_some() {
             self.needs_redraw = true;
         }
@@ -2412,8 +2421,10 @@ impl App {
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);
         self.draw_share(renderer);
-        // The menu bar and its drop-downs go over everything.
+        // The menu bar and its drop-downs go over everything, but for the
+        // badges of who's here, which sit in the bar.
         self.draw_menu(renderer);
+        self.draw_presence(renderer);
     }
 }
 

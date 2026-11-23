@@ -491,6 +491,12 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     }
     {
         let s = state.clone();
+        let cb = Closure::<dyn FnMut(PointerEvent)>::new(move |_: PointerEvent| s.borrow_mut().app.pointer_left());
+        canvas.add_event_listener_with_callback("pointerleave", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    {
+        let s = state.clone();
         let cb = Closure::<dyn FnMut(WheelEvent)>::new(move |e: WheelEvent| {
             e.prevent_default();
             // Browser wheel: positive deltaY scrolls down = zoom out.
@@ -725,6 +731,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                 }
                 app.needs_redraw = true;
             }
+            cloud::tick(&mut s.app);
             if s.app.needs_redraw {
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);

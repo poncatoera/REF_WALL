@@ -152,7 +152,7 @@ export function shrinkProgress(text) {
     e = document.createElement("div");
     e.id = "wall-progress";
     e.style.cssText =
-      "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);padding:8px 16px;border-radius:8px;font:13px system-ui,sans-serif;background:#1c1d22f2;color:#e8e9ee;border:1px solid #3a3c44;pointer-events:none;max-width:90vw";
+      "position:fixed;left:50%;bottom:56px;transform:translateX(-50%);padding:8px 16px;border-radius:8px;font:13px system-ui,sans-serif;background:#1c1d22f2;color:#e8e9ee;border:1px solid #3a3c44;pointer-events:none;max-width:90vw";
     e.setAttribute("role", "status");
     document.body.append(e);
   }
