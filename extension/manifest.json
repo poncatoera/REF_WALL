@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wall",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Right-click any picture, video or page to add it to a Wall board: the Wall app, or Wall on the web.",
   "minimum_chrome_version": "116",
   "permissions": [
