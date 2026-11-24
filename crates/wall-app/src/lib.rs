@@ -2547,7 +2547,6 @@ impl App {
             self.draw_library(renderer);
         }
         self.draw_comments(renderer);
-        self.draw_unread_pill(renderer);
         self.draw_zoom_pill(renderer);
         self.draw_rail(renderer);
         self.draw_pen_ui(renderer);

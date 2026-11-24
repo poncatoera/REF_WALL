@@ -521,6 +521,8 @@ impl App {
         let bar = self.stamp_bar_layout();
         let has_pins = self.doc.board.live_items().any(|i| matches!(i.kind, ItemKind::Comment { .. }));
         if !has_pins && self.comment_card.is_none() && bar.is_none() {
+            // New comments on other boards still get their pill.
+            self.draw_unread_pill(renderer);
             return;
         }
         if self.comment_card.is_some() {
@@ -545,6 +547,7 @@ impl App {
             self.font.atlas.dirty = false;
         }
         renderer.draw_glyphs(&view, &glyphs);
+        self.draw_unread_pill(renderer);
     }
 }
 
