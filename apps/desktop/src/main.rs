@@ -1233,6 +1233,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ui) = settings::get_str("ui") {
         app.set_ui_setting(&ui);
     }
+    // First run: the welcome walkthrough (not in screenshot runs).
+    // WALL_WELCOME=slide:N or tip:N shows one step (screenshots).
+    match std::env::var("WALL_WELCOME").ok().as_deref().and_then(|v| v.split_once(':')) {
+        Some(("guest", n)) => app.start_welcome(wall_app::welcome::Kind::Guest { view: n == "view" }),
+        Some((kind, n)) => app.welcome_show(n.parse().unwrap_or(0), kind == "tip"),
+        None if std::env::var_os("WALL_SCREENSHOT").is_none() => app.welcome_if_new(),
+        None => {}
+    }
     // WALL_BOARD=<board id> opens that board of the library at start (tests).
     if let Some(id) = std::env::var("WALL_BOARD").ok().and_then(|s| s.trim().parse::<uuid::Uuid>().ok()) {
         app.open_board(id, true);

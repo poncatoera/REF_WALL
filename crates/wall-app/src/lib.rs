@@ -21,6 +21,7 @@ mod snap;
 pub mod theme;
 pub mod sidebar;
 pub mod toolbar;
+pub mod welcome;
 mod zoom_pill;
 mod grid;
 pub mod video;
@@ -346,6 +347,10 @@ pub struct App {
     history: history::History,
     /// Following, spotlight and presenting (see `together`).
     together: together::Together,
+    /// The first-time walkthrough, while it shows (see `welcome`).
+    welcome: Option<welcome::Welcome>,
+    /// Which walkthroughs were seen (`welcome::SEEN_*` bits, in the settings).
+    welcome_seen: u8,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -438,6 +443,8 @@ impl App {
             new_media: Vec::new(),
             history: Default::default(),
             together: Default::default(),
+            welcome: None,
+            welcome_seen: 0,
         }
     }
 
@@ -1075,6 +1082,12 @@ impl App {
         self.cursor = pos;
         let board = self.camera.screen_to_board(pos, self.viewport);
         self.needs_redraw = true;
+        if self.welcome_modal() && button != Button::Primary {
+            return;
+        }
+        if button == Button::Primary && self.welcome_press(pos) {
+            return;
+        }
         if button == Button::Middle || (button == Button::Primary && self.space_held) {
             self.gesture = Gesture::Pan;
             return;
@@ -1493,6 +1506,9 @@ impl App {
     }
 
     pub fn wheel(&mut self, w: Wheel) {
+        if self.welcome_modal() {
+            return;
+        }
         if self.panel_layout().is_some_and(|l| panel::inside(l.rect, self.cursor)) {
             return;
         }
@@ -1510,6 +1526,9 @@ impl App {
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
         if self.menu_open.take().is_some() && key == Key::Escape {
+            return;
+        }
+        if self.welcome_key(key) {
             return;
         }
         if self.together_key(key) {
@@ -2155,6 +2174,9 @@ impl App {
 
     /// Types text at the caret. Returns false when nothing is being edited.
     pub fn text_input(&mut self, s: &str) -> bool {
+        if self.welcome_modal() {
+            return true;
+        }
         if self.history_previewing() || self.name_text(s) || self.share_text(s) || self.comment_text(s) || self.sidebar_text(s) {
             return true;
         }
@@ -2554,6 +2576,8 @@ impl App {
         if gliding {
             self.needs_redraw = true;
         }
+        // The walkthrough goes over everything.
+        self.draw_welcome(renderer);
     }
 }
 
@@ -3042,11 +3066,19 @@ impl App {
             Some(sidebar::Tab::Library) => "library",
             None => "",
         };
-        format!("{};{side}|{}", self.rail_place.to_setting(), self.pen.to_setting())
+        format!("{};{side}|{}|w{}", self.rail_place.to_setting(), self.pen.to_setting(), self.welcome_seen)
     }
 
     /// Restores [`Self::ui_setting`].
     pub fn set_ui_setting(&mut self, s: &str) {
+        // "|wN" at the end: which walkthroughs were seen (none if missing).
+        let s = match s.rsplit_once("|w").map(|(rest, bits)| (rest, bits.parse::<u8>())) {
+            Some((rest, Ok(bits))) => {
+                self.welcome_seen = bits;
+                rest
+            }
+            _ => s,
+        };
         let (s, pen) = s.split_once('|').unwrap_or((s, ""));
         if let Some(p) = brush::PenState::from_setting(pen) {
             self.pen = p;
@@ -3289,6 +3321,7 @@ impl App {
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
             C::Share => self.open_share(),
+            C::WelcomeTour => self.start_welcome(welcome::Kind::Full),
             C::History => self.open_history(history::Tab::Versions),
             C::DeletedBoards => self.open_history(history::Tab::Deleted),
             C::ImportOldWall => self.shell_commands.push(S::ImportOldWall),
