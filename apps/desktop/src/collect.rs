@@ -696,44 +696,26 @@ mod tests {
 pub fn extension_dir() -> Option<PathBuf> {
     let installed = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("extension")));
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extension");
-    [installed, Some(repo)].into_iter().flatten().find(|d| d.join("manifest.json").is_file()).map(|d| d.canonicalize().unwrap_or(d))
+    [installed, Some(repo)].into_iter().flatten().find(|d| d.join("manifest.json").is_file()).map(|d| tidy_path(&d))
 }
 
-/// Opens the browser's extensions page, Edge first, then Chrome. False if
-/// neither would start.
-pub fn open_extensions_page() -> bool {
-    #[cfg(windows)]
-    {
-        // `start` finds browsers through App Paths, as Run does.
-        for (exe, page) in [("msedge", "edge://extensions/"), ("chrome", "chrome://extensions/")] {
-            let ok = wall_media::ffmpeg::command("cmd").args(["/C", "start", "", exe, page]).status().is_ok_and(|s| s.success());
-            if ok {
-                return true;
-            }
-        }
-        false
-    }
-    #[cfg(target_os = "macos")]
-    {
-        for (app, page) in [("Microsoft Edge", "edge://extensions/"), ("Google Chrome", "chrome://extensions/")] {
-            if std::process::Command::new("open").args(["-a", app, page]).status().is_ok_and(|s| s.success()) {
-                return true;
-            }
-        }
-        false
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        false
+/// Resolves `..` without Windows' `\\?\` prefix, which Explorer and the
+/// browsers' folder pickers don't take.
+fn tidy_path(p: &Path) -> PathBuf {
+    let c = p.canonicalize().unwrap_or_else(|_| p.to_owned());
+    let s = c.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => c,
     }
 }
 
-/// The steps shown with the folder and the extensions page.
-pub fn install_steps(dir: &Path, browser_opened: bool) -> String {
-    let open = if browser_opened { "Your browser's extensions page just opened" } else { "Open edge://extensions in Edge (or chrome://extensions in Chrome)" };
+/// The steps shown with the folder. Browsers won't open their extensions
+/// page for another app, so that's step one.
+pub fn install_steps(dir: &Path) -> String {
     format!(
         "Add Wall to your browser, once:\n\n\
-         1. {open}.\n\
+         1. In Edge, type edge://extensions in the address bar (Chrome: chrome://extensions).\n\
          2. Turn on Developer mode.\n\
          3. Click Load unpacked and choose this folder (its address is on the clipboard, and it's open in a window too):\n\n\
          {}\n\n\

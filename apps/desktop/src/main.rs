@@ -860,8 +860,7 @@ impl ApplicationHandler for Shell {
                             Some(dir) => {
                                 let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(dir.display().to_string()));
                                 open_url(&dir.display().to_string());
-                                let opened = collect::open_extensions_page();
-                                show_info(&collect::install_steps(&dir, opened));
+                                show_info(&collect::install_steps(&dir));
                             }
                             None => show_error("The browser extension's folder is missing from this copy of Wall. Reinstall Wall to get it."),
                         },
