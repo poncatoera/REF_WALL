@@ -29,15 +29,15 @@ Collect references while you browse. Right-click any picture, video or link and 
 - Screenshot the whole page (Alt+Shift+X) or drag out an area (Alt+Shift+A).
 - Everything remembers the page it came from.
 
-Needs the Wall app on the same computer (or Wall on the web open in a tab). Nothing goes anywhere but your own Wall.
+Needs the Wall app on the same computer (or Wall on the web open in a tab). What you add goes only to your own Wall.
 
 **Search terms**: moodboard, reference, inspiration, collect, screenshot, video clip, designers
 
 ## Permission notes for reviewers
 - `<all_urls>` host access: fetch the right-clicked picture with the page's sign-in, take screenshots, read the video's current time for clip marks, and hand files to an open Wall page (content script `webwall.js`, only on wall.poncatoera.workers.dev and localhost).
-- `cookies`: only for vimeo.com, instagram.com, x.com, twitter.com, tiktok.com, facebook.com, threads.net and patreon.com, only when the user adds a video from one of them; passed to the Wall app at 127.0.0.1 for the download and deleted after.
+- `cookies`: only for vimeo.com, instagram.com, x.com, twitter.com, tiktok.com, facebook.com, threads.net and patreon.com, only when the user adds a video or link from one of them; passed to the Wall app at 127.0.0.1, which uses them only to sign in to that same site for the download, then deletes them.
 - `scripting`: area-screenshot overlay and reading the video's time, on the user's click.
-- No remote code; the background talks only to 127.0.0.1:47830.
+- No remote code. Network use: downloads the picture the user chose from its own website, and talks to the Wall app at 127.0.0.1:47830; files sent to Wall on the web are saved by that page through the Wall server.
 
 ## Testing notes for reviewers
 The extension works with the Wall desktop app (Windows). Without it, open https://wall.poncatoera.workers.dev in a tab, then right-click a picture on any page > Add to Wall > Wall on the web.
@@ -49,4 +49,4 @@ The extension works with the Wall desktop app (Windows). Without it, open https:
 - alarms: refresh the menu's board list once a minute while Wall is open (MV3 menus can't update as they open).
 - scripting: on the user's request only: area-screenshot overlay, reading a video's current time, fetching a picture the page loaded itself (blob: URLs).
 - cookies: as in "Permission notes" above.
-- Remote code: none. Data handled (disclose, don't tick "none"): site cookies for the listed video sites, page addresses and titles, and the content the user picks; all go only to the user's own Wall (app at 127.0.0.1 or their open Wall page), never to the developer or third parties.
+- Remote code: none. Data handled (disclose, don't tick "none"): site cookies for the listed video sites, page addresses and titles, and the content the user picks; all go only to the user's own Wall (the app at 127.0.0.1, or their open Wall page, which saves it through the Wall server like any drop); cookies are used only to sign in to that same site for the download.
