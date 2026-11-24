@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wall extension privacy</title>
+  <style>
+    :root { --bg: #f3f1ec; --text: #1d1c1a; --soft: #6f6b63; --accent: #d9472f; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #121315; --text: #e8e9ee; --soft: #8d909a; --accent: #6ea8ff; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 "Segoe UI", system-ui, sans-serif; }
+    main { max-width: 680px; margin: 0 auto; padding: 48px 16px 64px; }
+    h1 { font-size: 28px; margin: 0 0 4px; }
+    h2 { font-size: 18px; margin: 32px 0 8px; }
+    .soft { color: var(--soft); }
+    a { color: var(--accent); }
+    li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Wall browser extension: privacy</h1>
+  <p class="soft">Last updated 24 November 2026</p>
+
+  <p>The Wall extension sends pictures, videos, links and screenshots you choose to your own Wall: the Wall app on your computer, or a Wall page you have open in a tab. It collects nothing about you, has no analytics and sends nothing to its makers.</p>
+
+  <h2>What it handles, and where it goes</h2>
+  <ul>
+    <li><b>Things you choose to add</b> (a picture, a video, a link, a screenshot, and the page's address and title) go only to the Wall app on this computer, at 127.0.0.1, or to the Wall page open in your browser. Nothing else is read from pages.</li>
+    <li><b>Sign-ins for video sites.</b> When you add a video from Instagram, X, Vimeo, TikTok, Facebook, Threads or Patreon, the extension passes your browser's cookies for that one site to the Wall app on this computer, so it can download a video only signed-in people can see. They never leave your computer, and the app deletes them as soon as the download is done.</li>
+    <li><b>Settings</b> (which board you last sent to, clip start and end times) stay in your browser's extension storage.</li>
+  </ul>
+
+  <h2>Why it asks for its permissions</h2>
+  <ul>
+    <li><b>Read and change data on all websites</b>: to fetch the picture you right-clicked as your browser sees it, take screenshots, read a video's current time for clip marks, and hand files to an open Wall page.</li>
+    <li><b>Cookies</b>: only for the video sites listed above, only when you add a video from one of them, as described above.</li>
+    <li><b>Context menus, tabs, scripting, storage, alarms</b>: the right-click menu, finding an open Wall page, the area screenshot, remembering your choices, and keeping the board list current.</li>
+  </ul>
+
+  <h2>What it doesn't do</h2>
+  <ul>
+    <li>It doesn't sell, share or transfer any data to anyone.</li>
+    <li>It doesn't track browsing or read pages you don't send from.</li>
+    <li>It doesn't use data for advertising, credit or anything other than adding things to your Wall.</li>
+  </ul>
+
+  <p>If you share a Wall board online, what you added is stored with that board as you would expect; see the board's own sharing settings.</p>
+</main>
+</body>
+</html>
