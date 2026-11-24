@@ -248,7 +248,7 @@ fn libraries_stay_the_same_through_the_cloud() {
     until("deleted again on a", &mut [&mut a, &mut b], |p| !p[0].boards().contains(&third));
 
     // A link to one board, to look at: that board and its files only.
-    let view = me.make_link(Some(shared), false, "client", "").unwrap();
+    let view = me.make_link(Some(shared), false, "client", "", None).unwrap();
     let vkey = view.secret.clone().unwrap();
     let mut c = Pc::new(dir, "c", &vkey);
     until("the viewer has the board", &mut [&mut a, &mut b, &mut c], |p| p[2].boards().contains(&shared) && p[2].lib().has_media(&hash2));
@@ -263,7 +263,8 @@ fn libraries_stay_the_same_through_the_cloud() {
     assert!(!a.texts().contains(&"not allowed".into()), "looking only: nothing goes up");
 
     // A link to edit it.
-    let edit = me.make_link(Some(shared), true, "colleague", "Mia").unwrap();
+    let edit = me.make_link(Some(shared), true, "colleague", "Mia", Some(7)).unwrap();
+    assert!(edit.expires > 0, "made with an end date");
     let mut d = Pc::new(dir, "d", edit.secret.as_ref().unwrap());
     until("the editor has the board", &mut [&mut a, &mut d], |p| p[1].boards().contains(&shared) && p[1].lib().has_media(&hash2));
     d.app.open_board(shared, false);

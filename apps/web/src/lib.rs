@@ -23,6 +23,8 @@ struct State {
     /// Light mode and grid as last saved to localStorage.
     saved_look: (bool, bool),
     saved_ui: String,
+    /// `App::seen_stamp` as last saved (to localStorage `wall.seen`).
+    saved_seen: u64,
     /// Boards are saved in the browser (off with `?demo`).
     store: bool,
     /// Saved boards have been looked for; saving may start.
@@ -315,6 +317,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         wall_app::ShellCommand::BackUp { .. } => wasm_bindgen_futures::spawn_local(backup(s.clone())),
         wall_app::ShellCommand::SetName(name) => cloud::set_name(&name),
         wall_app::ShellCommand::SetColor(c) => cloud::set_color(c),
+        wall_app::ShellCommand::Fullscreen(on) => cloud::fullscreen(on),
         wall_app::ShellCommand::History(ask) => cloud::history(s.clone(), ask),
         wall_app::ShellCommand::CopyText(text) => {
             let _ = window.navigator().clipboard().write_text(&text);
@@ -326,6 +329,11 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         }
         wall_app::ShellCommand::ExportImage => {
             if let Err(e) = export_png(&s) {
+                web_sys::console::error_1(&e);
+            }
+        }
+        wall_app::ShellCommand::ExportPdf => {
+            if let Err(e) = export_pdf(&s) {
                 web_sys::console::error_1(&e);
             }
         }
@@ -347,6 +355,21 @@ fn export_png(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&png[..]));
     let bag = web_sys::BlobPropertyBag::new();
     bag.set_type("image/png");
+    download(&web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?, &name)
+}
+
+/// File > Export board as PDF: the board (longest side up to 4096 px) and
+/// its comments, downloaded.
+fn export_pdf(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
+    let (pdf, name) = {
+        let mut st = s.borrow_mut();
+        let State { app, renderer, .. } = &mut *st;
+        let pdf = app.export_pdf(renderer, 4096).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        (pdf, format!("{}.pdf", app.board_name()))
+    };
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&pdf[..]));
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type("application/pdf");
     download(&web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?, &name)
 }
 
@@ -425,6 +448,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     let saved_ui = stored("wall.ui").unwrap_or_default();
     app.set_ui_setting(&saved_ui);
+    // Which comments were seen in this browser (new ones get red dots).
+    app.set_seen_setting(stored("wall.seen").as_deref(), js_sys::Date::now() as u64);
     // First visit: the welcome walkthrough. A share link gets its own short
     // card once we know whether it can edit (see `cloud`).
     // `?welcome=slide:N` or `tip:N` shows one step (screenshots).
@@ -444,6 +469,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     let state = Rc::new(RefCell::new(State { players: Default::default(), app, renderer, canvas: canvas.clone(),
         saved_look: (light, grid),
         saved_ui,
+        saved_seen: 0,
         // `?demo` shows the demo as it ships, without saving.
         // A shared library stays in the cloud, not among this browser's boards.
         store: share.is_none() && !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
@@ -542,7 +568,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                 "Enter" => Some(Key::Enter),
                 "Escape" => Some(Key::Escape),
                 "ArrowLeft" => Some(Key::Left),
-                "ArrowRight" => Some(Key::Right),
+                "ArrowRight" | "PageDown" => Some(Key::Right),
+                "PageUp" => Some(Key::Left),
                 "Home" => Some(Key::Home),
                 "End" => Some(Key::End),
                 "z" | "Z" if cmd => Some(if e.shift_key() { Key::Redo } else { Key::Undo }),
@@ -671,6 +698,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             }
             cloud::tick(&mut s.app);
             if s.app.needs_redraw {
+                // Glides (following someone, presenting) go by the clock.
+                s.app.set_time(js_sys::Date::now() as u64);
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);
             }
@@ -685,6 +714,12 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                     let _ = st.set_item("wall.ui", &ui);
                 }
                 s.saved_ui = ui;
+            }
+            if s.app.seen_stamp() != s.saved_seen {
+                if let Some(st) = storage() {
+                    let _ = st.set_item("wall.seen", &s.app.seen_setting());
+                }
+                s.saved_seen = s.app.seen_stamp();
             }
         }
         request_frame(frame.borrow().as_ref().unwrap());

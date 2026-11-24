@@ -8,7 +8,10 @@ pub mod brush;
 pub mod share;
 pub mod history;
 pub mod comments;
+pub mod unread;
+pub mod export;
 pub mod presence;
+pub mod together;
 pub mod doc;
 mod drawing;
 pub mod menu;
@@ -313,6 +316,8 @@ pub struct App {
     cursor_out: bool,
     /// Our name on shared boards, when there's a live connection.
     my_name: Option<String>,
+    /// Which comments this person has seen (see `unread`).
+    seen: unread::Seen,
     /// Typing a new name for ourselves.
     name_edit: Option<String>,
     my_color: Option<u8>,
@@ -349,6 +354,8 @@ pub struct App {
     new_media: Vec<snapshot::NewMedia>,
     /// Versions kept, and the history card (see `history`).
     history: history::History,
+    /// Following, spotlight and presenting (see `together`).
+    together: together::Together,
     /// The first-time walkthrough, while it shows (see `welcome`).
     welcome: Option<welcome::Welcome>,
     /// Which walkthroughs were seen (`welcome::SEEN_*` bits, in the settings).
@@ -425,6 +432,7 @@ impl App {
             peers: Vec::new(),
             cursor_out: false,
             my_name: None,
+            seen: unread::Seen::default(),
             name_edit: None,
             my_color: None,
             comment_card: None,
@@ -444,6 +452,7 @@ impl App {
             loader: Default::default(),
             new_media: Vec::new(),
             history: Default::default(),
+            together: Default::default(),
             welcome: None,
             welcome_seen: 0,
         }
@@ -1129,6 +1138,16 @@ impl App {
             self.gesture = Gesture::Pan;
             return;
         }
+        if button == Button::Primary && self.together_press(pos) {
+            return;
+        }
+        if self.presenting() {
+            // Presenting: a drag moves the board, nothing else (no edits by accident).
+            if button == Button::Primary {
+                self.gesture = Gesture::Pan;
+            }
+            return;
+        }
         if self.history_press(button, pos) {
             return;
         }
@@ -1162,7 +1181,7 @@ impl App {
         if self.comment_card_press(pos) {
             return;
         }
-        if self.pen_bar_press(pos) || self.stamp_bar_press(pos) {
+        if self.pen_bar_press(pos) || self.stamp_bar_press(pos) || self.unread_pill_press(pos) {
             return;
         }
         if self.sidebar_press(pos) {
@@ -1556,6 +1575,9 @@ impl App {
             return;
         }
         if self.welcome_key(key) {
+            return;
+        }
+        if self.together_key(key) {
             return;
         }
         if self.history_key(key) || self.name_key(key) || self.share_key(key) || self.comment_key(key) || self.sidebar_key(key) {
@@ -2359,6 +2381,12 @@ impl App {
     /// Draws the whole board, without selection, panels or menus, into an
     /// off-screen picture. Returns straight RGBA8 pixels and their size.
     pub fn export_board(&mut self, renderer: &mut Renderer, max_side: u32) -> Result<(Vec<u8>, [u32; 2]), AppError> {
+        self.export_board_marked(renderer, max_side, &[])
+    }
+
+    /// [`Self::export_board`] with numbered pins at board points (the PDF's
+    /// comments), each `pin_px` pixels across in the picture.
+    pub(crate) fn export_board_marked(&mut self, renderer: &mut Renderer, max_side: u32, pins: &[([f32; 2], String)]) -> Result<(Vec<u8>, [u32; 2]), AppError> {
         let max_side = max_side.min(renderer.max_picture_size());
         let (size, zoom) = self.export_size(max_side).ok_or_else(|| AppError::Other("the board is empty".into()))?;
         let b = self.board_bounds().unwrap_or_default();
@@ -2416,6 +2444,7 @@ impl App {
         }
         let textures: HashMap<&ContentHash, ImageId> = ids.iter().map(|(h, id)| (h, *id)).collect();
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
+        let (pin_boxes, pin_glyphs) = export::pin_marks(&mut self.font, pins, zoom, size);
         if self.font.atlas.dirty {
             renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
             self.font.atlas.dirty = false;
@@ -2427,6 +2456,8 @@ impl App {
                 r.begin_frame(size, BACKGROUND());
                 // Always the full-size picture, whatever its size in the export.
                 scene.draw(r, &view, &|h, _| textures.get(h).map(|id| (*id, [0.0, 0.0, 1.0, 1.0])));
+                r.draw_boxes(&view, &pin_boxes);
+                r.draw_glyphs(&view, &pin_glyphs);
             })
             .map_err(|e| AppError::Other(e.to_string()));
         for id in temporary {
@@ -2440,6 +2471,9 @@ impl App {
         // A version from the history card is drawn in place of the board.
         let swapped = self.history_swap();
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
+        // Following someone or stepping through a presentation moves the view.
+        let gliding = self.together_tick();
+        let presenting = self.presenting();
         self.pump_pictures(renderer);
         let caret = self.caret_rect();
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
@@ -2509,7 +2543,7 @@ impl App {
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
         renderer.draw_curves_once(&view, &self.drawing_preview().1);
-        if let Some((query, at, total)) = self.search_status() {
+        if let Some((query, at, total)) = self.search_status().filter(|_| !presenting) {
             // Search box: top centre, constant size on screen.
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
@@ -2529,7 +2563,7 @@ impl App {
             }
             renderer.draw_glyphs(&view, &glyphs);
         }
-        if !self.nav.is_empty() {
+        if !self.nav.is_empty() && !presenting {
             // Breadcrumb at the top-left, constant size on screen.
             let text = format!("{}   (Esc to go up)", self.breadcrumb().join("  ›  "));
             let size = 14.0 / self.camera.zoom;
@@ -2565,27 +2599,38 @@ impl App {
             }
             renderer.draw_glyphs(&screen, &hint);
         }
-        self.draw_panel(renderer);
-        self.draw_sidebar(renderer);
-        let redraw_library = self.library_layout().is_some();
+        // Presenting: only the board (and comments), no menus or panels.
+        if !presenting {
+            self.draw_panel(renderer);
+            self.draw_sidebar(renderer);
+        }
+        let redraw_library = !presenting && self.library_layout().is_some();
         self.needs_redraw = false;
         if redraw_library {
             // Sets needs_redraw again while thumbnails are still loading.
             self.draw_library(renderer);
         }
         self.draw_comments(renderer);
-        self.draw_zoom_pill(renderer);
-        self.draw_rail(renderer);
-        self.draw_pen_ui(renderer);
-        self.draw_share(renderer);
+        if !presenting {
+            self.draw_zoom_pill(renderer);
+            self.draw_rail(renderer);
+            self.draw_pen_ui(renderer);
+            self.draw_share(renderer);
+        }
         if swapped {
             self.history_swap();
         }
-        self.draw_history(renderer);
-        // The menu bar and its drop-downs go over everything, but for the
-        // badges of who's here, which sit in the bar.
-        self.draw_menu(renderer);
+        if !presenting {
+            self.draw_history(renderer);
+            // The menu bar and its drop-downs go over everything, but for the
+            // badges of who's here, which sit in the bar.
+            self.draw_menu(renderer);
+        }
         self.draw_presence(renderer);
+        self.draw_together(renderer);
+        if gliding {
+            self.needs_redraw = true;
+        }
         // The walkthrough goes over everything.
         self.draw_welcome(renderer);
     }
@@ -3333,6 +3378,7 @@ impl App {
             C::BackUpNow => self.shell_commands.push(S::BackUp { choose: false }),
             C::BackUpTo => self.shell_commands.push(S::BackUp { choose: true }),
             C::ExportLibrary => self.shell_commands.push(S::ExportLibrary),
+            C::ExportPdf => self.shell_commands.push(S::ExportPdf),
             C::Share => self.open_share(),
             C::WelcomeTour => self.start_welcome(welcome::Kind::Full),
             C::History => self.open_history(history::Tab::Versions),
@@ -3386,6 +3432,11 @@ impl App {
             C::TidySameHeight => _ = self.arrange(arrange::Arrange::SameHeight),
             C::TidyPack => _ = self.arrange(arrange::Arrange::Pack),
             C::TidyColour => _ = self.arrange(arrange::Arrange::Colour),
+            C::Present => self.start_presenting(),
+            C::Spotlight => {
+                let on = !self.spotlight_on();
+                self.set_spotlight(on);
+            }
         }
     }
 

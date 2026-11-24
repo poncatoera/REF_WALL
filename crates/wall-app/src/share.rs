@@ -1,6 +1,7 @@
 //! Share (File > Share this board…): a card over the board that makes
 //! private links to the open board, to view or to edit, copies them, and
-//! lists the board's links so they can be turned off.
+//! lists the board's links so they can be turned off. A link can be made
+//! to stop by itself after a day, a week or a month.
 //!
 //! The app doesn't talk to the server itself: it asks the shell with
 //! [`ShellCommand::Cloud`] and the shell answers with
@@ -20,7 +21,8 @@ pub enum CloudAsk {
     Links,
     /// A new link to a board (None: the whole library).
     /// `person`: the name the one who opens it shows as ("" lets them type their own).
-    Make { board: Option<Uuid>, edit: bool, label: String, person: String },
+    /// `days`: it stops working that many days from now (None: never).
+    Make { board: Option<Uuid>, edit: bool, label: String, person: String, days: Option<u32> },
     Revoke(Uuid),
 }
 
@@ -33,6 +35,8 @@ pub struct ShareLink {
     pub label: String,
     /// Made for this person ("" for anyone).
     pub person: String,
+    /// When it stops working (ms since 1970), 0 for never.
+    pub expires_ms: u64,
 }
 
 /// The shell's answer to a [`CloudAsk`].
@@ -67,6 +71,29 @@ pub struct ShareCard {
     pub person: String,
     /// The keyboard types into `person`.
     pub typing: bool,
+    /// How long new links work for (None: until turned off). Kept while
+    /// the card is open, so several links can be made the same way.
+    pub days: Option<u32>,
+}
+
+/// The choices for how long a new link works.
+pub const LASTS: [(Option<u32>, &str); 4] = [(None, "Until turned off"), (Some(1), "1 day"), (Some(7), "7 days"), (Some(30), "30 days")];
+
+/// "ends in 3 days", "ends in 5 hours", "ended": for a link's row.
+pub fn ends(now_ms: u64, expires_ms: u64) -> Option<String> {
+    if expires_ms == 0 {
+        return None;
+    }
+    if expires_ms <= now_ms {
+        return Some("ended".into());
+    }
+    let left = expires_ms - now_ms;
+    let hours = left.div_ceil(3_600_000);
+    Some(match hours {
+        0..=1 => "ends within the hour".into(),
+        2..=47 => format!("ends in {hours} hours"),
+        _ => format!("ends in {} days", left.div_ceil(86_400_000)),
+    })
 }
 
 /// The longest name a link can carry.
@@ -76,6 +103,7 @@ const MAX_PERSON: usize = 40;
 pub enum ShareHit {
     Make { edit: bool },
     Person,
+    Lasts(Option<u32>),
     CopyAgain,
     Revoke(Uuid),
     Close,
@@ -107,7 +135,7 @@ fn mb(bytes: u64) -> String {
     if bytes >= 1 << 30 { format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64) } else { format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64) }
 }
 
-pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewport: [f32; 2], text_width: &mut dyn FnMut(&str, f32) -> f32) -> ShareLayout {
+pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewport: [f32; 2], now_ms: u64, text_width: &mut dyn FnMut(&str, f32) -> f32) -> ShareLayout {
     let t = theme::t();
     let mut l = ShareLayout::default();
     let x0 = ((viewport[0] - W) / 2.0).max(8.0);
@@ -134,7 +162,8 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
         }
     } else {
         let opens = if card.has_inside { "this board and the boards inside it" } else { "this board" };
-        wrap(text_width, &mut texts, &mut y, &format!("Anyone with a link can open {opens}, and boards you put inside later, until you turn the link off. They can't reach your other boards."), t.dim, x0 + PAD, inner);
+        let until = if card.days.is_some() { "until it ends or you turn it off" } else { "until you turn the link off" };
+        wrap(text_width, &mut texts, &mut y, &format!("Anyone with a link can open {opens}, and boards you put inside later, {until}. They can't reach your other boards."), t.dim, x0 + PAD, inner);
         y += 6.0;
         // Who it's for: their name on the board, so they don't type one.
         texts.push(TextRun { text: "FOR (OPTIONAL)".into(), at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
@@ -149,6 +178,21 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
         }
         l.hits.push((field, ShareHit::Person));
         y += 30.0 + 10.0;
+        // How long it works: one row of choices.
+        texts.push(TextRun { text: "WORKS FOR".into(), at: [x0 + PAD, y + 8.0], size: 11.0, color: t.dim });
+        y += 14.0;
+        let mut cx = x0 + PAD;
+        for (days, label) in LASTS {
+            let w = text_width(label, 12.0) + 18.0;
+            let r = [cx, y, w, 26.0];
+            let on = card.days == days;
+            let fill = if on { t.chip } else if panel::inside(r, hover) { t.hover } else { [0.0; 4] };
+            l.boxes.push(PanelBox { rect: r, fill, stroke: if on { t.accent } else { t.line }, radius: crate::theme::radius::CONTROL, stroke_w: if on { 1.5 } else { 1.0 } });
+            texts.push(TextRun { text: label.into(), at: [cx + 9.0, y + 17.0], size: 12.0, color: if on { t.ink } else { t.dim } });
+            l.hits.push((r, ShareHit::Lasts(days)));
+            cx += w + 6.0;
+        }
+        y += 26.0 + 12.0;
         let bw = (inner - 10.0) / 2.0;
         buttons.push(([x0 + PAD, y, bw, 32.0], "Copy view link", true, ShareHit::Make { edit: false }));
         buttons.push(([x0 + PAD + bw + 10.0, y, bw, 32.0], "Copy edit link", false, ShareHit::Make { edit: true }));
@@ -179,7 +223,11 @@ pub fn layout(card: &ShareCard, name: &str, hover: [f32; 2], caret: bool, viewpo
             if !k.person.is_empty() {
                 label = format!("{label}  ·  for {}", k.person);
             }
-            texts.push(TextRun { text: panel::fit_with(text_width, &label, 12.5, inner - 90.0), at: [x0 + PAD, y + ROW / 2.0 + 4.5], size: 12.5, color: t.ink });
+            let ended = k.expires_ms != 0 && k.expires_ms <= now_ms;
+            if let Some(e) = ends(now_ms, k.expires_ms) {
+                label = format!("{label}  ·  {e}");
+            }
+            texts.push(TextRun { text: panel::fit_with(text_width, &label, 12.5, inner - 90.0), at: [x0 + PAD, y + ROW / 2.0 + 4.5], size: 12.5, color: if ended { t.dim } else { t.ink } });
             buttons.push(([x0 + W - PAD - 76.0, y + 4.0, 76.0, ROW - 8.0], "Turn off", false, ShareHit::Revoke(k.id)));
             y += ROW;
         }
@@ -253,7 +301,12 @@ impl App {
                 card.used = used.zip(max);
             }
             CloudAnswer::Made { url, edit } => {
-                card.note = Some(format!("{} link copied. Paste it to whoever should {}.", if edit { "Edit" } else { "View" }, if edit { "edit this board" } else { "see this board" }));
+                let lasts = match card.days {
+                    None => String::new(),
+                    Some(1) => " It stops working in a day.".into(),
+                    Some(d) => format!(" It stops working in {d} days."),
+                };
+                card.note = Some(format!("{} link copied. Paste it to whoever should {}.{lasts}", if edit { "Edit" } else { "View" }, if edit { "edit this board" } else { "see this board" }));
                 card.made = Some(url.clone());
                 card.busy = true;
                 self.shell_commands.push(ShellCommand::CopyText(url));
@@ -274,7 +327,7 @@ impl App {
         let name = self.doc.board.name.clone();
         let font = &mut self.font;
         let caret = (self.now_ms / 530) % 2 == 0;
-        Some(layout(&card, &name, self.cursor, caret, self.viewport, &mut |s, size| panel::text_width(font, s, size)))
+        Some(layout(&card, &name, self.cursor, caret, self.viewport, self.now_ms, &mut |s, size| panel::text_width(font, s, size)))
     }
 
     /// A press while the card is open. True when the card took it (a press
@@ -293,18 +346,25 @@ impl App {
         }
         match hit {
             ShareHit::Person => {}
+            ShareHit::Lasts(days) => {
+                if let Some(c) = &mut self.share {
+                    c.days = days;
+                }
+            }
             ShareHit::Close => self.share = None,
             _ if busy => {}
             ShareHit::Make { edit } => {
                 let board = self.doc.board.id;
                 let label = self.doc.board.name.clone();
                 let mut person = String::new();
+                let mut days = None;
                 if let Some(c) = &mut self.share {
                     c.busy = true;
                     c.note = None;
                     person = std::mem::take(&mut c.person).trim().to_owned();
+                    days = c.days;
                 }
-                self.shell_commands.push(ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit, label, person }));
+                self.shell_commands.push(ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit, label, person, days }));
             }
             ShareHit::CopyAgain => {
                 if let Some(url) = self.share.as_ref().and_then(|c| c.made.clone()) {
@@ -403,14 +463,14 @@ mod tests {
         a.run_command(crate::menu::Command::Share);
         assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Links)]);
         let old = Uuid::new_v4();
-        let other = ShareLink { id: Uuid::new_v4(), edit: true, board: Some(Uuid::new_v4()), label: String::new(), person: String::new() };
-        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: "client".into(), person: String::new() }, other], used: Some(150 << 20), max: Some(4 << 30) });
+        let other = ShareLink { id: Uuid::new_v4(), edit: true, board: Some(Uuid::new_v4()), label: String::new(), person: String::new(), expires_ms: 0 };
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: "client".into(), person: String::new(), expires_ms: 0 }, other], used: Some(150 << 20), max: Some(4 << 30) });
         let l = a.share_layout().unwrap();
         assert_eq!(l.hits.iter().filter(|(_, h)| matches!(h, ShareHit::Revoke(_))).count(), 1, "only this board's links");
         assert!(l.texts.iter().any(|t| t.text.contains("150 MB of 4.0 GB")));
 
         press(&mut a, &ShareHit::Make { edit: true });
-        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: true, label: "Moodboard".into(), person: String::new() })]);
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: true, label: "Moodboard".into(), person: String::new(), days: None })]);
         a.cloud_answer(CloudAnswer::Made { url: "https://wall.example/#share=abc".into(), edit: true });
         let cmds = a.take_shell_commands();
         assert_eq!(cmds[0], ShellCommand::CopyText("https://wall.example/#share=abc".into()));
@@ -426,12 +486,12 @@ mod tests {
         assert!(!a.is_editing());
         a.cloud_answer(CloudAnswer::Links { links: vec![], used: None, max: None });
         press(&mut a, &ShareHit::Make { edit: false });
-        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: false, label: "Moodboard".into(), person: "Mia".into() })]);
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: false, label: "Moodboard".into(), person: "Mia".into(), days: None })]);
         assert_eq!(a.share_card().unwrap().person, "", "the next link is for anyone again");
-        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: Uuid::new_v4(), edit: false, board: Some(board), label: String::new(), person: "Mia".into() }], used: None, max: None });
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: Uuid::new_v4(), edit: false, board: Some(board), label: String::new(), person: "Mia".into(), expires_ms: 0 }], used: None, max: None });
         assert!(a.share_layout().unwrap().texts.iter().any(|t| t.text.ends_with("for Mia")));
 
-        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: String::new(), person: String::new() }], used: None, max: None });
+        a.cloud_answer(CloudAnswer::Links { links: vec![ShareLink { id: old, edit: false, board: Some(board), label: String::new(), person: String::new(), expires_ms: 0 }], used: None, max: None });
         press(&mut a, &ShareHit::Revoke(old));
         assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Revoke(old))]);
         a.cloud_answer(CloudAnswer::Revoked(old));
@@ -444,7 +504,7 @@ mod tests {
         a.open_board(child, true);
         a.run_command(crate::menu::Command::Share);
         a.take_shell_commands();
-        let k = |b: Option<Uuid>| ShareLink { id: Uuid::new_v4(), edit: false, board: b, label: "x".into(), person: String::new() };
+        let k = |b: Option<Uuid>| ShareLink { id: Uuid::new_v4(), edit: false, board: b, label: "x".into(), person: String::new(), expires_ms: 0 };
         a.cloud_answer(CloudAnswer::Links { links: vec![k(Some(board)), k(None), k(Some(Uuid::new_v4()))], used: None, max: None });
         let l = a.share_layout().unwrap();
         assert_eq!(l.hits.iter().filter(|(_, h)| matches!(h, ShareHit::Revoke(_))).count(), 2);
@@ -461,6 +521,24 @@ mod tests {
         let l = a.share_layout().unwrap();
         assert!(l.texts.iter().all(|t| !t.text.contains("Asking")) && l.texts.iter().any(|t| t.text.contains("offline")));
         a.take_shell_commands();
+
+        // A link that ends by itself: the choice goes with it, stays for
+        // the next one, and the list says when each ends.
+        a.cloud_answer(CloudAnswer::Links { links: vec![], used: None, max: None });
+        press(&mut a, &ShareHit::Lasts(Some(7)));
+        press(&mut a, &ShareHit::Make { edit: false });
+        assert_eq!(a.take_shell_commands(), vec![ShellCommand::Cloud(CloudAsk::Make { board: Some(board), edit: false, label: "Moodboard".into(), person: String::new(), days: Some(7) })]);
+        a.cloud_answer(CloudAnswer::Made { url: "https://wall.example/#share=week".into(), edit: false });
+        assert!(a.share_card().unwrap().note.as_deref().unwrap().contains("in 7 days"));
+        assert_eq!(a.share_card().unwrap().days, Some(7));
+        a.take_shell_commands();
+        a.now_ms = 1_700_000_000_000;
+        let now = a.now_ms;
+        let k = |id, expires_ms| ShareLink { id, edit: false, board: Some(board), label: String::new(), person: String::new(), expires_ms };
+        a.cloud_answer(CloudAnswer::Links { links: vec![k(Uuid::new_v4(), now + 3 * 86_400_000 - 5), k(Uuid::new_v4(), now - 1), k(Uuid::new_v4(), 0)], used: None, max: None });
+        let said = a.share_layout().unwrap().texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>().join("|");
+        assert!(said.contains("ends in 3 days") && said.contains("ended"), "{said}");
+        assert!(said.contains("until it ends or you turn it"), "{said}");
 
         // Esc closes it; so does a click outside.
         a.key(Key::Escape);

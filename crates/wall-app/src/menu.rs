@@ -49,6 +49,7 @@ pub enum Command {
     BackUpNow,
     BackUpTo,
     ExportLibrary,
+    ExportPdf,
     Share,
     History,
     DeletedBoards,
@@ -86,6 +87,8 @@ pub enum Command {
     TidySameHeight,
     TidyPack,
     TidyColour,
+    Present,
+    Spotlight,
     WelcomeTour,
 }
 
@@ -107,6 +110,8 @@ pub enum ShellCommand {
     BackUp { choose: bool },
     /// Save the whole library as one .zip file.
     ExportLibrary,
+    /// Save the board and its comments as a PDF (`App::export_pdf`).
+    ExportPdf,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
     /// Show how to add the browser extension (its folder, the browser's
@@ -126,6 +131,8 @@ pub enum ShellCommand {
     /// Versions and deleted boards, when there's no library folder; answer
     /// with `App::history_answer`.
     History(crate::history::HistoryAsk),
+    /// Fill the screen (presenting) or go back to a window.
+    Fullscreen(bool),
 }
 
 impl Command {
@@ -155,6 +162,7 @@ pub const MENUS: &[Menu] = &[
             ("Install browser extension…", "", Some(Command::InstallExtension)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
+            ("Export board as PDF, with comments…", "", Some(Command::ExportPdf)),
             ("Share this board…", "", Some(Command::Share)),
             ("Version history…", "", Some(Command::History)),
             ("Deleted boards…", "", Some(Command::DeletedBoards)),
@@ -210,6 +218,9 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "View",
         entries: &[
+            ("Present this board", "Shift P", Some(Command::Present)),
+            ("Bring everyone to your view", "", Some(Command::Spotlight)),
+            SEP,
             ("Fit board", "F", Some(Command::FitBoard)),
             ("Zoom in", "+", Some(Command::ZoomIn)),
             ("Zoom out", "−", Some(Command::ZoomOut)),

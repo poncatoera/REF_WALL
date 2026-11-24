@@ -163,7 +163,7 @@ fn share(lib: &Library, board: &str, how: &str, label: &str) -> Res<String> {
     };
     let board = if board == "all" { None } else { Some(pick_board(&all_boards(lib)?, board)?.id) };
     let c = cloud_client(lib)?;
-    let l = c.make_link(board, edit, label, "").map_err(|e| e.to_string())?;
+    let l = c.make_link(board, edit, label, "", None).map_err(|e| e.to_string())?;
     let secret = l.secret.ok_or("the server gave no link")?;
     Ok(format!("{}\nAnyone with this address can {} it until: wall-cli unshare <library> {}\n", c.link_address(&secret), if edit { "change" } else { "look at" }, l.id))
 }
