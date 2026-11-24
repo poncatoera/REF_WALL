@@ -42,3 +42,14 @@ Needs the Wall app on the same computer (or Wall on the web open in a tab). Noth
 
 ## Testing notes for reviewers
 The extension works with the Wall desktop app (Windows). Without it, open https://wall.poncatoera.workers.dev in a tab, then right-click a picture on any page > Add to Wall > Wall on the web.
+
+## Partner Center "Single purpose" and permission justification fields
+- Single purpose: Wall collects visual references from the web into the user's Wall boards. The user right-clicks a picture, video, link or page, or takes a screenshot, and the extension sends that item to the Wall desktop app on the same computer or to a Wall web page the user has open.
+- contextMenus: the "Add to Wall" right-click item on pictures, videos, links and pages, listing the boards to send to.
+- storage: the board last chosen and clip start/end marks, in extension storage only.
+- activeTab: screenshot of the visible page and its address/title, when the user clicks the toolbar button or a shortcut.
+- alarms: refresh the menu's board list once a minute while Wall is open (MV3 menus can't update as they open).
+- scripting: on the user's request only: area-screenshot overlay, reading a video's current time, fetching a picture the page loaded itself (blob: URLs).
+- cookies: as in "Permission notes" above.
+- tabs: find an open Wall web page by address; read the current tab's address and title.
+- Remote code: none. Data: not collected or transmitted to the developer or third parties.
