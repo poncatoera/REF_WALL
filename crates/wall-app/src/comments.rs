@@ -92,6 +92,8 @@ pub struct Inputs<'a> {
     pub comments: Vec<(Uuid, [f32; 2], &'a [CommentMessage], bool)>,
     pub card: Option<&'a CommentCard>,
     pub show_resolved: bool,
+    /// Comments with something new for this person: a red dot on the pin.
+    pub new: Vec<Uuid>,
     pub me: &'a str,
     pub can_delete: bool,
     pub now_ms: u64,
@@ -129,6 +131,9 @@ pub fn layout(i: &Inputs, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], width: &mut 
         let first = messages.first().map_or("?", |m| m.by.as_str());
         let label = if messages.len() > 1 { messages.len().to_string() } else { initial(first) };
         let r = pin(&mut l, p, presence::color_of(first), &label, on, *resolved, width);
+        if i.new.contains(id) && !on {
+            l.boxes.push(PanelBox { rect: [r[0] + PIN - 7.0, r[1] - 3.0, 10.0, 10.0], fill: crate::unread::RED, stroke: t.panel_bg, radius: 5.0, stroke_w: 1.5 });
+        }
         l.pins.push((r, *id));
     }
     let Some(card) = i.card else { return l };
@@ -300,10 +305,12 @@ impl App {
             })
             .collect();
         let me = self.my_name.clone().unwrap_or_else(|| "Me".into());
+        let new = self.new_comments_here().into_iter().map(|t| t.id).collect();
         let inputs = Inputs {
             comments,
             card: self.comment_card.as_ref(),
             show_resolved: self.tool == toolbar::Tool::Comment,
+            new,
             me: &me,
             can_delete: !self.view_only,
             now_ms: self.now_ms,
@@ -510,6 +517,7 @@ impl App {
     }
 
     pub(crate) fn draw_comments(&mut self, renderer: &mut Renderer) {
+        self.mark_open_comment_seen();
         let bar = self.stamp_bar_layout();
         let has_pins = self.doc.board.live_items().any(|i| matches!(i.kind, ItemKind::Comment { .. }));
         if !has_pins && self.comment_card.is_none() && bar.is_none() {

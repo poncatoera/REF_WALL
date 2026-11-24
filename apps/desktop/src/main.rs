@@ -84,6 +84,8 @@ struct Shell {
     saved_look: (bool, bool),
     /// Tool rail place and left panel, as last saved.
     saved_ui: String,
+    /// `App::seen_stamp` as last saved.
+    saved_seen: u64,
     /// Pictures and videos sent from the browser extension.
     collector: Option<collect::Collector>,
 }
@@ -305,16 +307,26 @@ fn pick_library(_new: bool) -> Option<std::path::PathBuf> {
     std::env::var_os("WALL_PICK_LIBRARY").map(Into::into)
 }
 
-/// File > Export board as picture: where to save the PNG.
+/// File > Export board as picture / PDF: where to save it.
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_export(name: &str) -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().set_title("Export board as picture").set_file_name(name).add_filter("PNG picture", &["png"]).save_file()
+    let d = rfd::FileDialog::new().set_file_name(name);
+    let d = if name.ends_with(".pdf") { d.set_title("Export board as PDF").add_filter("PDF document", &["pdf"]) } else { d.set_title("Export board as picture").add_filter("PNG picture", &["png"]) };
+    d.save_file()
 }
 
-/// No save dialog on Linux yet: WALL_EXPORT names the file (tests).
+/// No save dialog on Linux yet: WALL_EXPORT / WALL_EXPORT_PDF name the file (tests).
 #[cfg(not(any(windows, target_os = "macos")))]
-fn pick_export(_name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("WALL_EXPORT").map(Into::into)
+fn pick_export(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(if name.ends_with(".pdf") { "WALL_EXPORT_PDF" } else { "WALL_EXPORT" }).map(Into::into)
+}
+
+fn export_pdf(app: &mut App, renderer: &mut Renderer, path: &std::path::Path) {
+    let result = app.export_pdf(renderer, EXPORT_MAX).map_err(|e| e.to_string()).and_then(|pdf| std::fs::write(path, &pdf).map(|_| pdf.len()).map_err(|e| e.to_string()));
+    match result {
+        Ok(n) => println!("wall: exported {} ({} KB)", path.display(), n / 1024),
+        Err(e) => show_error(&format!("Could not export the board: {e}")),
+    }
 }
 
 /// Longest side of an exported board picture, in pixels.
@@ -356,6 +368,8 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
     lock::keep(lock);
     app.desktop = true;
     app.set_utc_offset(local_offset_min());
+    // Which comments were seen here (new ones get red dots).
+    app.set_seen_setting(settings::get_str("seen").as_deref(), now_ms());
     settings::remember_library(path);
     Ok(app)
 }
@@ -527,12 +541,12 @@ fn cloud_ask(root: Option<&std::path::Path>, ask: wall_app::CloudAsk) -> wall_ap
         CloudAsk::Links => client.links().map(|links| {
             let me = client.me().ok();
             CloudAnswer::Links {
-                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label, person: k.person }).collect(),
+                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label, person: k.person, expires_ms: k.expires }).collect(),
                 used: me.as_ref().and_then(|m| m.media_bytes),
                 max: me.as_ref().and_then(|m| m.max_media_bytes),
             }
         }),
-        CloudAsk::Make { board, edit, label, person } => client.make_link(board, edit, &label, &person).map_err(|e| match e {
+        CloudAsk::Make { board, edit, label, person, days } => client.make_link(board, edit, &label, &person, days).map_err(|e| match e {
             wall_cloud::CloudError::Missing => wall_cloud::CloudError::Other("this board isn't in the cloud yet; try again in a moment".into()),
             e => e,
         }).and_then(|k| {
@@ -880,6 +894,12 @@ impl ApplicationHandler for Shell {
                                 export_png(&mut self.app, &mut gfx.renderer, &path);
                             }
                         }
+                        wall_app::ShellCommand::ExportPdf => {
+                            let name = format!("{}.pdf", self.app.board_name());
+                            if let Some(path) = pick_export(&name) {
+                                export_pdf(&mut self.app, &mut gfx.renderer, &path);
+                            }
+                        }
                         wall_app::ShellCommand::SetName(name) => {
                             if let Some(c) = &self.cloud {
                                 if let Some(live) = &c.live {
@@ -960,11 +980,19 @@ impl ApplicationHandler for Shell {
                     settings::set_str("ui", &ui);
                     self.saved_ui = ui;
                 }
+                if self.app.seen_stamp() != self.saved_seen {
+                    settings::set_str("seen", &self.app.seen_setting());
+                    self.saved_seen = self.app.seen_stamp();
+                }
                 let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     // WALL_EXPORT=board.png also exports the board (tests).
                     if let Some(export) = std::env::var_os("WALL_EXPORT") {
                         export_png(&mut self.app, &mut gfx.renderer, std::path::Path::new(&export));
+                        self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                    }
+                    if let Some(export) = std::env::var_os("WALL_EXPORT_PDF") {
+                        export_pdf(&mut self.app, &mut gfx.renderer, std::path::Path::new(&export));
                         self.app.render(&mut gfx.renderer, [size.width, size.height]);
                     }
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
@@ -1266,6 +1294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloud_asks: Vec::new(),
         saved_look: (light, grid),
         saved_ui: settings::get_str("ui").unwrap_or_default(),
+        saved_seen: 0,
         collector: None,
     };
     let proxy = event_loop.create_proxy();

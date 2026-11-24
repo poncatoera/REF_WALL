@@ -6,7 +6,8 @@
 // Who may do what: a request carries a 256-bit secret as a Bearer token. The
 // owner's key matches OWNER_HASH; a share link's secret matches a row in
 // `links` (only hashes are stored). A link opens the whole library or one
-// board with the boards inside it, to view or to edit, until it's revoked.
+// board with the boards inside it, to view or to edit, until it's revoked
+// or (when it was made with one) its end date has passed.
 //
 // Merging is the file format's rule (BoardItem::supersedes): the higher
 // `rev` wins, then the larger `updated_by`. Every accepted row gets the next
@@ -50,6 +51,7 @@ const MAX_VERSION = 8_000_000;
 const VERSIONS_UNTIL_DB = 500_000_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const MAX_LINK_DAYS = 366; // the furthest end date a link can have
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -309,6 +311,10 @@ export class LibraryDO extends DurableObject {
       if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'person'").length) {
         this.sql.exec("ALTER TABLE links ADD COLUMN person TEXT NOT NULL DEFAULT ''");
       }
+      // Added later: when a link stops working (ms), 0 for never.
+      if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'expires'").length) {
+        this.sql.exec("ALTER TABLE links ADD COLUMN expires INTEGER NOT NULL DEFAULT 0");
+      }
     });
     // Hashes a board-only link may read, kept while nothing changes.
     this.readable = new Map();
@@ -495,8 +501,8 @@ export class LibraryDO extends DurableObject {
   access(who) {
     const owner = this.env.OWNER_HASH;
     if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null, link: null };
-    const l = this.rows("SELECT id, role, board, person FROM links WHERE secret = ? AND revoked = 0", who)[0];
-    return l ? { role: l.role, board: l.board, link: l.id, person: l.person || "" } : null;
+    const l = this.rows("SELECT id, role, board, person, expires FROM links WHERE secret = ? AND revoked = 0 AND (expires = 0 OR expires > ?)", who, Date.now())[0];
+    return l ? { role: l.role, board: l.board, link: l.id, person: l.person || "", expires: l.expires || 0 } : null;
   }
 
   // The boards a link reaches: null for all, else a Set of ids.
@@ -540,7 +546,7 @@ export class LibraryDO extends DurableObject {
     const a = this.access(who);
     if (!a) return no(403, "this link doesn't work (any more)");
     const used = this.used();
-    return { role: a.role, board: a.board, seq: this.seq(), ...(a.role === "owner" ? { media_bytes: used, max_media_bytes: this.max() } : {}) };
+    return { role: a.role, board: a.board, seq: this.seq(), ...(a.expires ? { expires: a.expires } : {}), ...(a.role === "owner" ? { media_bytes: used, max_media_bytes: this.max() } : {}) };
   }
 
   max() {
@@ -970,7 +976,9 @@ export class LibraryDO extends DurableObject {
 
   async listLinks(who) {
     if (this.access(who)?.role !== "owner") return no(403, "owner only");
-    return { links: this.rows("SELECT id, role, board, label, person, created FROM links WHERE revoked = 0 ORDER BY created") };
+    // Expired links are listed too (the app shows them as ended) until
+    // they're turned off.
+    return { links: this.rows("SELECT id, role, board, label, person, created, expires FROM links WHERE revoked = 0 ORDER BY created") };
   }
 
   async makeLink(who, req) {
@@ -983,11 +991,21 @@ export class LibraryDO extends DurableObject {
     const secret = newSecret();
     const id = crypto.randomUUID();
     const person = cleanName(req.person, "");
+    // An end date: `expires` (ms) or `days` from now; neither for never.
+    const now = Date.now();
+    let expires = 0;
+    if (req.expires !== undefined && req.expires !== null && req.expires !== 0) {
+      if (!Number.isSafeInteger(req.expires) || req.expires <= now || req.expires > now + MAX_LINK_DAYS * DAY) return no(400, "bad end date");
+      expires = req.expires;
+    } else if (req.days !== undefined && req.days !== null && req.days !== 0) {
+      if (!Number.isSafeInteger(req.days) || req.days < 1 || req.days > MAX_LINK_DAYS) return no(400, "bad number of days");
+      expires = now + req.days * DAY;
+    }
     this.sql.exec(
-      "INSERT INTO links (id, secret, role, board, label, created, revoked, person) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-      id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), Date.now(), person,
+      "INSERT INTO links (id, secret, role, board, label, created, revoked, person, expires) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), now, person, expires,
     );
-    return { id, secret, role, board, person };
+    return { id, secret, role, board, person, expires };
   }
 
   async revokeLink(who, id) {
