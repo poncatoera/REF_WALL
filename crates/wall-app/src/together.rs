@@ -532,7 +532,8 @@ impl App {
             return l;
         }
         if self.together.spotlight {
-            let fill = crate::presence::pick(self.my_color).unwrap_or(th.accent);
+            // The colour the others see for us.
+            let fill = crate::presence::pick(self.my_color).or_else(|| self.together.my_id.as_deref().map(crate::presence::color_of)).unwrap_or(th.accent);
             let what = match self.peers.len() {
                 0 => "Everyone who comes here will follow you".to_owned(),
                 1 => format!("{} is following you", self.peers[0].name),
