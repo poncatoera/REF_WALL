@@ -42,6 +42,8 @@ if ($running) { throw "Wall is running from $pkg (pid $($running.Id -join ', '))
 if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
 New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 Copy-Item (Join-Path $root "target/release/wall.exe") $pkg
+# The browser extension: File > Install browser extension points the browser here.
+Copy-Item -Recurse (Join-Path $root "extension") (Join-Path $pkg "extension")
 
 # ANGLE: required pair, optional shader compiler.
 foreach ($f in "libEGL.dll", "libGLESv2.dll") {

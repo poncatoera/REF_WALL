@@ -44,6 +44,7 @@ pub enum Command {
     OpenLibrary,
     NewLibrary,
     ImportOldWall,
+    InstallExtension,
     ExportImage,
     Share,
     History,
@@ -102,6 +103,9 @@ pub enum ShellCommand {
     ExportImage,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
+    /// Show how to add the browser extension (its folder, the browser's
+    /// extensions page and the steps).
+    InstallExtension,
     /// Open a web address in the browser.
     OpenUrl(String),
     /// Put this text on the clipboard (a palette colour's hex code).
@@ -123,7 +127,7 @@ pub enum ShellCommand {
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::Share)
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share)
     }
 }
 
@@ -144,6 +148,7 @@ pub const MENUS: &[Menu] = &[
             ("Open library…", "", Some(Command::OpenLibrary)),
             ("New library…", "", Some(Command::NewLibrary)),
             ("Import old Wall library…", "", Some(Command::ImportOldWall)),
+            ("Install browser extension…", "", Some(Command::InstallExtension)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
             ("Share this board…", "", Some(Command::Share)),

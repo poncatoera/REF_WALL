@@ -879,6 +879,14 @@ impl ApplicationHandler for Shell {
                                 switch_library(&mut self.app, &mut self.videos, &mut self.posters, &gfx.window, &path);
                             }
                         }
+                        wall_app::ShellCommand::InstallExtension => match collect::extension_dir() {
+                            Some(dir) => {
+                                let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(dir.display().to_string()));
+                                open_url(&dir.display().to_string());
+                                show_info(&collect::install_steps(&dir));
+                            }
+                            None => show_error("The browser extension's folder is missing from this copy of Wall. Reinstall Wall to get it."),
+                        },
                         wall_app::ShellCommand::ImportOldWall => {
                             let root = self.app.library_root().map(|p| p.to_owned());
                             match (root, &self.old_import) {

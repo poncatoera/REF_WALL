@@ -3325,6 +3325,7 @@ impl App {
             C::History => self.open_history(history::Tab::Versions),
             C::DeletedBoards => self.open_history(history::Tab::Deleted),
             C::ImportOldWall => self.shell_commands.push(S::ImportOldWall),
+            C::InstallExtension => self.shell_commands.push(S::InstallExtension),
             C::Cut => self.shell_commands.push(S::Copy { cut: true }),
             C::Copy => self.shell_commands.push(S::Copy { cut: false }),
             C::Paste => self.shell_commands.push(S::Paste),
