@@ -7,11 +7,9 @@
   "permissions": [
     "contextMenus",
     "storage",
-    "activeTab",
     "alarms",
     "scripting",
-    "cookies",
-    "tabs"
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"

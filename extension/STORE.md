@@ -37,7 +37,6 @@ Needs the Wall app on the same computer (or Wall on the web open in a tab). Noth
 - `<all_urls>` host access: fetch the right-clicked picture with the page's sign-in, take screenshots, read the video's current time for clip marks, and hand files to an open Wall page (content script `webwall.js`, only on wall.poncatoera.workers.dev and localhost).
 - `cookies`: only for vimeo.com, instagram.com, x.com, twitter.com, tiktok.com, facebook.com, threads.net and patreon.com, only when the user adds a video from one of them; passed to the Wall app at 127.0.0.1 for the download and deleted after.
 - `scripting`: area-screenshot overlay and reading the video's time, on the user's click.
-- `tabs`: find an open Wall page by its address.
 - No remote code; the background talks only to 127.0.0.1:47830.
 
 ## Testing notes for reviewers
@@ -47,9 +46,7 @@ The extension works with the Wall desktop app (Windows). Without it, open https:
 - Single purpose: Wall collects visual references from the web into the user's Wall boards. The user right-clicks a picture, video, link or page, or takes a screenshot, and the extension sends that item to the Wall desktop app on the same computer or to a Wall web page the user has open.
 - contextMenus: the "Add to Wall" right-click item on pictures, videos, links and pages, listing the boards to send to.
 - storage: the board last chosen and clip start/end marks, in extension storage only.
-- activeTab: screenshot of the visible page and its address/title, when the user clicks the toolbar button or a shortcut.
 - alarms: refresh the menu's board list once a minute while Wall is open (MV3 menus can't update as they open).
 - scripting: on the user's request only: area-screenshot overlay, reading a video's current time, fetching a picture the page loaded itself (blob: URLs).
 - cookies: as in "Permission notes" above.
-- tabs: find an open Wall web page by address; read the current tab's address and title.
-- Remote code: none. Data: not collected or transmitted to the developer or third parties.
+- Remote code: none. Data handled (disclose, don't tick "none"): site cookies for the listed video sites, page addresses and titles, and the content the user picks; all go only to the user's own Wall (app at 127.0.0.1 or their open Wall page), never to the developer or third parties.
