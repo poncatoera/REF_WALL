@@ -24,6 +24,13 @@
 // once instead of at their next poll. The key comes in the first message,
 // since a browser can't set headers on a WebSocket. Sockets hibernate, so
 // a quiet one costs nothing; the free plan counts 20 messages as a request.
+//
+// Follow and spotlight ride on the same socket: someone says whose view they
+// follow ({t:"follow"}), or that they bring everyone to theirs ({t:"spot"},
+// not from view-only links). A person sends their view ({t:"view"}: the
+// board area they see) only while followed or leading, and it goes only to
+// those following them; when they open another board, those following get a
+// {t:"goto"} first, so they can come along.
 import { DurableObject } from "cloudflare:workers";
 
 const SHARDS = 8;
@@ -271,6 +278,11 @@ async function gzip(text) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+// A connection id as the server makes them (see fetch), or null.
+function cleanId(v) {
+  return typeof v === "string" && /^[0-9a-f-]{1,20}$/.test(v) ? v : null;
+}
+
 function cleanColor(v) {
   return Number.isInteger(v) && v >= 0 && v < 8 ? v : null;
 }
@@ -366,7 +378,7 @@ export class LibraryDO extends DurableObject {
   }
 
   peer(a) {
-    return { id: a.id, name: a.name, color: a.color ?? null, x: a.x ?? null, y: a.y ?? null };
+    return { id: a.id, name: a.name, color: a.color ?? null, x: a.x ?? null, y: a.y ?? null, view: a.view ?? null, follow: a.follow ?? null, spot: !!a.spot };
   }
 
   // What someone who gave no name is called: "Guest (Nike team)" for a
@@ -408,6 +420,11 @@ export class LibraryDO extends DurableObject {
       a.color = cleanColor(m.color);
       a.board = null;
       a.at = 0;
+      a.vat = 0;
+      a.view = null;
+      // Following someone or leading carries over a reconnect.
+      a.follow = cleanId(m.follow);
+      a.spot = !!m.spot && access.role !== "view";
       ws.serializeAttachment(a);
       this.send(ws, { t: "welcome", id: a.id, seq: this.seq(), ...(a.fixed ? { name: a.name } : {}) });
       if (typeof m.board === "string") return this.join(ws, a, access, m.board);
@@ -434,14 +451,55 @@ export class LibraryDO extends DurableObject {
       ws.serializeAttachment(a);
       return this.tell(a.board, { t: "cursor", id: a.id, x: a.x, y: a.y }, ws);
     }
+    if (m.t === "view") {
+      const now = Date.now();
+      if (now - (a.vat || 0) < CURSOR_MS) return;
+      const ok = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e9;
+      if (![m.x, m.y, m.w, m.h].every(ok) || m.w <= 0 || m.h <= 0) return;
+      a.view = [m.x, m.y, m.w, m.h];
+      a.vat = now;
+      ws.serializeAttachment(a);
+      const msg = { t: "view", id: a.id, x: m.x, y: m.y, w: m.w, h: m.h };
+      for (const [w, o] of this.watchers(a, ws)) this.send(w, msg);
+      return;
+    }
+    if (m.t === "follow") {
+      a.follow = cleanId(m.id);
+      if (a.follow === a.id) a.follow = null;
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+    }
+    if (m.t === "spot") {
+      // Clients can follow, but not pull everyone along.
+      if (access.role === "view") return;
+      a.spot = !!m.on;
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+    }
+  }
+
+  // Those on a's board who see through a's eyes: following a, or everyone
+  // while a leads.
+  watchers(a, except) {
+    if (!a.board) return [];
+    return this.live().filter(([w, o]) => w !== except && o.board === a.board && (a.spot || o.follow === a.id));
   }
 
   // Moves a socket to `board` (or nowhere, if it may not look at it).
   join(ws, a, access, board) {
     if (a.board === board) return;
+    const next = this.reaches(access, board) ? board : null;
+    if (a.board && next) {
+      // Those following come along, if their link reaches that board too.
+      for (const [w, o] of this.watchers(a, ws)) {
+        const theirs = this.access(o.who);
+        if (theirs && this.reaches(theirs, next)) this.send(w, { t: "goto", id: a.id, board: next });
+      }
+    }
     if (a.board) this.tell(a.board, { t: "leave", id: a.id }, ws);
-    a.board = this.reaches(access, board) ? board : null;
+    a.board = next;
     a.x = a.y = null;
+    a.view = null;
     ws.serializeAttachment(a);
     if (!a.board) return this.send(ws, { t: "peers", board, peers: [] });
     const peers = this.live().filter(([w, o]) => w !== ws && o.board === a.board).map(([, o]) => this.peer(o));

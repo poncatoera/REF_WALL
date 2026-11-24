@@ -9,6 +9,7 @@ pub mod share;
 pub mod history;
 pub mod comments;
 pub mod presence;
+pub mod together;
 pub mod doc;
 mod drawing;
 pub mod menu;
@@ -343,6 +344,8 @@ pub struct App {
     new_media: Vec<snapshot::NewMedia>,
     /// Versions kept, and the history card (see `history`).
     history: history::History,
+    /// Following, spotlight and presenting (see `together`).
+    together: together::Together,
 }
 
 /// Find on the board: matches update as you type, Enter steps through them.
@@ -434,6 +437,7 @@ impl App {
             loader: Default::default(),
             new_media: Vec::new(),
             history: Default::default(),
+            together: Default::default(),
         }
     }
 
@@ -1075,6 +1079,16 @@ impl App {
             self.gesture = Gesture::Pan;
             return;
         }
+        if button == Button::Primary && self.together_press(pos) {
+            return;
+        }
+        if self.presenting() {
+            // Presenting: a drag moves the board, nothing else (no edits by accident).
+            if button == Button::Primary {
+                self.gesture = Gesture::Pan;
+            }
+            return;
+        }
         if self.history_press(button, pos) {
             return;
         }
@@ -1496,6 +1510,9 @@ impl App {
     pub fn key(&mut self, key: Key) {
         self.needs_redraw = true;
         if self.menu_open.take().is_some() && key == Key::Escape {
+            return;
+        }
+        if self.together_key(key) {
             return;
         }
         if self.history_key(key) || self.name_key(key) || self.share_key(key) || self.comment_key(key) || self.sidebar_key(key) {
@@ -2377,6 +2394,9 @@ impl App {
         // A version from the history card is drawn in place of the board.
         let swapped = self.history_swap();
         self.viewport = [size_px[0] as f32, size_px[1] as f32];
+        // Following someone or stepping through a presentation moves the view.
+        let gliding = self.together_tick();
+        let presenting = self.presenting();
         self.pump_pictures(renderer);
         let caret = self.caret_rect();
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
@@ -2446,7 +2466,7 @@ impl App {
         renderer.draw_boxes(&view, &overlays);
         renderer.draw_curves(&view, &self.overlay_curves());
         renderer.draw_curves_once(&view, &self.drawing_preview().1);
-        if let Some((query, at, total)) = self.search_status() {
+        if let Some((query, at, total)) = self.search_status().filter(|_| !presenting) {
             // Search box: top centre, constant size on screen.
             let px = 1.0 / self.camera.zoom;
             let (w, h) = (360.0, 40.0);
@@ -2466,7 +2486,7 @@ impl App {
             }
             renderer.draw_glyphs(&view, &glyphs);
         }
-        if !self.nav.is_empty() {
+        if !self.nav.is_empty() && !presenting {
             // Breadcrumb at the top-left, constant size on screen.
             let text = format!("{}   (Esc to go up)", self.breadcrumb().join("  ›  "));
             let size = 14.0 / self.camera.zoom;
@@ -2502,27 +2522,38 @@ impl App {
             }
             renderer.draw_glyphs(&screen, &hint);
         }
-        self.draw_panel(renderer);
-        self.draw_sidebar(renderer);
-        let redraw_library = self.library_layout().is_some();
+        // Presenting: only the board (and comments), no menus or panels.
+        if !presenting {
+            self.draw_panel(renderer);
+            self.draw_sidebar(renderer);
+        }
+        let redraw_library = !presenting && self.library_layout().is_some();
         self.needs_redraw = false;
         if redraw_library {
             // Sets needs_redraw again while thumbnails are still loading.
             self.draw_library(renderer);
         }
         self.draw_comments(renderer);
-        self.draw_zoom_pill(renderer);
-        self.draw_rail(renderer);
-        self.draw_pen_ui(renderer);
-        self.draw_share(renderer);
+        if !presenting {
+            self.draw_zoom_pill(renderer);
+            self.draw_rail(renderer);
+            self.draw_pen_ui(renderer);
+            self.draw_share(renderer);
+        }
         if swapped {
             self.history_swap();
         }
-        self.draw_history(renderer);
-        // The menu bar and its drop-downs go over everything, but for the
-        // badges of who's here, which sit in the bar.
-        self.draw_menu(renderer);
+        if !presenting {
+            self.draw_history(renderer);
+            // The menu bar and its drop-downs go over everything, but for the
+            // badges of who's here, which sit in the bar.
+            self.draw_menu(renderer);
+        }
         self.draw_presence(renderer);
+        self.draw_together(renderer);
+        if gliding {
+            self.needs_redraw = true;
+        }
     }
 }
 
@@ -3308,6 +3339,11 @@ impl App {
             C::TidySameHeight => _ = self.arrange(arrange::Arrange::SameHeight),
             C::TidyPack => _ = self.arrange(arrange::Arrange::Pack),
             C::TidyColour => _ = self.arrange(arrange::Arrange::Colour),
+            C::Present => self.start_presenting(),
+            C::Spotlight => {
+                let on = !self.spotlight_on();
+                self.set_spotlight(on);
+            }
         }
     }
 

@@ -82,6 +82,8 @@ pub enum Command {
     TidySameHeight,
     TidyPack,
     TidyColour,
+    Present,
+    Spotlight,
 }
 
 /// Commands the shell carries out, because they need the system.
@@ -113,6 +115,8 @@ pub enum ShellCommand {
     /// Versions and deleted boards, when there's no library folder; answer
     /// with `App::history_answer`.
     History(crate::history::HistoryAsk),
+    /// Fill the screen (presenting) or go back to a window.
+    Fullscreen(bool),
 }
 
 impl Command {
@@ -192,6 +196,9 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "View",
         entries: &[
+            ("Present this board", "Shift P", Some(Command::Present)),
+            ("Bring everyone to your view", "", Some(Command::Spotlight)),
+            SEP,
             ("Fit board", "F", Some(Command::FitBoard)),
             ("Zoom in", "+", Some(Command::ZoomIn)),
             ("Zoom out", "−", Some(Command::ZoomOut)),
