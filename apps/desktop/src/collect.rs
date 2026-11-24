@@ -87,6 +87,7 @@ pub struct Collector {
     next_job: u64,
     /// Video imports still converting: tag -> (job, meta).
     videos: HashMap<u64, (u64, Meta)>,
+    recent: Option<Recent>,
 }
 
 impl Collector {
@@ -120,7 +121,7 @@ impl Collector {
         clean_downloads();
         let (done_tx, done) = mpsc::channel();
         println!("wall: browser extension can send to 127.0.0.1:{port}");
-        Some(Self { asks, done_tx, done, wake: std::sync::Arc::new(wake), jobs: Vec::new(), next_job: 1, videos: HashMap::new() })
+        Some(Self { asks, done_tx, done, wake: std::sync::Arc::new(wake), jobs: Vec::new(), next_job: 1, videos: HashMap::new(), recent: None })
     }
 
     /// Answers the extension and brings in what arrived. Call from the
@@ -166,7 +167,7 @@ impl Collector {
             let Some((job, meta)) = self.videos.remove(&tag) else { continue };
             match item {
                 Some(id) => {
-                    place(app, id, &meta);
+                    self.place(app, id, &meta);
                     self.set_state(job, "added", None);
                     changed = true;
                 }
@@ -218,7 +219,7 @@ impl Collector {
         let before = failed.len();
         match crate::import_file(app, videos, path, failed) {
             Some(id) => {
-                place(app, id, &meta);
+                self.place(app, id, &meta);
                 self.set_state(job, "added", None);
                 true
             }
@@ -243,20 +244,46 @@ impl Collector {
             "version": env!("CARGO_PKG_VERSION"),
             "current": app.board_id(),
             "boards": boards,
-            "videoSites": ytdlp_path().is_some() || cfg!(any(windows, target_os = "macos")),
+            // yt-dlp is fetched when first needed, so video sites always work.
+            "videoSites": true,
             "jobs": jobs,
         })
     }
 }
 
-/// Notes where it came from and moves it to the chosen board.
-fn place(app: &mut App, id: Uuid, meta: &Meta) {
-    if let Some(page) = &meta.page {
-        app.set_item_source(id, page, meta.title.as_deref());
-    }
-    if let Some(b) = meta.board.filter(|b| *b != app.board_id() && app.has_board(*b)) {
-        app.select_only(id);
-        app.move_selection_to_board(b);
+/// Things sent within this long of each other on the open board are laid
+/// out side by side, like files dropped together.
+const ROW_SECS: u64 = 120;
+
+/// Sent things that landed on the open board lately.
+struct Recent {
+    board: Uuid,
+    ids: Vec<Uuid>,
+    centre: Option<(f64, f64)>,
+    at: Instant,
+}
+
+impl Collector {
+    /// Notes where it came from and moves it to the chosen board, or lays it
+    /// out beside the last things sent to the open board.
+    fn place(&mut self, app: &mut App, id: Uuid, meta: &Meta) {
+        app.set_item_source(id, meta.page.as_deref(), meta.title.as_deref());
+        if let Some(b) = meta.board.filter(|b| *b != app.board_id() && app.has_board(*b)) {
+            app.select_only(id);
+            app.move_selection_to_board(b);
+            return;
+        }
+        let board = app.board_id();
+        let mut r = self
+            .recent
+            .take()
+            .filter(|r| r.board == board && r.at.elapsed().as_secs() < ROW_SECS)
+            .unwrap_or(Recent { board, ids: Vec::new(), centre: None, at: Instant::now() });
+        r.ids.retain(|i| app.media_hash(i).is_some());
+        r.ids.push(id);
+        r.centre = app.arrange_imported(&r.ids, app.doc.undo_depth(), r.centre);
+        r.at = Instant::now();
+        self.recent = Some(r);
     }
 }
 
@@ -591,7 +618,9 @@ fn ytdlp(link: &Link) -> Result<PathBuf, String> {
     if link.start.is_some() || link.end.is_some() {
         let start = link.start.unwrap_or(0.0);
         let end = link.end.map_or("inf".to_owned(), |e| format!("{e:.2}"));
-        cmd.args(["--download-sections", &format!("*{start:.2}-{end}"), "--force-keyframes-at-cuts"]);
+        // Cut at the nearest keyframes: an exact cut makes yt-dlp re-encode
+        // the clip, and Wall would then encode it a second time.
+        cmd.args(["--download-sections", &format!("*{start:.2}-{end}")]);
     }
     // The site's sign-in, for posts only signed-in people can see. The file
     // is deleted as soon as yt-dlp is done.

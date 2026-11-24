@@ -35,15 +35,20 @@ impl App {
     }
 
     /// Records the web page a picture or video item came from (shown as
-    /// "Source" in the details panel). The title only fills an empty one.
-    pub fn set_item_source(&mut self, item: Uuid, url: &str, title: Option<&str>) {
+    /// "Source" in the details panel) and its title. A picture collected
+    /// before keeps its first source and title.
+    pub fn set_item_source(&mut self, item: Uuid, url: Option<&str>, title: Option<&str>) {
         let Some(hash) = self.media_hash(&item) else { return };
         let Some(sc) = self.sidecars.get_mut(&hash) else { return };
         if sc.source_url.is_some() {
-            return; // the same picture collected before keeps its first source
+            return;
         }
-        sc.source_url = Some(url.to_owned());
-        if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        let title = title.map(str::trim).filter(|t| !t.is_empty());
+        if url.is_none() && title.is_none() {
+            return;
+        }
+        sc.source_url = url.map(str::to_owned);
+        if let Some(t) = title {
             sc.title = Some(t.to_owned());
         }
         if let Some(lib) = &self.library {
@@ -72,8 +77,8 @@ mod tests {
         let mut png = Vec::new();
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 10, 10, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let id = app.import_image_bytes(&png, Some("x.png"), 1).unwrap();
-        app.set_item_source(id, "https://example.com/a", Some("A page"));
-        app.set_item_source(id, "https://example.com/b", None);
+        app.set_item_source(id, Some("https://example.com/a"), Some("A page"));
+        app.set_item_source(id, Some("https://example.com/b"), None);
         let hash = app.media_hash(&id).unwrap();
         assert_eq!(app.sidecars[&hash].source_url.as_deref(), Some("https://example.com/a"));
         assert_eq!(app.sidecars[&hash].title.as_deref(), Some("A page"));
