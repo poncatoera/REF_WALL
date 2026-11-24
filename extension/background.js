@@ -155,6 +155,11 @@ async function savedDest() {
 }
 
 async function resolveDest(dest) {
+  // The app isn't open but a Wall web tab is: that's the only place to send.
+  if (dest.kind === 'app' && !(await appStatus())) {
+    const [tab] = await webTabs();
+    if (tab) return { kind: 'web', tab: tab.id, name: tab.title };
+  }
   if (dest.kind === 'web') {
     const tabs = await webTabs();
     const tab = tabs.find((t) => t.id === dest.tab) || tabs[0];
