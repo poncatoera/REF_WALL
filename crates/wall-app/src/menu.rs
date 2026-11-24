@@ -138,11 +138,7 @@ pub enum ShellCommand {
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-<<<<<<< HEAD
-        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share)
-=======
         matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share | Command::BackUpTo | Command::ExportLibrary)
->>>>>>> origin/spike/renderer
     }
 }
 
