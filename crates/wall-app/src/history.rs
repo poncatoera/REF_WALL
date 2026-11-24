@@ -277,9 +277,9 @@ fn layout(i: &Inputs, hover: [f32; 2], viewport: [f32; 2], tw: &mut dyn FnMut(&s
                             Row::Head(_) => false,
                         };
                         if on {
-                            boxes.push(PanelBox { rect: r, fill: t.field, stroke: t.accent, radius: 6.0, stroke_w: 1.0 });
+                            boxes.push(PanelBox { rect: r, fill: t.field, stroke: t.accent, radius: crate::theme::radius::INNER, stroke_w: 1.0 });
                         } else if panel::inside(r, hover) {
-                            boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: 6.0, stroke_w: 0.0 });
+                            boxes.push(PanelBox { rect: r, fill: t.hover, stroke: [0.0; 4], radius: crate::theme::radius::INNER, stroke_w: 0.0 });
                         }
                         let (label, sub, hit) = match row {
                             Row::Now => ("Now".to_owned(), format!("{} things", i.items_now), Hit::Now),
@@ -336,7 +336,7 @@ fn layout(i: &Inputs, hover: [f32; 2], viewport: [f32; 2], tw: &mut dyn FnMut(&s
             for d in deleted.iter().skip(scroll).take(fits) {
                 let r = [x0 + 6.0, y, W - 12.0, row_h];
                 if panel::inside(r, hover) {
-                    boxes.push(PanelBox { rect: r, fill: t.field, stroke: [0.0; 4], radius: 6.0, stroke_w: 0.0 });
+                    boxes.push(PanelBox { rect: r, fill: t.hover, stroke: [0.0; 4], radius: crate::theme::radius::INNER, stroke_w: 0.0 });
                 }
                 let name = panel::fit_with(tw, &d.name, 13.0, inner - 90.0);
                 texts.push(TextRun { text: name, at: [r[0] + 10.0, y + 19.0], size: 13.0, color: t.ink });
@@ -381,7 +381,8 @@ fn lower_first(s: &str) -> String {
 fn finish(mut l: Layout, x0: f32, y0: f32, y: f32, boxes: Vec<PanelBox>, texts: Vec<TextRun>, hits: Vec<([f32; 4], Hit)>, hover: [f32; 2], tw: &mut dyn FnMut(&str, f32) -> f32) -> Layout {
     let t = theme::t();
     l.rect = [x0, y0, W, y + PAD - y0];
-    l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: 12.0, stroke_w: 1.0 });
+    l.boxes.push(crate::theme::shadow(l.rect, crate::theme::radius::PANEL));
+    l.boxes.push(PanelBox { rect: l.rect, fill: t.panel_bg, stroke: t.line, radius: crate::theme::radius::PANEL, stroke_w: 1.0 });
     l.boxes.extend(boxes);
     l.texts = texts;
     // Buttons were put in `l.hits` while laying out; draw them now.
@@ -395,8 +396,8 @@ fn finish(mut l: Layout, x0: f32, y0: f32, y: f32, boxes: Vec<PanelBox>, texts: 
             _ => ("", false),
         };
         let over = panel::inside(r, hover);
-        let (fill, stroke, ink) = if primary { (t.accent, [0.0; 4], t.panel_bg) } else { (if over { t.field } else { [0.0; 4] }, t.line, t.ink) };
-        l.boxes.push(PanelBox { rect: r, fill, stroke, radius: 7.0, stroke_w: if primary { 0.0 } else { 1.0 } });
+        let (fill, stroke, ink) = if primary { (t.accent, [0.0; 4], t.accent_ink) } else { (if over { t.hover } else { [0.0; 4] }, t.line, t.ink) };
+        l.boxes.push(PanelBox { rect: r, fill, stroke, radius: crate::theme::radius::CONTROL, stroke_w: if primary { 0.0 } else { 1.0 } });
         let w = tw(label, 12.5);
         l.texts.push(TextRun { text: label.into(), at: [r[0] + (r[2] - w) / 2.0, r[1] + r[3] / 2.0 + 4.5], size: 12.5, color: ink });
         l.hits.push((r, hit));
@@ -820,8 +821,9 @@ impl App {
         if let Some((_, text)) = l.banner.take() {
             let w = panel::text_width(&mut self.font, &text, 13.0) + 32.0;
             let r = [((self.viewport[0] - W - 24.0 - w) / 2.0).max(8.0), BAR + 12.0, w, 34.0];
-            l.boxes.push(PanelBox { rect: r, fill: t.accent, stroke: [0.0; 4], radius: 17.0, stroke_w: 0.0 });
-            l.texts.push(TextRun { text, at: [r[0] + 16.0, r[1] + 22.0], size: 13.0, color: t.panel_bg });
+            l.boxes.push(theme::shadow(r, theme::radius::CONTROL));
+            l.boxes.push(PanelBox { rect: r, fill: t.accent, stroke: [0.0; 4], radius: theme::radius::CONTROL, stroke_w: 0.0 });
+            l.texts.push(TextRun { text, at: [r[0] + 16.0, r[1] + 22.0], size: 13.0, color: t.accent_ink });
         }
         let view = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
         let boxes: Vec<BoxInstance> = l.boxes.iter().map(|b| BoxInstance { rect: b.rect, fill: b.fill, stroke: b.stroke, shape: [b.radius, b.stroke_w] }).collect();

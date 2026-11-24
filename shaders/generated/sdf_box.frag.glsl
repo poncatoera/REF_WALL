@@ -31,23 +31,25 @@ smooth in vec2 _vs2fs_location4;
 layout(location = 0) out vec4 _fs2p_location0;
 
 void fs_main_1() {
-    vec2 _e13 = i_u002e_shape_1;
-    vec2 _e15 = i_u002e_half_size_1;
+    vec2 _e15 = i_u002e_shape_1;
     vec2 _e17 = i_u002e_half_size_1;
-    float _e20 = min(_e13.x, min(_e15.x, _e17.y));
-    vec2 _e21 = i_u002e_local_1;
-    vec2 _e22 = i_u002e_half_size_1;
-    vec2 _e26 = ((abs(_e21) - _e22) + vec2(_e20));
-    float _e34 = ((length(max(_e26, vec2(0.0, 0.0))) + min(max(_e26.x, _e26.y), 0.0)) - _e20);
-    float _e36 = _group_0_binding_0.pixel;
-    vec2 _e41 = i_u002e_shape_1;
-    float _soft = max(-(_e41.y), 0.0);
-    float _k = step(0.0001, _soft);
-    float _e37 = mix((_e36 * -0.5), (-2.0 * _soft), _k);
-    float _e38 = mix((_e36 * 0.5), 0.0, _k);
-    vec4 _e45 = i_u002e_fill_1;
-    vec4 _e46 = i_u002e_stroke_1;
-    entryPointParam_fs_main = (mix(_e45, _e46, vec4(smoothstep(_e37, _e38, (_e34 + max(_e41.y, 0.0))))) * (1.0 - smoothstep(_e37, _e38, _e34)));
+    vec2 _e19 = i_u002e_half_size_1;
+    float _e22 = min(_e15.x, min(_e17.x, _e19.y));
+    vec2 _e23 = i_u002e_local_1;
+    vec2 _e24 = i_u002e_half_size_1;
+    vec2 _e28 = ((abs(_e23) - _e24) + vec2(_e22));
+    float _e36 = ((length(max(_e28, vec2(0.0, 0.0))) + min(max(_e28.x, _e28.y), 0.0)) - _e22);
+    vec2 _e37 = i_u002e_shape_1;
+    float _e40 = max(-(_e37.y), 0.0);
+    float _e41 = step(0.0001, _e40);
+    float _e43 = _group_0_binding_0.pixel;
+    float _e46 = mix((_e43 * -0.5), (-2.0 * _e40), _e41);
+    float _e47 = _group_0_binding_0.pixel;
+    float _e49 = mix((_e47 * 0.5), 0.0, _e41);
+    vec2 _e52 = i_u002e_shape_1;
+    vec4 _e57 = i_u002e_fill_1;
+    vec4 _e58 = i_u002e_stroke_1;
+    entryPointParam_fs_main = (mix(_e57, _e58, vec4(smoothstep(_e46, _e49, (_e36 + max(_e52.y, 0.0))))) * (1.0 - smoothstep(_e46, _e49, _e36)));
     return;
 }
 

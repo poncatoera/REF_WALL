@@ -148,7 +148,8 @@ enum Gesture {
     /// Ctrl/Cmd-dragging a corner of a picture: crops instead of scaling.
     Crop { original: BoardItem, start: [f32; 2], left: bool, top: bool },
     /// Dragging an item's bottom-right handle.
-    Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64>, attached: Vec<BoardItem> },
+    /// `left`/`top`: which corner is held; the opposite one stays put.
+    Resize { original: BoardItem, start: [f32; 2], aspect: Option<f64>, attached: Vec<BoardItem>, left: bool, top: bool },
     /// Dragging along a video's scrub strip.
     Scrub { hash: ContentHash, x: f32, w: f32, duration: f64 },
     /// Dragging a tool out of the rail; released on the board, it makes
@@ -1158,11 +1159,11 @@ impl App {
                 return;
             }
         }
-        if let Some(item) = self.resize_handle_at(board) {
+        if let Some((item, left, top)) = self.resize_handle_at(board) {
             // Pictures and videos keep their shape unless Shift is held.
             let aspect = matches!(item.kind, ItemKind::Media { .. }).then(|| item.frame.w / item.frame.h.max(1e-6)).filter(|_| !mods.shift);
             let attached = self.lines_on(&[item.id].into());
-            self.gesture = Gesture::Resize { original: item, start: board, aspect, attached };
+            self.gesture = Gesture::Resize { original: item, start: board, aspect, attached, left, top };
             return;
         }
         if let Some((id, k)) = hit.and_then(|id| self.todo_box_at(id, board).map(|k| (id, k))) {
@@ -1338,11 +1339,13 @@ impl App {
                 let item = crop_item(original, [(board[0] - start[0]) as f64, (board[1] - start[1]) as f64], *left, *top);
                 self.doc.preview(item);
             }
-            Gesture::Resize { original, start, aspect, attached } => {
+            Gesture::Resize { original, start, aspect, attached, left, top } => {
                 let mut item = original.clone();
                 let min = 20.0;
-                item.frame.w = (original.frame.w + (board[0] - start[0]) as f64).max(min);
-                item.frame.h = (original.frame.h + (board[1] - start[1]) as f64).max(min);
+                let (dx, dy) = ((board[0] - start[0]) as f64, (board[1] - start[1]) as f64);
+                let o = original.frame;
+                item.frame.w = (if *left { o.w - dx } else { o.w + dx }).max(min);
+                item.frame.h = (if *top { o.h - dy } else { o.h + dy }).max(min);
                 if let Some(a) = *aspect {
                     // Follow whichever side moved more, keeping the shape.
                     if item.frame.w / a > item.frame.h {
@@ -1350,6 +1353,13 @@ impl App {
                     } else {
                         item.frame.w = item.frame.h * a;
                     }
+                }
+                // The corner opposite the one held stays where it was.
+                if *left {
+                    item.frame.x = o.x + o.w - item.frame.w;
+                }
+                if *top {
+                    item.frame.y = o.y + o.h - item.frame.h;
                 }
                 let lines: Vec<BoardItem> = attached.iter().map(|l| drawing::follow_frame(l, original.frame, item.frame)).collect();
                 self.doc.preview(item);
@@ -1846,13 +1856,22 @@ impl App {
 
     // ---- arranging ---------------------------------------------------------
 
-    /// The single selected item, if its resize handle is under a board point.
-    fn resize_handle_at(&self, board: [f32; 2]) -> Option<BoardItem> {
+    /// The single selected item, if one of its four resize handles is under
+    /// a board point: (item, is left corner, is top corner). Not for arrows
+    /// and lines, which have no handles.
+    fn resize_handle_at(&self, board: [f32; 2]) -> Option<(BoardItem, bool, bool)> {
         let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] else { return None };
-        let item = self.doc.item(&id)?;
+        let item = self.doc.item(&id).filter(|i| !matches!(i.kind, ItemKind::Arrow { .. }))?;
         let r = HANDLE_PX / self.camera.zoom;
-        let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
-        ((board[0] - hx).abs() <= r && (board[1] - hy).abs() <= r).then(|| item.clone())
+        let f = item.frame;
+        for (left, top) in [(false, false), (true, false), (false, true), (true, true)] {
+            let hx = if left { f.x } else { f.x + f.w } as f32;
+            let hy = if top { f.y } else { f.y + f.h } as f32;
+            if (board[0] - hx).abs() <= r && (board[1] - hy).abs() <= r {
+                return Some((item.clone(), left, top));
+            }
+        }
+        None
     }
 
     /// A corner of the single selected picture under a board point:
@@ -2384,13 +2403,17 @@ impl App {
         if let [id] = self.selection.iter().copied().collect::<Vec<_>>()[..] {
             if let (Some(item), None) = (self.doc.item(&id), &self.editing) {
                 let px = 1.0 / self.camera.zoom;
-                let (hx, hy) = ((item.frame.x + item.frame.w) as f32, (item.frame.y + item.frame.h) as f32);
-                overlays.push(wall_render::BoxInstance {
-                    rect: [hx - 4.5 * px, hy - 4.5 * px, 9.0 * px, 9.0 * px],
-                    fill: [1.0; 4],
-                    stroke: theme::t().accent,
-                    shape: [2.0 * px, 1.5 * px],
-                });
+                if !matches!(item.kind, ItemKind::Arrow { .. }) {
+                    let f = item.frame;
+                    for (hx, hy) in [(f.x, f.y), (f.x + f.w, f.y), (f.x, f.y + f.h), (f.x + f.w, f.y + f.h)] {
+                        overlays.push(wall_render::BoxInstance {
+                            rect: [hx as f32 - 4.0 * px, hy as f32 - 4.0 * px, 8.0 * px, 8.0 * px],
+                            fill: [1.0; 4],
+                            stroke: theme::t().accent,
+                            shape: [2.0 * px, 1.5 * px],
+                        });
+                    }
+                }
             }
         }
         if let Some(r) = caret {
@@ -2449,7 +2472,7 @@ impl App {
             let size = 14.0 / self.camera.zoom;
             let at = self.camera.screen_to_board([16.0, menu::BAR + 24.0], self.viewport);
             let mut crumb = Vec::new();
-            scene::add_text(&mut self.font, &mut crumb, &text, at, size, [0.7, 0.72, 0.78, 1.0]);
+            scene::add_text(&mut self.font, &mut crumb, &text, at, size, theme::t().dim);
             if self.font.atlas.dirty {
                 renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
                 self.font.atlas.dirty = false;
@@ -2457,18 +2480,27 @@ impl App {
             renderer.draw_glyphs(&view, &crumb);
         }
         if self.doc.board.live_items().next().is_none() {
-            // Empty board: a hint in the middle of the screen, constant size.
+            // Empty board: a quiet drop area in the middle of the screen.
+            let t = theme::t();
+            let screen = ViewUniform::new([self.viewport[0] / 2.0, self.viewport[1] / 2.0], 1.0, self.viewport);
+            let (w, h) = (440.0f32.min(self.viewport[0] - 32.0), 150.0);
+            let r = [(self.viewport[0] - w) / 2.0, (self.viewport[1] - h) / 2.0, w, h];
+            renderer.draw_boxes(&screen, &[wall_render::BoxInstance { rect: r, fill: t.hover, stroke: t.line, shape: [theme::radius::PANEL, 1.0] }]);
             let mut hint = Vec::new();
-            let size = 18.0 / self.camera.zoom;
-            let text = "Drop images here";
-            let width = self.font.layout_line(text).width * size;
-            let c = self.camera.center;
-            scene::add_text(&mut self.font, &mut hint, text, [c[0] - width / 2.0, c[1]], size, [0.45, 0.46, 0.5, 1.0]);
+            let lines: [(&str, f32, [f32; 4]); 2] = [
+                ("Drop pictures or videos here", 17.0, t.ink),
+                ("Double-click for a note  ·  B new board  ·  S your boards", 12.5, t.dim),
+            ];
+            for (k, (text, size, ink)) in lines.into_iter().enumerate() {
+                let tw = self.font.layout_line(text).width * size;
+                let y = r[1] + if k == 0 { 66.0 } else { 96.0 };
+                scene::add_text(&mut self.font, &mut hint, text, [r[0] + (w - tw) / 2.0, y], size, ink);
+            }
             if self.font.atlas.dirty {
                 renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
                 self.font.atlas.dirty = false;
             }
-            renderer.draw_glyphs(&view, &hint);
+            renderer.draw_glyphs(&screen, &hint);
         }
         self.draw_panel(renderer);
         self.draw_sidebar(renderer);
@@ -3682,6 +3714,13 @@ mod tests {
         a.pointer_up(Button::Primary, [760.0, 400.0]);
         let fr = a.doc.item(&n).unwrap().frame;
         assert_eq!((fr.w, fr.h), (160.0, 300.0));
+        // The top-left handle: the bottom-right corner stays put.
+        let (x1, y1) = (fr.x + fr.w, fr.y + fr.h);
+        a.pointer_down(Button::Primary, [fr.x as f32, fr.y as f32], Mods::default());
+        a.pointer_move([fr.x as f32 - 40.0, fr.y as f32 + 50.0]);
+        a.pointer_up(Button::Primary, [fr.x as f32 - 40.0, fr.y as f32 + 50.0]);
+        let g = a.doc.item(&n).unwrap().frame;
+        assert_eq!((g.w, g.h, g.x + g.w, g.y + g.h), (200.0, 250.0, x1, y1));
     }
 
     #[test]
