@@ -29,11 +29,21 @@ pub struct LivePeer {
     pub name: String,
     pub at: Option<[f32; 2]>,
     pub color: Option<u8>,
+    /// The board area they see, while someone follows them or they lead.
+    pub view: Option<[f32; 4]>,
+    /// Whose view they follow.
+    pub follow: Option<String>,
+    /// They bring everyone to their view.
+    pub spot: bool,
 }
 
 pub enum LiveEvent {
     /// Everyone on the board now (besides us).
     Peers(Vec<LivePeer>),
+    /// Our connection id (what others' `follow` names).
+    Me(String),
+    /// Someone we follow opened another board.
+    Goto { id: String, board: Uuid },
     /// Something changed in the library: pull now.
     Changed,
     /// The key or link doesn't work: the connection stopped for good.
@@ -45,6 +55,9 @@ enum Out {
     Cursor(Option<[f32; 2]>),
     Name(String),
     Color(Option<u8>),
+    View(Option<[f32; 4]>),
+    Follow(Option<String>),
+    Spot(bool),
 }
 
 pub struct Live {
@@ -87,6 +100,21 @@ impl Live {
         let _ = self.tx.send(Out::Color(color));
     }
 
+    /// The board area we see, while followed or leading (None: don't send).
+    pub fn view(&self, view: Option<[f32; 4]>) {
+        let _ = self.tx.send(Out::View(view));
+    }
+
+    /// Whose view we follow now.
+    pub fn follow(&self, id: Option<String>) {
+        let _ = self.tx.send(Out::Follow(id));
+    }
+
+    /// We bring everyone to our view.
+    pub fn spot(&self, on: bool) {
+        let _ = self.tx.send(Out::Spot(on));
+    }
+
     pub fn try_event(&self) -> Option<LiveEvent> {
         self.rx.try_recv().ok()
     }
@@ -125,6 +153,10 @@ struct In {
     x: Option<f32>,
     #[serde(default)]
     y: Option<f32>,
+    #[serde(default)]
+    w: Option<f32>,
+    #[serde(default)]
+    h: Option<f32>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -137,11 +169,17 @@ struct WirePeer {
     y: Option<f32>,
     #[serde(default)]
     color: Option<u8>,
+    #[serde(default)]
+    view: Option<[f32; 4]>,
+    #[serde(default)]
+    follow: Option<String>,
+    #[serde(default)]
+    spot: bool,
 }
 
 impl From<WirePeer> for LivePeer {
     fn from(p: WirePeer) -> Self {
-        LivePeer { id: p.id, name: p.name, at: p.x.zip(p.y).map(|(x, y)| [x, y]), color: p.color }
+        LivePeer { id: p.id, name: p.name, at: p.x.zip(p.y).map(|(x, y)| [x, y]), color: p.color, view: p.view, follow: p.follow, spot: p.spot }
     }
 }
 
@@ -151,11 +189,14 @@ struct Here {
     cursor: Option<[f32; 2]>,
     name: String,
     color: Option<u8>,
+    view: Option<[f32; 4]>,
+    follow: Option<String>,
+    spot: bool,
     peers: BTreeMap<String, LivePeer>,
 }
 
 fn run(url: String, key: String, name: String, color: Option<u8>, inbox: Receiver<Out>, out: Sender<LiveEvent>) {
-    let mut here = Here { board: None, cursor: None, name, color, peers: BTreeMap::new() };
+    let mut here = Here { board: None, cursor: None, name, color, view: None, follow: None, spot: false, peers: BTreeMap::new() };
     let mut retry = Duration::from_secs(1);
     loop {
         let started = Instant::now();
@@ -204,6 +245,9 @@ impl Here {
             Out::Cursor(c) => self.cursor = c,
             Out::Name(n) => self.name = n,
             Out::Color(c) => self.color = c,
+            Out::View(v) => self.view = v,
+            Out::Follow(f) => self.follow = f,
+            Out::Spot(s) => self.spot = s,
         }
     }
 }
@@ -223,13 +267,17 @@ fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &S
     let Ok((mut ws, _)) = tungstenite::client::connect_with_config(url, Some(limits), 0) else { return End::Lost };
     set_timeout(&ws, Some(POLL));
     let send = |ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, v: serde_json::Value| ws.send(Message::text(v.to_string())).is_ok();
-    let hello = json!({ "t": "hello", "key": key, "board": here.board.map(|b| b.to_string()), "name": here.name, "color": here.color });
+    let hello = json!({ "t": "hello", "key": key, "board": here.board.map(|b| b.to_string()), "name": here.name, "color": here.color, "follow": here.follow, "spot": here.spot });
     if !send(&mut ws, hello) {
         return End::Lost;
     }
     let mut sent_board = here.board;
     let mut sent_name = here.name.clone();
     let mut sent_color = here.color;
+    let mut sent_follow = here.follow.clone();
+    let mut sent_spot = here.spot;
+    let mut sent_view: Option<[f32; 4]> = None;
+    let mut last_view = Instant::now() - CURSOR_EVERY;
     let mut sent_cursor: Option<Option<[f32; 2]>> = None;
     let mut last_cursor = Instant::now() - CURSOR_EVERY;
     let mut last_ping = Instant::now();
@@ -269,6 +317,28 @@ fn session(url: &str, key: &str, here: &mut Here, inbox: &Receiver<Out>, out: &S
                 return End::Lost;
             }
             sent_color = here.color;
+        }
+        if here.follow != sent_follow {
+            if !send(&mut ws, json!({ "t": "follow", "id": here.follow })) {
+                return End::Lost;
+            }
+            sent_follow = here.follow.clone();
+        }
+        if here.spot != sent_spot {
+            if !send(&mut ws, json!({ "t": "spot", "on": here.spot })) {
+                return End::Lost;
+            }
+            sent_spot = here.spot;
+            sent_view = None;
+        }
+        if let Some(v) = here.view.filter(|_| !here.peers.is_empty()) {
+            if sent_view != Some(v) && last_view.elapsed() >= CURSOR_EVERY {
+                if !send(&mut ws, json!({ "t": "view", "x": v[0], "y": v[1], "w": v[2], "h": v[3] })) {
+                    return End::Lost;
+                }
+                sent_view = Some(v);
+                last_view = Instant::now();
+            }
         }
         if here.peers.is_empty() {
             sent_cursor = None; // nobody to see it: nothing to send
@@ -321,7 +391,27 @@ impl Here {
     fn apply(&mut self, m: In, out: &Sender<LiveEvent>) -> bool {
         let before = self.peers.clone();
         match m.t.as_str() {
-            "welcome" | "poke" => return out.send(LiveEvent::Changed).is_ok(),
+            "welcome" => {
+                if let Some(id) = m.id {
+                    if out.send(LiveEvent::Me(id)).is_err() {
+                        return false;
+                    }
+                }
+                return out.send(LiveEvent::Changed).is_ok();
+            }
+            "poke" => return out.send(LiveEvent::Changed).is_ok(),
+            "goto" => {
+                let board = m.board.as_deref().and_then(|b| Uuid::parse_str(b).ok());
+                if let (Some(id), Some(board)) = (m.id, board) {
+                    return out.send(LiveEvent::Goto { id, board }).is_ok();
+                }
+                return true;
+            }
+            "view" => {
+                if let (Some(p), Some(x), Some(y), Some(w), Some(h)) = (m.id.and_then(|id| self.peers.get_mut(&id)), m.x, m.y, m.w, m.h) {
+                    p.view = Some([x, y, w, h]);
+                }
+            }
             "peers" => {
                 if m.board.as_deref() != self.board.map(|b| b.to_string()).as_deref() {
                     return true;
@@ -369,11 +459,11 @@ mod tests {
     fn messages_keep_the_list_of_people() {
         let (tx, rx) = channel();
         let board = Uuid::new_v4();
-        let mut h = Here { board: Some(board), cursor: None, name: "Paul".into(), color: None, peers: BTreeMap::new() };
+        let mut h = Here { board: Some(board), cursor: None, name: "Paul".into(), color: None, view: None, follow: None, spot: false, peers: BTreeMap::new() };
         let m = |s: &str| serde_json::from_str::<In>(s).unwrap();
         let peers = format!(r#"{{"t":"peers","board":"{board}","peers":[{{"id":"a","name":"Mia","x":1,"y":2}}]}}"#);
         assert!(h.apply(m(&peers), &tx));
-        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p == vec![LivePeer { id: "a".into(), name: "Mia".into(), at: Some([1.0, 2.0]), color: None }]));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p == vec![LivePeer { id: "a".into(), name: "Mia".into(), at: Some([1.0, 2.0]), color: None, view: None, follow: None, spot: false }]));
         // For another board (an answer that crossed a board change): ignored.
         let other = r#"{"t":"peers","board":"00000000-0000-0000-0000-000000000000","peers":[]}"#;
         assert!(h.apply(m(other), &tx));
@@ -386,5 +476,15 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p.len() == 1 && p[0].name == "Ben"));
         assert!(h.apply(m(r#"{"t":"poke","seq":9}"#), &tx));
         assert!(matches!(rx.try_recv(), Ok(LiveEvent::Changed)));
+        // Following: their view, and the board they went to.
+        assert!(h.apply(m(r#"{"t":"peer","peer":{"id":"b","name":"Ben","spot":true,"follow":null}}"#), &tx));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p[0].spot));
+        assert!(h.apply(m(r#"{"t":"view","id":"b","x":1,"y":2,"w":300,"h":200}"#), &tx));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Peers(p)) if p[0].view == Some([1.0, 2.0, 300.0, 200.0])));
+        let goto = format!(r#"{{"t":"goto","id":"b","board":"{board}"}}"#);
+        assert!(h.apply(m(&goto), &tx));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Goto { id, board: b }) if id == "b" && b == board));
+        assert!(h.apply(m(r#"{"t":"welcome","id":"me1","seq":1}"#), &tx));
+        assert!(matches!(rx.try_recv(), Ok(LiveEvent::Me(id)) if id == "me1"));
     }
 }

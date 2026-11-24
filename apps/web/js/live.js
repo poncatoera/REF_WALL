@@ -15,6 +15,13 @@ let seq = 0; // last change the server announced
 let pokeWaiters = [];
 let retry = 1000;
 let stopped = false;
+let myId = ""; // our connection id, from the welcome
+let follow = null; // whose view we follow (an id), or null
+let spot = false; // we bring everyone to our view
+let view = null; // [x, y, w, h], the latest to send
+let sentView = null;
+let viewTimer = null;
+let gotos = []; // {id, board}: someone we follow opened another board
 
 const NAME_KEY = "wall.name";
 const COLOR_KEY = "wall.color";
@@ -69,8 +76,9 @@ function connect() {
   let pinger = null;
   s.onopen = () => {
     retry = 1000;
-    s.send(JSON.stringify({ t: "hello", key, board, name: myName(), color: myColor() }));
+    s.send(JSON.stringify({ t: "hello", key, board, name: myName(), color: myColor(), follow, spot }));
     sentCursor = undefined;
+    sentView = null;
     // Answered by the server without waking it up (not billed).
     pinger = setInterval(() => s.readyState === WebSocket.OPEN && s.send("ping"), 30000);
   };
@@ -87,6 +95,7 @@ function connect() {
       fixedName = m.name;
       document.getElementById("wall-name")?.closest("form")?.remove();
     }
+    if (m.t === "welcome" && typeof m.id === "string") myId = m.id;
     if (m.t === "welcome" || m.t === "poke") {
       seq = Math.max(seq, m.seq || 0);
       const w = pokeWaiters;
@@ -108,6 +117,14 @@ function connect() {
         p.y = m.y;
         changed = true;
       }
+    } else if (m.t === "view") {
+      const p = peers.get(m.id);
+      if (p) {
+        p.view = [m.x, m.y, m.w, m.h];
+        changed = true;
+      }
+    } else if (m.t === "goto" && typeof m.board === "string") {
+      gotos.push({ id: m.id, board: m.board });
     } else if (m.t === "leave") {
       peers.delete(m.id);
       changed = true;
@@ -162,6 +179,61 @@ function flushCursor() {
   sentCursor = cursor;
   send(cursor ? { t: "cursor", x: cursor[0], y: cursor[1] } : { t: "cursor", x: null, y: null });
   cursorTimer = setTimeout(flushCursor, 100);
+}
+
+// The part of the board this person sees, [x, y, w, h], while someone
+// follows them or they lead (else null); sent at most 10 times a second.
+export function liveView(x, y, w, h) {
+  view = x === undefined || x === null ? null : [x, y, w, h];
+  if (viewTimer) return;
+  flushView();
+}
+
+function flushView() {
+  if (!view || !peers.size || (sentView && sentView.every((v, i) => v === view[i]))) {
+    viewTimer = null;
+    return;
+  }
+  sentView = view;
+  send({ t: "view", x: view[0], y: view[1], w: view[2], h: view[3] });
+  viewTimer = setTimeout(flushView, 100);
+}
+
+// Whose view this person follows now ("" for nobody).
+export function liveFollow(id) {
+  const f = id || null;
+  if (f === follow) return;
+  follow = f;
+  send({ t: "follow", id: f });
+}
+
+// This person brings everyone to their view (spotlight, presenting).
+export function liveSpot(on) {
+  if (!!on === spot) return;
+  spot = !!on;
+  sentView = null;
+  send({ t: "spot", on: spot });
+}
+
+// Our connection id ("" until the server said hello).
+export function liveMyId() {
+  return myId;
+}
+
+// Boards someone we follow went to, as JSON [{id, board}], if any.
+export function liveTakeGotos() {
+  if (!gotos.length) return undefined;
+  const g = JSON.stringify(gotos);
+  gotos = [];
+  return g;
+}
+
+// Fill the screen while presenting, or go back.
+export function liveFullscreen(on) {
+  try {
+    if (on && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    else if (!on && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  } catch {}
 }
 
 // The name this person chose here, or "" if none yet. A name that comes

@@ -44,6 +44,7 @@ pub enum Command {
     OpenLibrary,
     NewLibrary,
     ImportOldWall,
+    InstallExtension,
     ExportImage,
     ExportPdf,
     Share,
@@ -83,6 +84,8 @@ pub enum Command {
     TidySameHeight,
     TidyPack,
     TidyColour,
+    Present,
+    Spotlight,
     WelcomeTour,
 }
 
@@ -103,6 +106,9 @@ pub enum ShellCommand {
     ExportPdf,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
+    /// Show how to add the browser extension (its folder, the browser's
+    /// extensions page and the steps).
+    InstallExtension,
     /// Open a web address in the browser.
     OpenUrl(String),
     /// Put this text on the clipboard (a palette colour's hex code).
@@ -117,12 +123,14 @@ pub enum ShellCommand {
     /// Versions and deleted boards, when there's no library folder; answer
     /// with `App::history_answer`.
     History(crate::history::HistoryAsk),
+    /// Fill the screen (presenting) or go back to a window.
+    Fullscreen(bool),
 }
 
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::Share)
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share)
     }
 }
 
@@ -143,6 +151,7 @@ pub const MENUS: &[Menu] = &[
             ("Open library…", "", Some(Command::OpenLibrary)),
             ("New library…", "", Some(Command::NewLibrary)),
             ("Import old Wall library…", "", Some(Command::ImportOldWall)),
+            ("Install browser extension…", "", Some(Command::InstallExtension)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
             ("Export board as PDF, with comments…", "", Some(Command::ExportPdf)),
@@ -197,6 +206,9 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "View",
         entries: &[
+            ("Present this board", "Shift P", Some(Command::Present)),
+            ("Bring everyone to your view", "", Some(Command::Spotlight)),
+            SEP,
             ("Fit board", "F", Some(Command::FitBoard)),
             ("Zoom in", "+", Some(Command::ZoomIn)),
             ("Zoom out", "−", Some(Command::ZoomOut)),

@@ -43,6 +43,18 @@ extern "C" {
     fn live_my_color() -> i32;
     #[wasm_bindgen(js_name = liveSetColor)]
     fn live_set_color(c: u8);
+    #[wasm_bindgen(js_name = liveView)]
+    fn live_view(x: JsValue, y: JsValue, w: JsValue, h: JsValue);
+    #[wasm_bindgen(js_name = liveFollow)]
+    fn live_follow(id: &str);
+    #[wasm_bindgen(js_name = liveSpot)]
+    fn live_spot(on: bool);
+    #[wasm_bindgen(js_name = liveMyId)]
+    fn live_my_id() -> String;
+    #[wasm_bindgen(js_name = liveTakeGotos)]
+    fn live_take_gotos() -> JsValue;
+    #[wasm_bindgen(js_name = liveFullscreen)]
+    fn live_fullscreen(on: bool);
 }
 
 /// A colour picked on the board.
@@ -134,10 +146,16 @@ async fn history_call(key: &str, ask: wall_app::HistoryAsk) -> wall_app::History
     }
 }
 
+/// Fill the screen (presenting) or go back.
+pub fn fullscreen(on: bool) {
+    live_fullscreen(on);
+}
+
 /// What this page last told the live connection.
 struct Live {
     board: Option<Uuid>,
     cursor: Option<[f32; 2]>,
+    view: Option<[f32; 4]>,
 }
 
 thread_local! {
@@ -152,6 +170,18 @@ struct LivePeer {
     y: Option<f32>,
     #[serde(default)]
     color: Option<u8>,
+    #[serde(default)]
+    view: Option<[f32; 4]>,
+    #[serde(default)]
+    follow: Option<String>,
+    #[serde(default)]
+    spot: bool,
+}
+
+#[derive(Deserialize)]
+struct Goto {
+    id: String,
+    board: String,
 }
 
 /// Each frame, on a page opened by a link: tells the others which board
@@ -197,9 +227,29 @@ pub fn tick(app: &mut App) {
             app.set_peers(
                 peers
                     .into_iter()
-                    .map(|p| wall_app::presence::Peer { at: p.x.zip(p.y).map(|(x, y)| [x, y]), id: p.id, name: p.name, color: p.color })
+                    .map(|p| wall_app::presence::Peer { at: p.x.zip(p.y).map(|(x, y)| [x, y]), id: p.id, name: p.name, color: p.color, view: p.view, follow: p.follow, spot: p.spot })
                     .collect(),
             );
+        }
+        // Following and leading.
+        let id = live_my_id();
+        app.set_live_id((!id.is_empty()).then_some(id));
+        live_follow(app.follow_target().as_deref().unwrap_or(""));
+        live_spot(app.spotlight_on());
+        let view = app.shared_view();
+        if wall_app::together::view_moved(view, l.view, app.camera.zoom) {
+            l.view = view;
+            match view {
+                Some([x, y, w, h]) => live_view(x.into(), y.into(), w.into(), h.into()),
+                None => live_view(JsValue::NULL, JsValue::NULL, JsValue::NULL, JsValue::NULL),
+            }
+        }
+        if let Some(text) = live_take_gotos().as_string() {
+            for g in serde_json::from_str::<Vec<Goto>>(&text).unwrap_or_default() {
+                if let Ok(board) = Uuid::parse_str(&g.board) {
+                    app.peer_went(&g.id, board);
+                }
+            }
         }
     });
 }
@@ -291,7 +341,7 @@ struct Page {
 pub async fn run(s: Rc<RefCell<State>>, key: String) {
     note("Opening…");
     live_start(&key);
-    LIVE.with(|l| *l.borrow_mut() = Some(Live { board: None, cursor: None }));
+    LIVE.with(|l| *l.borrow_mut() = Some(Live { board: None, cursor: None, view: None }));
     let mut view = true;
     let mut known = false;
     let mut ends = String::new();
