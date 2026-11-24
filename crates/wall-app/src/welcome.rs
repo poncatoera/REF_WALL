@@ -191,15 +191,15 @@ fn drawing(l: &mut Layout, i: usize, r: [f32; 4], web: bool, tw: Tw) {
     match i {
         0 => {
             // A moodboard: pictures of many sizes, a note, a group.
-            l.bx([x + 300.0, y + 26.0, 220.0, 150.0], [0.0; 4], t.accent, 6.0, 1.0);
-            l.text("Lighting refs", [x + 308.0, y + 22.0], 11.0, t.accent);
+            l.bx([x + 286.0, y + 26.0, 220.0, 150.0], [0.0; 4], t.accent, 6.0, 1.0);
+            l.text("Lighting refs", [x + 294.0, y + 22.0], 11.0, t.accent);
             picture(l, [x + 30.0, y + 30.0, 120.0, 80.0], 0);
             picture(l, [x + 160.0, y + 30.0, 70.0, 100.0], 1);
             picture(l, [x + 30.0, y + 120.0, 88.0, 62.0], 3);
             picture(l, [x + 128.0, y + 140.0, 100.0, 66.0], 4);
-            picture(l, [x + 312.0, y + 40.0, 92.0, 64.0], 2);
-            picture(l, [x + 414.0, y + 40.0, 94.0, 64.0], 5);
-            picture(l, [x + 312.0, y + 114.0, 196.0, 52.0], 1);
+            picture(l, [x + 298.0, y + 40.0, 92.0, 64.0], 2);
+            picture(l, [x + 400.0, y + 40.0, 94.0, 64.0], 5);
+            picture(l, [x + 298.0, y + 114.0, 196.0, 52.0], 1);
             note(l, [x + 240.0, y + 188.0, 108.0, 46.0], 3);
             note(l, [x + 362.0, y + 196.0, 116.0, 38.0], 2);
         }
