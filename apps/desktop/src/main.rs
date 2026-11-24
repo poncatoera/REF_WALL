@@ -553,6 +553,10 @@ struct Cloud {
     live: Option<wall_cloud::live::Live>,
     live_board: Option<uuid::Uuid>,
     live_cursor: Option<[f32; 2]>,
+    /// What we last told it about following and leading.
+    live_view: Option<[f32; 4]>,
+    live_follow: Option<String>,
+    live_spot: bool,
 }
 
 /// How often the window looks for news while others are on the board
@@ -574,7 +578,7 @@ impl Cloud {
         app.set_my_name(Some(name));
         app.set_my_color(account.color);
         match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
-            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None }),
+            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None, live_view: None, live_follow: None, live_spot: false }),
             Err(e) => {
                 eprintln!("wall: cloud: {e}");
                 None
@@ -646,10 +650,27 @@ impl Cloud {
             live.cursor(at);
             self.live_cursor = at;
         }
+        // Following and leading.
+        let follow = app.follow_target();
+        if follow != self.live_follow {
+            live.follow(follow.clone());
+            self.live_follow = follow;
+        }
+        if app.spotlight_on() != self.live_spot {
+            self.live_spot = app.spotlight_on();
+            live.spot(self.live_spot);
+        }
+        let view = app.shared_view();
+        if wall_app::together::view_moved(view, self.live_view, app.camera.zoom) {
+            live.view(view);
+            self.live_view = view;
+        }
         let mut stop = false;
         while let Some(e) = live.try_event() {
             match e {
-                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at, color: p.color }).collect()),
+                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at, color: p.color, view: p.view, follow: p.follow, spot: p.spot }).collect()),
+                LiveEvent::Me(id) => app.set_live_id(Some(id)),
+                LiveEvent::Goto { id, board } => app.peer_went(&id, board),
                 LiveEvent::Changed => self.worker.poke(),
                 LiveEvent::Stopped(why) => {
                     eprintln!("wall: live: {why}");
@@ -659,6 +680,7 @@ impl Cloud {
         }
         if stop {
             app.set_peers(Vec::new());
+            app.set_live_id(None);
             app.set_my_name(None);
             self.live = None;
         }
@@ -787,7 +809,8 @@ impl ApplicationHandler for Shell {
                     WKey::Named(NamedKey::Enter) => Some(Key::Enter),
                     WKey::Named(NamedKey::Escape) => Some(Key::Escape),
                     WKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
-                    WKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
+                    WKey::Named(NamedKey::ArrowRight | NamedKey::PageDown) => Some(Key::Right),
+                    WKey::Named(NamedKey::PageUp) => Some(Key::Left),
                     WKey::Named(NamedKey::Home) => Some(Key::Home),
                     WKey::Named(NamedKey::End) => Some(Key::End),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("z") => Some(if m.shift { Key::Redo } else { Key::Undo }),
@@ -902,6 +925,9 @@ impl ApplicationHandler for Shell {
                         }
                         // The library answers history questions itself.
                         wall_app::ShellCommand::History(_) => {}
+                        wall_app::ShellCommand::Fullscreen(on) => {
+                            gfx.window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                        }
                         wall_app::ShellCommand::SetColor(c) => {
                             if let Some(live) = self.cloud.as_ref().and_then(|c| c.live.as_ref()) {
                                 live.color(Some(c));

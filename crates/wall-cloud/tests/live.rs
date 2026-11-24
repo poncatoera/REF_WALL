@@ -61,6 +61,7 @@ fn url() -> String {
 }
 
 /// Waits for the people list that `want` accepts.
+#[track_caller]
 fn peers(l: &Live, want: impl Fn(&[LivePeer]) -> bool) -> Vec<LivePeer> {
     let until = Instant::now() + Duration::from_secs(10);
     let mut last = Vec::new();
@@ -98,9 +99,37 @@ fn two_desktops_on_a_board_see_each_other_and_their_pointers() {
     b.cursor(None);
     peers(&a, |p| p.first().is_some_and(|x| x.at.is_none()));
 
-    // B opens another board: A is alone again.
+    // B opens another board: A is alone again (told so, not just nothing heard).
     b.board(Uuid::new_v4());
-    peers(&a, |p| p.is_empty());
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(LiveEvent::Peers(p)) = a.try_event() {
+            if p.is_empty() {
+                break;
+            }
+        }
+        assert!(Instant::now() < until, "A should hear that B left");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Back together: B follows A, sees A's view, and is told when A opens another board.
+    b.board(board);
+    let a_id = peers(&b, |p| p.len() == 1)[0].id.clone();
+    peers(&a, |p| p.len() == 1);
+    b.follow(Some(a_id.clone()));
+    peers(&a, |p| p.first().is_some_and(|x| x.follow.as_deref() == Some(a_id.as_str())));
+    a.view(Some([1.0, 2.0, 300.0, 200.0]));
+    peers(&b, |p| p.first().is_some_and(|x| x.view == Some([1.0, 2.0, 300.0, 200.0])));
+    let next = Uuid::new_v4();
+    a.board(next);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(LiveEvent::Goto { id, board }) = b.try_event() {
+            assert_eq!((id, board), (a_id.clone(), next));
+            break;
+        }
+        assert!(Instant::now() < until, "B should be told where A went");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // A wrong key stops for good.
     let c = Live::start(&url(), "a-key-nobody-has-0000000000", "x", None);
     c.board(board);

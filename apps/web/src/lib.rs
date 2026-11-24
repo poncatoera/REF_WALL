@@ -313,6 +313,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::InstallExtension | wall_app::ShellCommand::Cloud(_) => {}
         wall_app::ShellCommand::SetName(name) => cloud::set_name(&name),
         wall_app::ShellCommand::SetColor(c) => cloud::set_color(c),
+        wall_app::ShellCommand::Fullscreen(on) => cloud::fullscreen(on),
         wall_app::ShellCommand::History(ask) => cloud::history(s.clone(), ask),
         wall_app::ShellCommand::CopyText(text) => {
             let _ = window.navigator().clipboard().write_text(&text);
@@ -546,7 +547,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                 "Enter" => Some(Key::Enter),
                 "Escape" => Some(Key::Escape),
                 "ArrowLeft" => Some(Key::Left),
-                "ArrowRight" => Some(Key::Right),
+                "ArrowRight" | "PageDown" => Some(Key::Right),
+                "PageUp" => Some(Key::Left),
                 "Home" => Some(Key::Home),
                 "End" => Some(Key::End),
                 "z" | "Z" if cmd => Some(if e.shift_key() { Key::Redo } else { Key::Undo }),
@@ -675,6 +677,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             }
             cloud::tick(&mut s.app);
             if s.app.needs_redraw {
+                // Glides (following someone, presenting) go by the clock.
+                s.app.set_time(js_sys::Date::now() as u64);
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);
             }
