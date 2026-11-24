@@ -57,6 +57,11 @@ struct Shell {
     gfx: Option<Gfx>,
     frames: u32,
     fps_clock: Instant,
+    /// Time spent this fps period in video upkeep, posters and drawing (WALL_BENCH).
+    spent: [f32; 3],
+    /// Longest time between two frames this period, and when the last one was.
+    worst_gap: f32,
+    last_frame: Option<Instant>,
     screenshot: Option<String>,
     bench: bool,
     mods: ModifiersState,
@@ -939,9 +944,19 @@ impl ApplicationHandler for Shell {
                         Err(e) => show_error(&format!("Could not import the old Wall library: {e}")),
                     }
                 }
+                let t0 = Instant::now();
+                if let Some(l) = self.last_frame.replace(t0) {
+                    self.worst_gap = self.worst_gap.max((t0 - l).as_secs_f32() * 1000.0);
+                }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
+                let t1 = Instant::now();
                 self.posters.pump(&mut self.app);
+                let t2 = Instant::now();
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                let t3 = Instant::now();
+                for (s, d) in self.spent.iter_mut().zip([t1 - t0, t2 - t1, t3 - t2]) {
+                    *s += d.as_secs_f32() * 1000.0;
+                }
                 // Remember a changed theme or grid (View menu, G key).
                 let look = (self.app.light_mode(), self.app.grid());
                 if look != self.saved_look {
@@ -979,7 +994,15 @@ impl ApplicationHandler for Shell {
                 self.frames += 1;
                 let elapsed = self.fps_clock.elapsed().as_secs_f32();
                 if elapsed >= 2.0 && self.screenshot.is_none() {
-                    println!("wall: {:.0} fps", self.frames as f32 / elapsed);
+                    let n = self.frames.max(1) as f32;
+                    if self.bench {
+                        let [v, p, r] = self.spent.map(|s| s / n);
+                        println!("wall: {:.0} fps (per frame: videos {v:.1} ms, posters {p:.1} ms, draw {r:.1} ms; worst gap {:.0} ms)", self.frames as f32 / elapsed, self.worst_gap);
+                    } else {
+                        println!("wall: {:.0} fps", self.frames as f32 / elapsed);
+                    }
+                    self.spent = [0.0; 3];
+                    self.worst_gap = 0.0;
                     self.frames = 0;
                     self.fps_clock = Instant::now();
                 }
@@ -1250,6 +1273,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gfx: None,
         frames: 0,
         fps_clock: Instant::now(),
+        spent: [0.0; 3],
+        worst_gap: 0.0,
+        last_frame: None,
         screenshot: std::env::var("WALL_SCREENSHOT").ok(),
         bench: std::env::var_os("WALL_BENCH").is_some(),
         mods: ModifiersState::empty(),

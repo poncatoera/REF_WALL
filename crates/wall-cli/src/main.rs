@@ -7,12 +7,16 @@
 //! wall-cli export <library> <board> <folder> copy a board's pictures and videos out
 //! wall-cli import <library> <file>... [--board <board>]   pictures and videos (videos need ffmpeg)
 //! wall-cli check  <library>                  look for missing or damaged files
+//! wall-cli stress <library> [--pictures N] [--videos N] [--notes N]
+//!                                            a big test board (made if missing)
 //! wall-cli import-old <old Wall library folder> <library>
 //!                                            bring in the old Electron Wall's boards
 //! ```
 //!
 //! `<board>` is a board's name or id. The format is described in
 //! `docs/wall-format.md`.
+
+mod stress;
 
 use wall_import::media::import_one;
 use wall_import::{old_wall, Res};
@@ -30,6 +34,7 @@ const USAGE: &str = "usage:
   wall-cli import <library> <file>... [--board <board>]
   wall-cli check  <library>
   wall-cli import-old <old Wall library folder> <library>
+  wall-cli stress <library> [--pictures N] [--videos N] [--notes N]
   wall-cli cloud-key     <library>            (prints OWNER_HASH for the server)
   wall-cli cloud-connect <library> <server>
   wall-cli share   <library> <board|all> <view|edit> [label]
@@ -54,6 +59,14 @@ fn run(args: &[String]) -> Res<String> {
         return old_wall::import(Path::new(old), Path::new(new), now_ms()).map(|r| r.text());
     }
     let lib_path = rest.first().ok_or(USAGE)?;
+    if cmd == "stress" {
+        let counts = stress::counts(&rest[1..])?;
+        let lib = match Library::open(lib_path) {
+            Ok(l) => l,
+            Err(_) => Library::create(lib_path, "Stress test", now_ms()).map_err(|e| e.to_string())?,
+        };
+        return stress::run(&lib, &counts, now_ms());
+    }
     let lib = Library::open(lib_path).map_err(|e| e.to_string())?;
     let rest = &rest[1..];
     match cmd.as_str() {
