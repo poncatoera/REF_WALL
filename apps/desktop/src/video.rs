@@ -642,7 +642,9 @@ struct Slot {
 /// Imports running in the background and the videos on the board.
 #[derive(Default)]
 pub struct Videos {
-    jobs: Vec<Receiver<(String, Result<Prepared, String>)>>,
+    jobs: Vec<(Option<u64>, Receiver<(String, Result<Prepared, String>)>)>,
+    /// Tagged imports that finished: (tag, the new item if it worked).
+    pub imported: Vec<(u64, Option<uuid::Uuid>)>,
     slots: Vec<Slot>,
     /// Files for videos imported without a library open.
     paths: std::collections::HashMap<wall_app::ContentHash, PathBuf>,
@@ -655,12 +657,17 @@ pub struct Videos {
 impl Videos {
     /// Starts probing / converting a dropped file off the UI thread.
     pub fn import(&mut self, path: PathBuf) {
+        self.import_tagged(path, None);
+    }
+
+    /// Like [`Self::import`]; the item lands in [`Self::imported`] with `tag`.
+    pub fn import_tagged(&mut self, path: PathBuf, tag: Option<u64>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("video").to_owned();
         std::thread::spawn(move || {
             let _ = tx.send((name, prepare(&path)));
         });
-        self.jobs.push(rx);
+        self.jobs.push((tag, rx));
     }
 
     /// No imports running and, if any finished, at least `ms` since then
@@ -678,24 +685,32 @@ impl Videos {
     /// off screen, applies controls, uploads new frames. Call once per frame.
     pub fn pump(&mut self, app: &mut wall_app::App, renderer: &mut wall_render::Renderer) {
         let mut still = Vec::new();
-        for rx in self.jobs.drain(..) {
+        for (tag, rx) in self.jobs.drain(..) {
+            let done = |imported: &mut Vec<(u64, Option<uuid::Uuid>)>, id| {
+                if let Some(t) = tag {
+                    imported.push((t, id));
+                }
+            };
             match rx.try_recv() {
                 Ok((name, Ok(p))) => match app.import_video(&p.bytes, &p.ext, p.meta, Some(&name), crate::now_ms()) {
                     Ok(id) => {
+                        done(&mut self.imported, Some(id));
                         if let Some(hash) = app.media_hash(&id) {
                             self.paths.insert(hash, p.path);
                         }
                     }
                     Err(e) => {
+                        done(&mut self.imported, None);
                         eprintln!("wall: could not import {name}: {e}");
                         self.failed.push(format!("{name}: {e}"));
                     }
                 },
                 Ok((name, Err(e))) => {
+                    done(&mut self.imported, None);
                     eprintln!("wall: could not import {name}: {e}");
                     self.failed.push(format!("{name}: {e}"));
                 }
-                Err(mpsc::TryRecvError::Empty) => still.push(rx),
+                Err(mpsc::TryRecvError::Empty) => still.push((tag, rx)),
                 Err(mpsc::TryRecvError::Disconnected) => {}
             }
         }

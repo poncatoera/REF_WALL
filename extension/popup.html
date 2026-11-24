@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/32.png" alt="" width="18" height="18">
+    <b>Wall</b>
+    <span id="status"><span id="dot" class="dot"></span><span id="status-text">Looking for Wall…</span></span>
+  </header>
+
+  <label for="dest">Add to</label>
+  <select id="dest"></select>
+
+  <div id="clip-row">
+    <label>Clip <span class="soft">(optional, the app downloads only this part)</span></label>
+    <div class="clip">
+      <input id="start" placeholder="start" spellcheck="false" aria-label="Clip start">
+      <button id="mark-start" class="mini" title="The video's current time">Now</button>
+      <span class="soft">to</span>
+      <input id="end" placeholder="end" spellcheck="false" aria-label="Clip end">
+      <button id="mark-end" class="mini" title="The video's current time">Now</button>
+      <button id="clear-clip" class="mini" title="Clear the clip" aria-label="Clear the clip">×</button>
+    </div>
+  </div>
+
+  <button id="send" class="primary"><span id="send-label">Add this page's video</span><kbd>Alt+Shift+S</kbd></button>
+  <button id="shot"><span>Screenshot of the page</span><kbd>Alt+Shift+X</kbd></button>
+  <button id="shot-area"><span>Screenshot of an area</span><kbd>Alt+Shift+A</kbd></button>
+
+  <div id="msg" role="status"></div>
+
+  <div id="recent-box" hidden>
+    <label>Recently sent</label>
+    <ul id="recent"></ul>
+  </div>
+
+  <p class="hint">Right-click any picture, video or link and choose <b>Add to Wall</b>. On YouTube, right-click the video twice for the browser's menu.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

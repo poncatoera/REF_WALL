@@ -35,6 +35,7 @@ pub use doc::Document;
 mod snapshot;
 pub mod sync;
 mod batch;
+pub mod collect;
 pub use batch::grid_layout;
 pub use snapshot::NewMedia;
 pub use menu::ShellCommand;

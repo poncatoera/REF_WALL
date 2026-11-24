@@ -1,0 +1,41 @@
+:root {
+  --bg: #16171a; --panel: #1d1e22; --field: #111214; --line: #2c2e34; --text: #e8e9ee; --soft: #8d909a;
+  --accent: #6ea8ff; --on-accent: #0b1220; --ok: #3ddc97; --bad: #ff5d6c;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f3f1ec; --panel: #fbfaf7; --field: #ffffff; --line: #dcd8cf; --text: #1d1c1a; --soft: #6f6b63;
+    --accent: #d9472f; --on-accent: #ffffff; --ok: #1f9d63; --bad: #c8322a;
+  }
+}
+* { box-sizing: border-box; }
+body { width: 300px; margin: 0; padding: 14px; background: var(--bg); color: var(--text); font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+header b { font-size: 14px; flex: 1; }
+#status { display: flex; align-items: center; gap: 6px; color: var(--soft); font-size: 12px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--soft); }
+.dot.ok { background: var(--ok); }
+.dot.off { background: var(--bad); }
+label { display: block; font-size: 11px; color: var(--soft); margin: 0 0 4px; }
+.soft { color: var(--soft); }
+select, button, input { font: inherit; color: inherit; border-radius: 4px; }
+select { width: 100%; padding: 6px 8px; background: var(--field); border: 1px solid var(--line); margin-bottom: 10px; }
+button { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 10px; margin-top: 6px; background: var(--panel); border: 1px solid var(--line); cursor: pointer; text-align: left; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+kbd { font: 11px Consolas, monospace; opacity: .7; white-space: nowrap; }
+.clip { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.clip input { width: 62px; padding: 5px 6px; font: 12px Consolas, monospace; background: var(--field); border: 1px solid var(--line); }
+button.mini { width: auto; margin: 0; padding: 4px 7px; font-size: 11px; }
+#msg { margin-top: 10px; font-size: 12px; min-height: 16px; }
+#msg.ok { color: var(--ok); }
+#msg.err { color: var(--bad); }
+#recent-box { margin-top: 10px; }
+#recent { list-style: none; margin: 0; padding: 0; max-height: 120px; overflow: auto; }
+#recent li { display: flex; gap: 6px; font-size: 12px; padding: 3px 0; border-top: 1px solid var(--line); }
+#recent li span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#recent .failed { color: var(--bad); }
+#recent .added { color: var(--ok); }
+.hint { color: var(--soft); font-size: 12px; margin: 12px 0 0; line-height: 1.5; }

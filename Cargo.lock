@@ -2817,6 +2817,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "ureq",
  "uuid",
  "wall-app",
  "wall-cli",
