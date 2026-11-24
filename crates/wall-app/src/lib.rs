@@ -252,6 +252,11 @@ pub struct VideoSource {
     pub path: Option<std::path::PathBuf>,
     pub width: u32,
     pub height: u32,
+    /// From the video's details, when it has them.
+    pub duration_ms: Option<u64>,
+    pub fps: Option<f32>,
+    /// Where the shell may keep small still frames (`cache/posters`).
+    pub poster_cache: Option<std::path::PathBuf>,
 }
 
 pub struct App {
@@ -640,13 +645,49 @@ impl App {
         self.videos
             .iter()
             .filter(|(h, _)| on_board.contains(h) && !self.pictures.contains_key(*h))
-            .map(|(h, (ext, w, h2))| VideoSource {
-                hash: h.clone(),
-                path: self.library.as_ref().map(|l| l.media_path(h, ext)),
-                width: *w,
-                height: *h2,
+            .map(|(h, (ext, w, h2))| {
+                // Length and frame rate as imported, so the shell needn't
+                // open every file to find out.
+                let sc = self.sidecars.get(h).cloned().or_else(|| self.library.as_ref()?.read_sidecar(h).ok());
+                VideoSource {
+                    hash: h.clone(),
+                    path: self.library.as_ref().map(|l| l.media_path(h, ext)),
+                    width: *w,
+                    height: *h2,
+                    duration_ms: sc.as_ref().and_then(|s| s.duration_ms).filter(|d| *d > 0),
+                    fps: sc.as_ref().and_then(|s| s.fps).filter(|f| *f > 0.0),
+                    poster_cache: self.library.as_ref().map(|l| l.root().join("cache").join("posters")),
+                }
             })
             .collect()
+    }
+
+    /// Every video on the open board, with its width on screen in pixels
+    /// (the widest copy) and whether any copy is on screen at all.
+    pub fn videos_shown(&self) -> HashMap<ContentHash, (f32, bool)> {
+        let tl = self.camera.screen_to_board([0.0, 0.0], self.viewport);
+        let br = self.camera.screen_to_board(self.viewport, self.viewport);
+        let mut out: HashMap<ContentHash, (f32, bool)> = HashMap::new();
+        for i in self.doc.board.live_items() {
+            let ItemKind::Media { hash, .. } = &i.kind else { continue };
+            if !self.videos.contains_key(hash) {
+                continue;
+            }
+            let f = i.frame;
+            let on = (f.x as f32) < br[0] && ((f.x + f.w) as f32) > tl[0] && (f.y as f32) < br[1] && ((f.y + f.h) as f32) > tl[1];
+            let e = out.entry(hash.clone()).or_insert((0.0, false));
+            e.0 = e.0.max(f.w as f32 * self.camera.zoom);
+            e.1 |= on;
+        }
+        out
+    }
+
+    /// The shell let go of a video's texture (the video isn't on the open
+    /// board): it is asked for again with [`Self::video_sources`].
+    pub fn forget_video_texture(&mut self, hash: &ContentHash) {
+        if self.videos.contains_key(hash) && matches!(self.pictures.get(hash), Some(Picture::Ready(_))) {
+            self.pictures.remove(hash);
+        }
     }
 
     /// The media hash of a picture or video item.
@@ -3334,6 +3375,9 @@ impl App {
             C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
+            C::BackUpNow => self.shell_commands.push(S::BackUp { choose: false }),
+            C::BackUpTo => self.shell_commands.push(S::BackUp { choose: true }),
+            C::ExportLibrary => self.shell_commands.push(S::ExportLibrary),
             C::ExportPdf => self.shell_commands.push(S::ExportPdf),
             C::Share => self.open_share(),
             C::WelcomeTour => self.start_welcome(welcome::Kind::Full),

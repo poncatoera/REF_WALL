@@ -46,6 +46,9 @@ pub enum Command {
     ImportOldWall,
     InstallExtension,
     ExportImage,
+    BackUpNow,
+    BackUpTo,
+    ExportLibrary,
     ExportPdf,
     Share,
     History,
@@ -102,6 +105,11 @@ pub enum ShellCommand {
     OpenLibrary { new: bool },
     /// Save the whole board as a PNG picture.
     ExportImage,
+    /// Copy the library to its backup folder now (`choose`: pick that
+    /// folder first). On the web: download a backup file.
+    BackUp { choose: bool },
+    /// Save the whole library as one .zip file.
+    ExportLibrary,
     /// Save the board and its comments as a PDF (`App::export_pdf`).
     ExportPdf,
     /// Pick an old (Electron) Wall library and bring its boards in.
@@ -130,7 +138,7 @@ pub enum ShellCommand {
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
-        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share)
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share | Command::BackUpTo | Command::ExportLibrary)
     }
 }
 
@@ -158,6 +166,10 @@ pub const MENUS: &[Menu] = &[
             ("Share this board…", "", Some(Command::Share)),
             ("Version history…", "", Some(Command::History)),
             ("Deleted boards…", "", Some(Command::DeletedBoards)),
+            SEP,
+            ("Back up library now", "Ctrl S", Some(Command::BackUpNow)),
+            ("Back up to folder…", "", Some(Command::BackUpTo)),
+            ("Export library as .zip…", "", Some(Command::ExportLibrary)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),

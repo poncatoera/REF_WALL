@@ -6,11 +6,11 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wall_app::App;
-use wall_format::{Board, ContentHash, ItemSidecar};
-use wall_sync::{Incoming, Reply, ReplyItem, State as Sync};
+use wall_format::{Board, BoardItem, ContentHash, ItemKind, ItemSidecar};
+use wall_sync::{Incoming, Meta, Reply, ReplyItem, State as Sync};
 use wasm_bindgen::prelude::*;
 
 use crate::State;
@@ -21,6 +21,16 @@ extern "C" {
     fn cloud_call(method: &str, path: &str, key: &str, body: &JsValue) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_name = cloudNote)]
     fn note(text: &str);
+}
+
+#[wasm_bindgen(module = "/js/store.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = storeGet, catch)]
+    fn store_get(key: &str) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = storePut, catch)]
+    fn store_put(key: &str, value: &JsValue) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_name = storeDelete, catch)]
+    fn store_delete(prefix: &str) -> Result<js_sys::Promise, JsValue>;
 }
 
 #[wasm_bindgen(module = "/js/live.js")]
@@ -354,6 +364,10 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
     let mut fails = 0u32;
     // `App::sync_stamp` as of what was last sent.
     let mut sent = 0u64;
+    // Changes kept in the browser while they couldn't be sent (see `Unsent`).
+    let mut kept = 0usize;
+    let mut kept_media = HashSet::new();
+    let mut restored = false;
     loop {
         let done = async {
             if !known {
@@ -366,15 +380,27 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
                 s.borrow_mut().app.welcome_guest(view);
                 known = true;
             }
-            let moved = round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
+            let mut moved = round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
             if !opened {
                 opened = s.borrow_mut().app.sync_open_top(blank);
+            }
+            // Changes made here last time, kept while offline: on the
+            // boards again now that they're here, and up with the next round.
+            if !restored {
+                restored = true;
+                kept = unstash(&s, &key, &sync, &mut uploads, &mut kept_media).await;
+                if kept > 0 {
+                    moved |= round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
+                }
             }
             let files = files(&s, &key, &mut failed).await?;
             Ok::<bool, Fail>(moved || files)
         }
         .await;
         fails = if done.is_ok() { 0 } else { fails + 1 };
+        if done.is_ok() && (kept > 0 || !kept_media.is_empty()) {
+            kept = stash(&s, &key, &sync, view, &mut uploads, &mut kept_media).await.unwrap_or(kept);
+        }
         match done {
             Ok(moved) => {
                 quiet = if moved { 0 } else { quiet + 1 };
@@ -399,12 +425,14 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
                 quiet += 1;
             }
             Err(Fail::Offline) => {
-                note("No connection; trying again…");
+                kept = stash(&s, &key, &sync, view, &mut uploads, &mut kept_media).await.unwrap_or(kept);
+                offline_note(kept);
                 quiet += 4;
             }
             Err(Fail::Missing) => quiet += 1,
             Err(Fail::Other(e)) => {
                 web_sys::console::warn_1(&format!("wall: cloud: {e}").into());
+                kept = stash(&s, &key, &sync, view, &mut uploads, &mut kept_media).await.unwrap_or(kept);
                 quiet += 4;
             }
         }
@@ -418,8 +446,32 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
         };
         // After a failure only time helps: not a round per announced change,
         // which a server over its daily limit would turn into a storm.
+        // Changes made meanwhile are kept in the browser; the connection
+        // coming back cuts the wait short.
         if fails > 0 {
-            sleep((5_000 << fails.min(4)).min(60_000)).await;
+            let mut left = (5_000 << fails.min(4)).min(60_000);
+            let mut was_online = online();
+            while left > 0 {
+                sleep(400).await;
+                left -= 400;
+                let now_online = online();
+                if now_online && !was_online {
+                    note("Back online: sending…");
+                    break;
+                }
+                was_online = now_online;
+                let changed = {
+                    let st = s.borrow();
+                    !st.app.busy_editing() && st.app.sync_stamp() != sent
+                };
+                if changed {
+                    if let Some(n) = stash(&s, &key, &sync, view, &mut uploads, &mut kept_media).await {
+                        kept = n;
+                        offline_note(kept);
+                    }
+                    sent = s.borrow().app.sync_stamp();
+                }
+            }
             continue;
         }
         // Someone else's change cuts the wait short; so does one made here,
@@ -444,6 +496,14 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
         }
         // A breath between rounds, whatever wakes them.
         sleep(100).await;
+    }
+}
+
+fn offline_note(kept: usize) {
+    match kept {
+        0 => note("No connection; trying again…"),
+        1 => note("No connection: 1 change is kept in this browser and goes up when it's back"),
+        n => note(&format!("No connection: {n} changes are kept in this browser and go up when it's back")),
     }
 }
 
@@ -598,4 +658,134 @@ async fn play(s: &Rc<RefCell<State>>, sc: &ItemSidecar, bytes: &[u8]) -> Result<
     bag.set_type(crate::video_mime(&sc.ext));
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
     crate::attach_player(s.clone(), &blob, sc.hash.clone(), sc.width, sc.height).await
+}
+
+// ---- changes kept in this browser while they can't be sent ----------------
+
+/// What was changed here and hasn't reached the server: kept in the
+/// browser (IndexedDB) while offline, so closing the tab loses nothing.
+/// The next time this link opens here, it goes up.
+#[derive(Default, Serialize, Deserialize)]
+struct Unsent {
+    #[serde(default)]
+    boards: Vec<Meta>,
+    #[serde(default)]
+    items: Vec<(Uuid, BoardItem)>,
+    #[serde(default)]
+    sidecars: Vec<ItemSidecar>,
+    /// Files added here; their bytes are kept under `<key>/media/<hash>`.
+    #[serde(default)]
+    media: Vec<ContentHash>,
+}
+
+impl Unsent {
+    fn is_empty(&self) -> bool {
+        self.boards.is_empty() && self.items.is_empty() && self.media.is_empty()
+    }
+
+    /// Everything the server hasn't had from here (unlike a push, not cut
+    /// into parts). None during a drag or typing.
+    fn of(app: &App, sync: &Sync, view: bool, uploads: &[(ContentHash, Vec<u8>)]) -> Option<Self> {
+        let boards = app.sync_boards()?;
+        let mut u = Unsent::default();
+        for b in &boards {
+            let base = sync.boards.get(&b.id);
+            let meta = Meta::of(b);
+            // As in a push: a link's empty starting board isn't news.
+            let blank = base.is_none() && b.items.is_empty();
+            if !view && !blank && base.map(|x| &x.meta) != Some(&meta) {
+                u.boards.push(meta);
+            }
+            for i in b.items.values() {
+                if i.rev == 0 || (view && (base.is_none() || !matches!(i.kind, ItemKind::Comment { .. } | ItemKind::Stamp { .. }))) {
+                    continue;
+                }
+                let known = base.and_then(|x| x.items.get(&i.id));
+                if known.is_none_or(|(rev, by)| (i.rev, i.updated_by.as_str()) > (*rev, by.as_str())) {
+                    u.items.push((b.id, i.clone()));
+                }
+            }
+        }
+        if !view {
+            u.media = uploads.iter().map(|(h, _)| h.clone()).collect();
+            u.sidecars = app.sync_sidecars().into_iter().filter(|s| u.media.contains(&s.hash) || serde_json::to_value(s).ok().as_ref() != sync.sidecars.get(&s.hash)).collect();
+        }
+        Some(u)
+    }
+}
+
+/// Where this link's unsent changes are kept (not the secret itself).
+fn unsent_key(key: &str) -> String {
+    format!("unsent/{}", &ContentHash::of(key.as_bytes()).to_string()[..24])
+}
+
+async fn store_call(p: Result<js_sys::Promise, JsValue>) -> Result<JsValue, JsValue> {
+    wasm_bindgen_futures::JsFuture::from(p?).await
+}
+
+/// Keeps what hasn't gone up in the browser. Returns how many changes that is.
+async fn stash(s: &Rc<RefCell<State>>, key: &str, sync: &Sync, view: bool, uploads: &mut Vec<(ContentHash, Vec<u8>)>, kept_media: &mut HashSet<ContentHash>) -> Option<usize> {
+    if !view {
+        uploads.extend(s.borrow_mut().app.take_new_media().into_iter().map(|m| (m.hash, m.bytes)));
+    }
+    let u = Unsent::of(&s.borrow().app, sync, view, uploads)?;
+    let at = unsent_key(key);
+    if u.is_empty() {
+        if !kept_media.is_empty() || store_call(store_get(&at)).await.is_ok_and(|v| !v.is_null()) {
+            let _ = store_call(store_delete(&at)).await;
+            kept_media.clear();
+        }
+        return Some(0);
+    }
+    for (hash, bytes) in uploads.iter() {
+        if kept_media.contains(hash) {
+            continue;
+        }
+        if store_call(store_put(&format!("{at}/media/{hash}"), &js_sys::Uint8Array::from(&bytes[..]))).await.is_ok() {
+            kept_media.insert(hash.clone());
+        }
+    }
+    let json = serde_json::to_string(&u).ok()?;
+    if let Err(e) = store_call(store_put(&at, &JsValue::from_str(&json))).await {
+        web_sys::console::warn_1(&format!("wall: could not keep unsent changes: {}", crate::err_text(&e)).into());
+        return None;
+    }
+    Some(u.items.len() + u.boards.len() + u.media.len())
+}
+
+/// Puts changes kept from an earlier visit back on the boards (newer ones
+/// from elsewhere still win), so the next round sends them.
+async fn unstash(s: &Rc<RefCell<State>>, key: &str, sync: &Sync, uploads: &mut Vec<(ContentHash, Vec<u8>)>, kept_media: &mut HashSet<ContentHash>) -> usize {
+    let at = unsent_key(key);
+    let Some(text) = store_call(store_get(&at)).await.ok().and_then(|v| v.as_string()) else { return 0 };
+    let Ok(u) = serde_json::from_str::<Unsent>(&text) else { return 0 };
+    s.borrow_mut().app.sync_know(&u.sidecars);
+    for hash in &u.media {
+        let Ok(v) = store_call(store_get(&format!("{at}/media/{hash}"))).await else { continue };
+        if !v.is_object() {
+            continue;
+        }
+        let bytes = js_sys::Uint8Array::new(&v).to_vec();
+        let Some(sc) = u.sidecars.iter().find(|s| &s.hash == hash) else { continue };
+        kept_media.insert(hash.clone());
+        let video = s.borrow_mut().app.sync_media_bytes(sc, &bytes);
+        if let Ok(true) = video {
+            let _ = play(s, sc, &bytes).await;
+        }
+        uploads.push((hash.clone(), bytes));
+    }
+    let n = u.items.len() + u.boards.len();
+    let inc = Incoming { boards: u.boards, items: u.items, ..Default::default() };
+    loop {
+        if s.borrow_mut().app.sync_apply(&inc, sync).is_some() {
+            break;
+        }
+        sleep(500).await;
+    }
+    n + u.media.len()
+}
+
+/// Whether the browser thinks it's online.
+fn online() -> bool {
+    web_sys::window().is_none_or(|w| w.navigator().on_line())
 }

@@ -16,12 +16,14 @@
 //! Every JSON object keeps fields it does not know about (`extra`), so a file
 //! written by another app round-trips through Wall without losing data.
 
+pub mod backup;
 mod error;
 mod hash;
 pub mod history;
 mod library;
 mod model;
 
+pub use backup::BackupReport;
 pub use error::{Error, Result};
 pub use hash::ContentHash;
 pub use history::{TrashedBoard, VERSION_EVERY_MS};

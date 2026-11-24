@@ -34,6 +34,19 @@ cargo build -p wall-web --target wasm32-unknown-unknown --release
 wasm-bindgen --target web --out-dir apps/web/www/pkg target/wasm32-unknown-unknown/release/wall_web.wasm
 ```
 
+Backups: File > Back up to folder… keeps a plain copy of the library in
+another folder, updated every 30 minutes while Wall is open and when it
+closes (only what changed is copied). File > Export library as .zip… writes
+it all as one file. Same from the command line: `wall-cli backup`,
+`wall-cli export-library`, `wall-cli restore`. On the web, Ctrl+S downloads
+a .zip of the boards kept in that browser; dropping it back restores them.
+
+Big-board checks: `wall-cli stress <library> --pictures 1500 --videos 300`
+makes a test board; `WALL_BENCH=1` prints fps and where each frame's time
+goes. `node tools/test-web-offline.mjs` checks that edits made on a share
+link while offline survive and go up later (needs the web build in
+`server/public`).
+
 Desktop test hooks: `WALL_SCREENSHOT=out.png` saves a frame and exits;
 `WALL_CAMERA="x,y,zoom"` sets the start view.
 

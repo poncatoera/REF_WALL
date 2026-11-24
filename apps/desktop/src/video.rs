@@ -29,12 +29,7 @@ pub fn prepare(path: &Path) -> Result<Prepared, String> {
     Ok(Prepared { bytes: v.bytes, ext: v.ext, meta, path: v.path })
 }
 
-/// Size frames are decoded at: at most 1280 wide, even.
-pub fn playback_size(w: u32, h: u32) -> (u32, u32) {
-    playback_size_max(w, h, 1280)
-}
-
-/// Like [`playback_size`] but at most `max_w` wide.
+/// Size frames are decoded at: at most `max_w` wide, even.
 pub fn playback_size_max(w: u32, h: u32, max_w: u32) -> (u32, u32) {
     let scale = (max_w as f32 / w.max(1) as f32).min(1.0);
     let even = |v: f32| ((v.round() as u32) & !1).max(2);
@@ -448,8 +443,8 @@ mod tests {
 
     #[test]
     fn playback_size_caps_width_and_keeps_even() {
-        assert_eq!(playback_size(1920, 1080), (1280, 720));
-        assert_eq!(playback_size(641, 361), (640, 360));
+        assert_eq!(playback_size_max(1920, 1080, 1280), (1280, 720));
+        assert_eq!(playback_size_max(641, 361, 1280), (640, 360));
     }
 
     /// Needs ffmpeg; skipped without it.
@@ -619,9 +614,20 @@ mod tests {
     }
 }
 
+/// Still frames and file checks running at once. Each is an ffmpeg
+/// process; a board of hundreds of videos would otherwise start hundreds.
+const MAX_JOBS: usize = 3;
+/// Still frames are at most this wide (a video off screen or not yet
+/// playing needs no more).
+const POSTER_MAX_W: u32 = 640;
+
+/// What a background job found: length and frame rate (if it had to look),
+/// and a still frame with its size.
+type JobDone = (Option<(f64, f64)>, Option<(Vec<u8>, u32, u32)>);
+
 /// One video on the board: its file, its texture once a frame arrived, and
 /// a player while it is on screen. Off screen the player is dropped (its
-/// ffmpeg stops) and the texture keeps the last frame.
+/// ffmpeg stops) and the texture keeps the last frame, made smaller.
 struct Slot {
     hash: wall_app::ContentHash,
     path: PathBuf,
@@ -629,14 +635,41 @@ struct Slot {
     height: u32,
     duration: f64,
     fps: f64,
+    /// Length and frame rate are known (from its details or a probe).
+    probed: bool,
     tex: Option<wall_render::ImageId>,
     /// Size of `tex`, to replace it when the player's size changes.
     tex_size: (u32, u32),
     player: Option<Player>,
     /// Where to resume when it comes back on screen.
     saved: wall_app::VideoStatus,
-    /// A still frame being grabbed for videos that haven't played yet.
-    poster: Option<Receiver<Option<Vec<u8>>>>,
+    /// A probe and/or still frame being made off the UI thread.
+    job: Option<Receiver<JobDone>>,
+    /// A still frame was tried already.
+    posted: bool,
+    /// Folder for still frames (`cache/posters`), if in a library.
+    cache: Option<PathBuf>,
+}
+
+/// A still frame from the cache, else from ffmpeg (then kept in the cache).
+fn cached_poster(cache: Option<&Path>, hash: &wall_app::ContentHash, path: &Path, w: u32, h: u32, at: f64) -> Option<Vec<u8>> {
+    let file = cache.map(|c| c.join(format!("{hash}-{w}x{h}.jpg")));
+    if let Some(img) = file.as_ref().and_then(|f| image::open(f).ok()) {
+        let rgba = img.to_rgba8();
+        if rgba.dimensions() == (w, h) {
+            return Some(rgba.into_raw());
+        }
+    }
+    let px = poster(path, w, h, at)?;
+    if let (Some(file), Some(img)) = (file, image::RgbaImage::from_raw(w, h, px.clone())) {
+        let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let _ = std::fs::create_dir_all(file.parent().unwrap_or(Path::new(".")));
+        let tmp = file.with_extension("tmp");
+        if rgb.save_with_format(&tmp, image::ImageFormat::Jpeg).is_ok() {
+            let _ = std::fs::rename(&tmp, &file);
+        }
+    }
+    Some(px)
 }
 
 /// Imports running in the background and the videos on the board.
@@ -648,6 +681,9 @@ pub struct Videos {
     slots: Vec<Slot>,
     /// Files for videos imported without a library open.
     paths: std::collections::HashMap<wall_app::ContentHash, PathBuf>,
+    /// Videos let go of when they left the open board: length, frame rate
+    /// and where they were, for when they come back.
+    known: std::collections::HashMap<wall_app::ContentHash, (f64, f64, wall_app::VideoStatus)>,
     /// When the last import finished.
     settled_at: Option<std::time::Instant>,
     /// Files that couldn't be added, and why; the window takes them.
@@ -673,12 +709,13 @@ impl Videos {
     /// No imports running and, if any finished, at least `ms` since then
     /// (gives players time to show frames; used for test screenshots).
     pub fn settled(&self, ms: u64) -> bool {
-        self.jobs.is_empty() && self.settled_at.is_none_or(|t| t.elapsed().as_millis() as u64 >= ms)
+        self.jobs.is_empty() && self.slots.iter().all(|s| s.job.is_none()) && self.settled_at.is_none_or(|t| t.elapsed().as_millis() as u64 >= ms)
     }
 
-    /// True while anything needs frames drawn: imports or playing videos.
+    /// True while anything needs frames drawn: imports, still frames on
+    /// their way, or playing videos.
     pub fn busy(&self) -> bool {
-        !self.jobs.is_empty() || self.slots.iter().any(|s| s.player.is_some())
+        !self.jobs.is_empty() || self.slots.iter().any(|s| s.player.is_some() || s.job.is_some())
     }
 
     /// Finishes imports, starts and stops players as videos come on and go
@@ -719,26 +756,112 @@ impl Videos {
         }
         self.jobs = still;
 
+        // Videos no longer on the open board (another board was opened):
+        // their players and textures go, so visiting many boards of videos
+        // doesn't pile up memory.
+        let shown = app.videos_shown();
+        let known = &mut self.known;
+        self.slots.retain(|s| {
+            if shown.contains_key(&s.hash) {
+                return true;
+            }
+            if let Some(t) = s.tex {
+                renderer.delete_image(t);
+                app.forget_video_texture(&s.hash);
+            }
+            if s.probed {
+                let saved = s.player.as_ref().map_or(s.saved, |p| p.status());
+                known.insert(s.hash.clone(), (s.duration, s.fps, saved));
+            }
+            false
+        });
+
+        // New videos: nothing slow here (no ffmpeg on this thread).
         for src in app.video_sources() {
             if self.slots.iter().any(|s| s.hash == src.hash) {
                 continue;
             }
             let Some(path) = src.path.clone().filter(|p| p.is_file()).or_else(|| self.paths.get(&src.hash).cloned()) else { continue };
-            let (duration, fps) = probe(&path).map_or((0.0, 30.0), |p| (p.probe.duration_ms as f64 / 1000.0, p.fps.unwrap_or(30.0) as f64));
-            let saved = wall_app::VideoStatus { time: 0.0, duration, playing: true, speed: 1.0 };
-            let (pw, ph) = playback_size(src.width, src.height);
-            let (tx, rx) = mpsc::sync_channel(1);
-            let (p2, at) = (path.clone(), (duration / 3.0).min(1.0));
-            std::thread::spawn(move || {
-                let _ = tx.send(poster(&p2, pw, ph, at));
-            });
-            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, tex: None, tex_size: (0, 0), player: None, saved, poster: Some(rx) });
+            let from_details = src.duration_ms.map(|d| (d as f64 / 1000.0, src.fps.map_or(30.0, f64::from)));
+            let (duration, fps, saved, probed) = match (self.known.get(&src.hash), from_details) {
+                (Some(&(d, f, saved)), _) => (d, f, saved, true),
+                (None, Some((d, f))) => (d, f, wall_app::VideoStatus { time: 0.0, duration: d, playing: true, speed: 1.0 }, true),
+                (None, None) => (0.0, 30.0, wall_app::VideoStatus { time: 0.0, duration: 0.0, playing: true, speed: 1.0 }, false),
+            };
+            self.slots.push(Slot { hash: src.hash, path, width: src.width, height: src.height, duration, fps, probed, tex: None, tex_size: (0, 0), player: None, saved, job: None, posted: false, cache: src.poster_cache });
         }
 
+        // Probes and still frames, a few at a time: what plays first, then
+        // what's on screen, then the rest.
         let playable = app.playable_videos();
+        let mut running = self.slots.iter().filter(|s| s.job.is_some()).count();
+        if running < MAX_JOBS {
+            let mut todo: Vec<(u8, usize)> = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.job.is_none() && (!s.probed || (!s.posted && s.tex.is_none())))
+                .map(|(i, s)| {
+                    let on = shown.get(&s.hash).is_some_and(|x| x.1);
+                    (if playable.contains(&s.hash) { 0 } else if on { 1 } else { 2 }, i)
+                })
+                .collect();
+            todo.sort();
+            for (_, i) in todo {
+                if running >= MAX_JOBS {
+                    break;
+                }
+                let s = &mut self.slots[i];
+                let probe_it = !s.probed;
+                let shown_px = shown.get(&s.hash).map_or(0.0, |x| x.0);
+                let poster_it = !s.posted && s.tex.is_none();
+                let (pw, ph) = playback_size_max(s.width, s.height, decode_width(shown_px).min(POSTER_MAX_W));
+                let (path, hash, cache, known_d) = (s.path.clone(), s.hash.clone(), s.cache.clone(), s.duration);
+                let (tx, rx) = mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let probed = probe_it.then(|| probe(&path).map_or((0.0, 30.0), |p| (p.probe.duration_ms as f64 / 1000.0, p.fps.unwrap_or(30.0) as f64)));
+                    let d = probed.map_or(known_d, |p| p.0);
+                    let frame = if poster_it { cached_poster(cache.as_deref(), &hash, &path, pw, ph, (d / 3.0).min(1.0)).map(|px| (px, pw, ph)) } else { None };
+                    let _ = tx.send((probed, frame));
+                });
+                s.posted |= poster_it;
+                s.job = Some(rx);
+                running += 1;
+            }
+        }
         for slot in &mut self.slots {
-            let want = playable.contains(&slot.hash);
-            let max_w = decode_width(app.video_shown_px(&slot.hash));
+            let Some(rx) = &slot.job else { continue };
+            let (probed, frame) = match rx.try_recv() {
+                Ok(r) => r,
+                Err(mpsc::TryRecvError::Empty) => continue,
+                Err(mpsc::TryRecvError::Disconnected) => (None, None),
+            };
+            slot.job = None;
+            if let Some((d, f)) = probed {
+                (slot.duration, slot.fps, slot.probed) = (d, f, true);
+                slot.saved.duration = d;
+            }
+            slot.probed = true;
+            if let Some((frame, pw, ph)) = frame {
+                app.video_frame_seen(&slot.hash, &frame, pw, ph);
+                if slot.tex.is_none() {
+                    match renderer.create_video_texture(pw, ph) {
+                        Ok(tex) => {
+                            renderer.update_image(tex, &frame, pw, ph);
+                            app.attach_texture(slot.hash.clone(), tex);
+                            slot.tex = Some(tex);
+                            slot.tex_size = (pw, ph);
+                        }
+                        Err(e) => eprintln!("wall: video texture failed: {e}"),
+                    }
+                }
+            }
+            app.needs_redraw = true;
+        }
+
+        for slot in &mut self.slots {
+            let want = playable.contains(&slot.hash) && slot.probed;
+            let max_w = decode_width(shown.get(&slot.hash).map_or(0.0, |x| x.0));
             // Zoomed in past what the player decodes: restart it larger, at
             // the same time. (Zooming out keeps the sharper frames.)
             if let Some(p) = &slot.player {
@@ -766,6 +889,12 @@ impl Videos {
                 (Some(p), false) => {
                     slot.saved = p.status();
                     slot.player = None;
+                    // Off screen it needs no more than a still frame.
+                    if let Some(tex) = slot.tex.filter(|_| slot.tex_size.0 > POSTER_MAX_W) {
+                        let (w, h) = slot.tex_size;
+                        renderer.shrink_image(tex, w, h, POSTER_MAX_W);
+                        slot.tex_size = (POSTER_MAX_W, ((h as u64 * POSTER_MAX_W as u64 / w as u64) as u32).max(1));
+                    }
                 }
                 _ => {}
             }
@@ -786,30 +915,6 @@ impl Videos {
         }
 
         for slot in &mut self.slots {
-            if let Some(rx) = &slot.poster {
-                match rx.try_recv() {
-                    Ok(frame) => {
-                        slot.poster = None;
-                        if let Some(frame) = frame {
-                            let (pw, ph) = playback_size(slot.width, slot.height);
-                            app.video_frame_seen(&slot.hash, &frame, pw, ph);
-                            if slot.tex.is_none() {
-                                match renderer.create_video_texture(pw, ph) {
-                                    Ok(tex) => {
-                                        renderer.update_image(tex, &frame, pw, ph);
-                                        app.attach_texture(slot.hash.clone(), tex);
-                                        slot.tex = Some(tex);
-                                        slot.tex_size = (pw, ph);
-                                    }
-                                    Err(e) => eprintln!("wall: video texture failed: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                    Err(mpsc::TryRecvError::Disconnected) => slot.poster = None,
-                }
-            }
             let Some(player) = &mut slot.player else {
                 app.set_video_status(slot.hash.clone(), slot.saved);
                 continue;
