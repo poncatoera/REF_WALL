@@ -7,6 +7,9 @@ Works in Edge and Chrome (Manifest V3).
 
 ## Install (until it's in the stores)
 
+In Wall: **File > Install browser extension…** opens the folder, copies its
+address and shows these steps.
+
 1. Edge: go to `edge://extensions` (Chrome: `chrome://extensions`).
 2. Turn on **Developer mode**.
 3. **Load unpacked** and pick this `extension` folder.
