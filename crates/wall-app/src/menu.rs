@@ -82,6 +82,7 @@ pub enum Command {
     TidySameHeight,
     TidyPack,
     TidyColour,
+    WelcomeTour,
 }
 
 /// Commands the shell carries out, because they need the system.
@@ -219,6 +220,18 @@ pub const MENUS: &[Menu] = &[
             ("Previous / next marker", "; / '", None),
             ("Clear in and out", "Side panel", None),
             ("Scrub", "Drag the bar", None),
+        ],
+    },
+    Menu {
+        title: "Help",
+        entries: &[
+            ("Welcome tour", "", Some(Command::WelcomeTour)),
+            SEP,
+            ("Move around", "Drag empty board", None),
+            ("Zoom", "Scroll", None),
+            ("Fit everything on screen", "F", None),
+            ("New note", "Double-click", None),
+            ("All boards", "S", None),
         ],
     },
 ];
