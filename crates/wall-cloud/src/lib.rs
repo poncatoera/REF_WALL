@@ -438,7 +438,9 @@ impl Engine {
                 }
                 Ok(Err(e)) => {
                     fails += 1;
-                    wait = Duration::from_secs((5u64 << fails.min(6)).min(300));
+                    // At most a minute between tries, so a connection that comes back is
+                    // noticed soon (edits made meanwhile try at once anyway).
+                    wait = Duration::from_secs((5u64 << fails.min(6)).min(60));
                     if self.say(Status::Offline(e.to_string())).is_err() {
                         return;
                     }

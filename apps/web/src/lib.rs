@@ -41,10 +41,8 @@ extern "C" {
     fn store_put(key: &str, value: &JsValue) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_name = storeExport, catch)]
     fn store_export() -> Result<js_sys::Promise, JsValue>;
-    #[wasm_bindgen(js_name = storeImport, catch)]
-    fn store_import(text: &str) -> Result<js_sys::Promise, JsValue>;
-    #[wasm_bindgen(js_name = isBackup)]
-    fn is_backup(text: &str) -> bool;
+    #[wasm_bindgen(js_name = storeImportFile, catch)]
+    fn store_import_file(file: &web_sys::File) -> Result<js_sys::Promise, JsValue>;
 }
 
 #[wasm_bindgen(module = "/js/drop.js")]
@@ -310,7 +308,11 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
             });
         }
         // Libraries are folders on disk; the web menus don't offer them.
-        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::Cloud(_) => {}
+        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::Cloud(_) | wall_app::ShellCommand::ExportLibrary => {}
+        // The boards saved in this browser, as a file to keep.
+        // A shared board is the owner's library: they back it up in Wall.
+        wall_app::ShellCommand::BackUp { .. } if cloud::link().is_some() => notice("This board belongs to the library it was shared from; its owner backs it up."),
+        wall_app::ShellCommand::BackUp { .. } => wasm_bindgen_futures::spawn_local(backup(s.clone())),
         wall_app::ShellCommand::SetName(name) => cloud::set_name(&name),
         wall_app::ShellCommand::SetColor(c) => cloud::set_color(c),
         wall_app::ShellCommand::History(ask) => cloud::history(s.clone(), ask),
@@ -368,13 +370,9 @@ async fn backup(s: Rc<RefCell<State>>) {
         if s.borrow().store {
             save(s.clone()).await;
         }
-        let text = wasm_bindgen_futures::JsFuture::from(store_export()?).await?.as_string().ok_or("empty backup")?;
-        let parts = js_sys::Array::of1(&JsValue::from_str(&text));
-        let bag = web_sys::BlobPropertyBag::new();
-        bag.set_type("application/json");
-        let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &bag)?;
+        let blob: web_sys::Blob = wasm_bindgen_futures::JsFuture::from(store_export()?).await?.dyn_into()?;
         let day: String = String::from(js_sys::Date::new_0().to_iso_string()).chars().take(10).collect();
-        download(&blob, &format!("Wall backup {day}.json"))
+        download(&blob, &format!("Wall backup {day}.zip"))
     }
     .await;
     if let Err(e) = result {
@@ -384,14 +382,10 @@ async fn backup(s: Rc<RefCell<State>>) {
 
 /// A dropped backup file: after asking, replaces what's saved and reloads.
 async fn restore_backup(file: web_sys::File) -> Result<(), JsValue> {
-    let text = wasm_bindgen_futures::JsFuture::from(file.text()).await?.as_string().unwrap_or_default();
-    if !is_backup(&text) {
-        return Err(JsValue::from_str("not a Wall backup"));
-    }
     let window = web_sys::window().ok_or("no window")?;
-    let ok = window.confirm_with_message(&format!("Replace the boards saved in this browser with \"{}\"?", file.name()))?;
+    let ok = window.confirm_with_message(&format!("Replace the boards saved in this browser with the backup \"{}\"?", file.name()))?;
     if ok {
-        wasm_bindgen_futures::JsFuture::from(store_import(&text)?).await?;
+        wasm_bindgen_futures::JsFuture::from(store_import_file(&file)?).await?;
         window.location().reload()?;
     }
     Ok(())
@@ -532,7 +526,9 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             if down && cmd && (k == "s" || k == "S") {
                 // Instead of the browser's "save page": a backup file.
                 e.prevent_default();
-                wasm_bindgen_futures::spawn_local(backup(s.clone()));
+                let mut st = s.borrow_mut();
+                st.app.run_command(wall_app::menu::Command::BackUpNow);
+                st.app.needs_redraw = true;
                 return;
             }
             let mut s = s.borrow_mut();
@@ -719,7 +715,8 @@ fn import_many(s: Rc<RefCell<State>>, files: Vec<web_sys::File>) {
 }
 
 fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
-    if file.name().to_lowercase().ends_with(".json") {
+    let lower = file.name().to_lowercase();
+    if lower.ends_with(".json") || (lower.ends_with(".zip") && lower.starts_with("wall backup")) {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = restore_backup(file).await {
                 import_failed("the backup", &err_text(&e));

@@ -55,7 +55,7 @@ fn video(dir: &Path, i: usize) -> Res<std::path::PathBuf> {
     use wall_media::ffmpeg;
     let exe = ffmpeg::ffmpeg().ok_or("videos need ffmpeg")?;
     let path = dir.join(format!("stress-{i}.mp4"));
-    let (w, h) = if i % 3 == 0 { (480, 640) } else { (640, 360) };
+    let (w, h) = if i.is_multiple_of(3) { (480, 640) } else { (640, 360) };
     let secs = 2 + i % 4;
     let src = format!("testsrc2=size={w}x{h}:rate=30:duration={secs}");
     let out = ffmpeg::command(exe)

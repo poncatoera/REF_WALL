@@ -23,6 +23,7 @@
 // Release builds on Windows have no console window; see console.rs.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod backup;
 mod console;
 mod collect;
 mod lock;
@@ -75,6 +76,7 @@ struct Shell {
     title: String,
     /// An old-Wall import running in the background.
     old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
+    backups: backup::Backups,
     /// Keeps the library and its cloud copy the same, when it has one.
     cloud: Option<Cloud>,
     /// The library [`Self::cloud`] was last tried for.
@@ -274,6 +276,30 @@ fn pick_library(new: bool) -> Option<std::path::PathBuf> {
             None
         }
     }
+}
+
+/// File > Back up to folder: an empty folder, or an earlier backup of this
+/// library. Somewhere else than the library's own drive is best.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_backup_folder(_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title("Back up the library to… (an empty folder, ideally on another drive or a synced folder)").pick_folder()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_backup_folder(_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_PICK_BACKUP").map(Into::into)
+}
+
+/// File > Export library as .zip: where to save it.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_zip(name: &str) -> Option<std::path::PathBuf> {
+    let p = rfd::FileDialog::new().set_title("Export the library as one .zip file").set_file_name(name).add_filter("Zip file", &["zip"]).save_file()?;
+    Some(if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) { p } else { p.with_extension("zip") })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_zip(_name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_EXPORT_LIBRARY").map(Into::into)
 }
 
 /// File > Import old Wall library: the old library's folder (with library.json).
@@ -751,7 +777,13 @@ impl ApplicationHandler for Shell {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let size = gfx.window.inner_size();
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if let Err(e) = self.app.save_if_dirty() {
+                    eprintln!("wall: could not save: {e}");
+                }
+                self.backups.on_close(self.app.library_root());
+                event_loop.exit();
+            }
             WindowEvent::Resized(s) => {
                 if let (Some(w), Some(h)) = (NonZeroU32::new(s.width), NonZeroU32::new(s.height)) {
                     gfx.surface.resize(&gfx.context, w, h);
@@ -800,6 +832,11 @@ impl ApplicationHandler for Shell {
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("a") => Some(Key::SelectAll),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("d") => Some(Key::Duplicate),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("f") => Some(Key::Find),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("s") => {
+                        self.app.run_command(wall_app::menu::Command::BackUpNow);
+                        gfx.window.request_redraw();
+                        None
+                    }
                     WKey::Character("]") if m.command => Some(Key::BringToFront),
                     WKey::Character("[") if m.command => Some(Key::SendToBack),
                     WKey::Character(c) if m.command && !editing && (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x")) => {
@@ -879,6 +916,36 @@ impl ApplicationHandler for Shell {
                                 }
                             }
                         }
+                        wall_app::ShellCommand::BackUp { choose } => match self.app.library_root().map(|p| p.to_owned()) {
+                            None => show_error("Open a library first."),
+                            Some(_) if self.backups.busy() => show_info("A backup is already running."),
+                            Some(root) => {
+                                if let Err(e) = self.app.save_if_dirty() {
+                                    eprintln!("wall: could not save: {e}");
+                                }
+                                let dest = if choose { None } else { backup::folder(&root) }.or_else(|| pick_backup_folder(&root));
+                                if let Some(dest) = dest {
+                                    backup::set_folder(&root, &dest);
+                                    self.backups.back_up(&root, &dest, true);
+                                    gfx.window.set_title(&format!("{} (backing up…)", self.title));
+                                }
+                            }
+                        },
+                        wall_app::ShellCommand::ExportLibrary => match self.app.library_root().map(|p| p.to_owned()) {
+                            None => show_error("Open a library first."),
+                            Some(_) if self.backups.busy() => show_info("A backup is already running."),
+                            Some(root) => {
+                                if let Err(e) = self.app.save_if_dirty() {
+                                    eprintln!("wall: could not save: {e}");
+                                }
+                                let stem = root.file_stem().and_then(|s| s.to_str()).unwrap_or("Library");
+                                let day = backup::today();
+                                if let Some(to) = pick_zip(&format!("{stem} {day}.zip")) {
+                                    self.backups.export(&root, &to);
+                                    gfx.window.set_title(&format!("{} (exporting…)", self.title));
+                                }
+                            }
+                        },
                         wall_app::ShellCommand::ExportImage => {
                             let name = format!("{}.png", self.app.board_name());
                             if let Some(path) = pick_export(&name) {
@@ -1021,6 +1088,18 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(done) = self.backups.tick(self.app.library_root()) {
+            if let Some(gfx) = &self.gfx {
+                gfx.window.set_title(&self.title);
+            }
+            let text = backup::describe(&done);
+            match done {
+                backup::Done::Failed { asked: true, .. } => show_error(&text),
+                backup::Done::Failed { asked: false, .. } => eprintln!("wall: {text}"),
+                backup::Done::BackedUp { asked: false, .. } => println!("wall: {text}"),
+                _ => show_info(&text),
+            }
+        }
         if let Some(c) = &mut self.collector {
             let changed = c.pump(&mut self.app, &mut self.videos, &mut self.failed);
             if changed || self.app.needs_redraw || self.videos.busy() {
@@ -1048,7 +1127,13 @@ impl ApplicationHandler for Shell {
             self.cloud_for = self.app.library_root().map(|p| p.to_owned());
         }
         let Some(cloud) = &mut self.cloud else {
-            event_loop.set_control_flow(if self.failed.is_empty() { winit::event_loop::ControlFlow::Wait } else { winit::event_loop::ControlFlow::WaitUntil(Instant::now() + CLOUD_LOOK) });
+            // Look again for failures to show, a backup to finish or the
+            // next half-hourly backup.
+            let wait = if !self.failed.is_empty() || self.backups.busy() { Some(CLOUD_LOOK) } else { self.app.library_root().map(|_| std::time::Duration::from_secs(60)) };
+            event_loop.set_control_flow(match wait {
+                Some(w) => winit::event_loop::ControlFlow::WaitUntil(Instant::now() + w),
+                None => winit::event_loop::ControlFlow::Wait,
+            });
             return;
         };
         self.app.set_time(now_ms());
@@ -1285,6 +1370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         posters: LibraryPosters::default(),
         title,
         old_import: None,
+        backups: backup::Backups::default(),
         batch: None,
         failed: Vec::new(),
         cloud: None,
