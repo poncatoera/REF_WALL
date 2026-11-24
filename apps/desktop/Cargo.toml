@@ -23,6 +23,7 @@ glutin = "0.32"
 glutin-winit = "0.5"
 raw-window-handle = "0.6"
 serde_json.workspace = true
+ureq = "3"
 uuid.workspace = true
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 

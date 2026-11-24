@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "Wall",
+  "version": "1.0.0",
+  "description": "Right-click any picture, video or page to add it to a Wall board: the Wall app, or Wall on the web.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "alarms",
+    "scripting",
+    "cookies",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.instagram.com/*",
+        "*://*.x.com/*",
+        "*://*.twitter.com/*"
+      ],
+      "js": [
+        "postlink.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://wall.poncatoera.workers.dev/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "webwall.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Wall",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "commands": {
+    "send-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Add this page's video to Wall"
+    },
+    "screenshot": {
+      "suggested_key": {
+        "default": "Alt+Shift+X"
+      },
+      "description": "Add a screenshot of the visible page to Wall"
+    },
+    "screenshot-area": {
+      "suggested_key": {
+        "default": "Alt+Shift+A"
+      },
+      "description": "Drag out an area of the page and add it to Wall"
+    },
+    "mark-in": {
+      "description": "Clip start: the video's current time"
+    },
+    "mark-out": {
+      "description": "Clip end: the video's current time"
+    }
+  }
+}

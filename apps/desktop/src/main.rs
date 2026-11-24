@@ -24,6 +24,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod console;
+mod collect;
 mod lock;
 mod video;
 
@@ -83,6 +84,8 @@ struct Shell {
     saved_look: (bool, bool),
     /// Tool rail place and left panel, as last saved.
     saved_ui: String,
+    /// Pictures and videos sent from the browser extension.
+    collector: Option<collect::Collector>,
 }
 
 /// (hash, RGBA frame and its size, or None if ffmpeg couldn't read it).
@@ -995,6 +998,14 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(c) = &mut self.collector {
+            let changed = c.pump(&mut self.app, &mut self.videos, &mut self.failed);
+            if changed || self.app.needs_redraw || self.videos.busy() {
+                if let Some(gfx) = &self.gfx {
+                    gfx.window.request_redraw();
+                }
+            }
+        }
         self.failed.append(&mut self.videos.failed);
         // Each dropped file is an event of its own: wait for the last one.
         let dropping = self.batch.as_ref().is_some_and(|b| b.at.elapsed().as_millis() < 500);
@@ -1247,7 +1258,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloud_asks: Vec::new(),
         saved_look: (light, grid),
         saved_ui: settings::get_str("ui").unwrap_or_default(),
+        collector: None,
     };
+    let proxy = event_loop.create_proxy();
+    shell.collector = collect::Collector::start(move || {
+        let _ = proxy.send_event(());
+    });
     event_loop.run_app(&mut shell)?;
     Ok(())
 }
