@@ -54,6 +54,8 @@ function fillDest() {
   const want = destKey(state.dest);
   const keys = [...sel.options].map((o) => o.value);
   sel.value = keys.includes(want) ? want : keys[0] || '';
+  // What's shown is where things go, even when the saved choice is gone.
+  if (sel.value && sel.value !== want) chrome.runtime.sendMessage({ type: 'set-dest', dest: destFrom(sel.value) });
   updateKind();
 }
 

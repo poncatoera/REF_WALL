@@ -43,6 +43,8 @@ done
 app="$out/Wall.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+# The browser extension, next to the executable (File > Install browser extension).
+cp -R "$root/extension" "$app/Contents/MacOS/extension"
 lipo -create -output "$app/Contents/MacOS/wall" \
   "$root/target/aarch64-apple-darwin/release/wall" \
   "$root/target/x86_64-apple-darwin/release/wall"

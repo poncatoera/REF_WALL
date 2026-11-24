@@ -308,7 +308,7 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
             });
         }
         // Libraries are folders on disk; the web menus don't offer them.
-        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::Cloud(_) | wall_app::ShellCommand::ExportLibrary => {}
+        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::InstallExtension | wall_app::ShellCommand::Cloud(_) | wall_app::ShellCommand::ExportLibrary => {}
         // The boards saved in this browser, as a file to keep.
         // A shared board is the owner's library: they back it up in Wall.
         wall_app::ShellCommand::BackUp { .. } if cloud::link().is_some() => notice("This board belongs to the library it was shared from; its owner backs it up."),

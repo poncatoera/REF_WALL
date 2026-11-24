@@ -115,8 +115,8 @@ impl Library {
 
 /// A backup folder must be empty, missing, or a backup of the same library.
 fn check_dest(lib: &Library, dest: &Path) -> Result<()> {
-    let root = fs::canonicalize(lib.root()).unwrap_or_else(|_| lib.root().to_owned());
-    let full = fs::canonicalize(dest).unwrap_or_else(|_| dest.to_owned());
+    let root = full_path(lib.root());
+    let full = full_path(dest);
     if full.starts_with(&root) || root.starts_with(&full) {
         return Err(Error::Backup("the backup folder can't be inside the library, or the library inside it".into()));
     }
@@ -130,6 +130,26 @@ fn check_dest(lib: &Library, dest: &Path) -> Result<()> {
         return Err(Error::Backup(format!("{} isn't empty; pick an empty folder for the backup", dest.display())));
     }
     Ok(())
+}
+
+/// The full path of `p` even when it doesn't exist yet: the nearest folder
+/// that does is made full (on Windows that gives the `\\?\C:\` form) and
+/// the rest is added, so two paths compare alike either way.
+fn full_path(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p.to_path_buf();
+    loop {
+        if let Ok(full) = fs::canonicalize(&at) {
+            return rest.iter().rev().fold(full, |acc: PathBuf, part| acc.join(part));
+        }
+        match (at.file_name().map(|n| n.to_owned()), at.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                at = parent.to_path_buf();
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
