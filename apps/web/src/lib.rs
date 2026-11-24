@@ -431,6 +431,17 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     let saved_ui = stored("wall.ui").unwrap_or_default();
     app.set_ui_setting(&saved_ui);
+    // First visit: the welcome walkthrough. A share link gets its own short
+    // card once we know whether it can edit (see `cloud`).
+    // `?welcome=slide:N` or `tip:N` shows one step (screenshots).
+    let search = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+    if let Some(v) = search.split(['?', '&']).find_map(|p| p.strip_prefix("welcome=")) {
+        if let Some((kind, n)) = v.split_once(':') {
+            app.welcome_show(n.parse().unwrap_or(0), kind == "tip");
+        }
+    } else if share.is_none() && !search.contains("demo") {
+        app.welcome_if_new();
+    }
     app.set_utc_offset(-(js_sys::Date::new_0().get_timezone_offset() as i32));
     // A shared board's history is kept in the cloud.
     app.set_history_remote(share.is_some());

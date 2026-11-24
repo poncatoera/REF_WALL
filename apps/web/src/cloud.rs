@@ -294,6 +294,7 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
             if !known {
                 view = json::<Me>(&key, "GET", "me", None).await?.role == "view";
                 s.borrow_mut().app.set_view_only(view);
+                s.borrow_mut().app.welcome_guest(view);
                 known = true;
             }
             let moved = round(&s, &key, &mut sync, view, &mut uploads, &mut sent).await?;
