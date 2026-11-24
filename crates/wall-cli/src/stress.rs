@@ -61,7 +61,8 @@ fn video(dir: &Path, i: usize) -> Res<std::path::PathBuf> {
     let out = ffmpeg::command(exe)
         .args(["-v", "error", "-y", "-f", "lavfi", "-i", &src])
         .args(["-vf", &format!("hue=h={}", (i * 37) % 360)])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-g", "30", "-metadata", &format!("title=stress {i}")])
+        // Whichever H.264 encoder this ffmpeg has (Wall's own has no libx264).
+        .args(["-c:v", ffmpeg::h264_encoders().first().map_or("libx264", |e| e.ffmpeg_name()), "-pix_fmt", "yuv420p", "-g", "30", "-metadata", &format!("title=stress {i}")])
         .arg(&path)
         .output()
         .map_err(|e| e.to_string())?;
