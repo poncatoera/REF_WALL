@@ -84,11 +84,13 @@ pub struct BoardMeta {
     pub seen_ms: u64,
     /// The biggest picture on it, for the row's thumbnail.
     pub thumb: Option<ContentHash>,
+    /// Its open comments, for counting new ones (see `unread`).
+    pub tips: Vec<crate::unread::Tip>,
 }
 
 impl BoardMeta {
     pub fn of(board: &Board) -> Self {
-        BoardMeta { parent: board.parent, created_ms: board.created_ms, seen_ms: board.updated_ms, thumb: thumb_of(board) }
+        BoardMeta { parent: board.parent, created_ms: board.created_ms, seen_ms: board.updated_ms, thumb: thumb_of(board), tips: crate::unread::tips(board) }
     }
 }
 
@@ -116,6 +118,8 @@ pub struct Row {
     pub thumb: Option<ContentHash>,
     /// Small grey text after the name (the parent board, in search results).
     pub note: Option<String>,
+    /// New comments on it, shown as a red count.
+    pub new_comments: usize,
 }
 
 /// Boards in tree order: each board followed by its sub-boards. Sisters are
@@ -375,6 +379,16 @@ fn draw_row(l: &mut Layout, font: &mut Font, v: &View, row: &Row, r: [f32; 4], t
         l.hits.push((xr, Action::Delete(row.id)));
         right = xr[0] - 4.0;
     }
+    // New comments: a red count on the right.
+    if row.new_comments > 0 {
+        let label = if row.new_comments > 99 { "99+".to_owned() } else { row.new_comments.to_string() };
+        let w = (panel::text_width(font, &label, 10.5) + 10.0).max(18.0);
+        let b = [right - w, r[1] + (r[3] - 18.0) / 2.0, w, 18.0];
+        l.rect(b, crate::unread::RED, [0.0; 4], 9.0);
+        let tw = panel::text_width(font, &label, 10.5);
+        l.text(label, [b[0] + (w - tw) / 2.0, b[1] + 13.0], 10.5, [1.0; 4]);
+        right = b[0] - 6.0;
+    }
     let renaming = matches!(&v.state.typing, Some((Field::Rename(id), _)) if *id == row.id) && tree;
     let ink = if row.current { t.accent_text } else { t.ink };
     if renaming {
@@ -495,6 +509,7 @@ impl App {
             current,
             thumb,
             note,
+            new_comments: self.new_comments_on(id),
         }
     }
 
@@ -1136,7 +1151,7 @@ mod tests {
     use super::*;
 
     fn meta(parent: Option<Uuid>, created: u64) -> BoardMeta {
-        BoardMeta { parent, created_ms: created, seen_ms: created, thumb: None }
+        BoardMeta { parent, created_ms: created, seen_ms: created, thumb: None, tips: vec![] }
     }
 
     use crate::{Button, Key, Mods};

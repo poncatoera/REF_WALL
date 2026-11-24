@@ -6,7 +6,8 @@
 // Who may do what: a request carries a 256-bit secret as a Bearer token. The
 // owner's key matches OWNER_HASH; a share link's secret matches a row in
 // `links` (only hashes are stored). A link opens the whole library or one
-// board with the boards inside it, to view or to edit, until it's revoked.
+// board with the boards inside it, to view or to edit, until it's revoked
+// or (when it was made with one) its end date has passed.
 //
 // Merging is the file format's rule (BoardItem::supersedes): the higher
 // `rev` wins, then the larger `updated_by`. Every accepted row gets the next
@@ -24,6 +25,13 @@
 // once instead of at their next poll. The key comes in the first message,
 // since a browser can't set headers on a WebSocket. Sockets hibernate, so
 // a quiet one costs nothing; the free plan counts 20 messages as a request.
+//
+// Follow and spotlight ride on the same socket: someone says whose view they
+// follow ({t:"follow"}), or that they bring everyone to theirs ({t:"spot"},
+// not from view-only links). A person sends their view ({t:"view"}: the
+// board area they see) only while followed or leading, and it goes only to
+// those following them; when they open another board, those following get a
+// {t:"goto"} first, so they can come along.
 import { DurableObject } from "cloudflare:workers";
 
 const SHARDS = 8;
@@ -50,6 +58,7 @@ const MAX_VERSION = 8_000_000;
 const VERSIONS_UNTIL_DB = 500_000_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const MAX_LINK_DAYS = 366; // the furthest end date a link can have
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -271,6 +280,11 @@ async function gzip(text) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+// A connection id as the server makes them (see fetch), or null.
+function cleanId(v) {
+  return typeof v === "string" && /^[0-9a-f-]{1,20}$/.test(v) ? v : null;
+}
+
 function cleanColor(v) {
   return Number.isInteger(v) && v >= 0 && v < 8 ? v : null;
 }
@@ -308,6 +322,10 @@ export class LibraryDO extends DurableObject {
       // Added later: the person a link is for ("Mia"); empty for anyone.
       if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'person'").length) {
         this.sql.exec("ALTER TABLE links ADD COLUMN person TEXT NOT NULL DEFAULT ''");
+      }
+      // Added later: when a link stops working (ms), 0 for never.
+      if (!this.rows("SELECT name FROM pragma_table_info('links') WHERE name = 'expires'").length) {
+        this.sql.exec("ALTER TABLE links ADD COLUMN expires INTEGER NOT NULL DEFAULT 0");
       }
     });
     // Hashes a board-only link may read, kept while nothing changes.
@@ -366,7 +384,7 @@ export class LibraryDO extends DurableObject {
   }
 
   peer(a) {
-    return { id: a.id, name: a.name, color: a.color ?? null, x: a.x ?? null, y: a.y ?? null };
+    return { id: a.id, name: a.name, color: a.color ?? null, x: a.x ?? null, y: a.y ?? null, view: a.view ?? null, follow: a.follow ?? null, spot: !!a.spot };
   }
 
   // What someone who gave no name is called: "Guest (Nike team)" for a
@@ -408,6 +426,11 @@ export class LibraryDO extends DurableObject {
       a.color = cleanColor(m.color);
       a.board = null;
       a.at = 0;
+      a.vat = 0;
+      a.view = null;
+      // Following someone or leading carries over a reconnect.
+      a.follow = cleanId(m.follow);
+      a.spot = !!m.spot && access.role !== "view";
       ws.serializeAttachment(a);
       this.send(ws, { t: "welcome", id: a.id, seq: this.seq(), ...(a.fixed ? { name: a.name } : {}) });
       if (typeof m.board === "string") return this.join(ws, a, access, m.board);
@@ -434,14 +457,55 @@ export class LibraryDO extends DurableObject {
       ws.serializeAttachment(a);
       return this.tell(a.board, { t: "cursor", id: a.id, x: a.x, y: a.y }, ws);
     }
+    if (m.t === "view") {
+      const now = Date.now();
+      if (now - (a.vat || 0) < CURSOR_MS) return;
+      const ok = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e9;
+      if (![m.x, m.y, m.w, m.h].every(ok) || m.w <= 0 || m.h <= 0) return;
+      a.view = [m.x, m.y, m.w, m.h];
+      a.vat = now;
+      ws.serializeAttachment(a);
+      const msg = { t: "view", id: a.id, x: m.x, y: m.y, w: m.w, h: m.h };
+      for (const [w, o] of this.watchers(a, ws)) this.send(w, msg);
+      return;
+    }
+    if (m.t === "follow") {
+      a.follow = cleanId(m.id);
+      if (a.follow === a.id) a.follow = null;
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+    }
+    if (m.t === "spot") {
+      // Clients can follow, but not pull everyone along.
+      if (access.role === "view") return;
+      a.spot = !!m.on;
+      ws.serializeAttachment(a);
+      return this.tell(a.board, { t: "peer", peer: this.peer(a) }, ws);
+    }
+  }
+
+  // Those on a's board who see through a's eyes: following a, or everyone
+  // while a leads.
+  watchers(a, except) {
+    if (!a.board) return [];
+    return this.live().filter(([w, o]) => w !== except && o.board === a.board && (a.spot || o.follow === a.id));
   }
 
   // Moves a socket to `board` (or nowhere, if it may not look at it).
   join(ws, a, access, board) {
     if (a.board === board) return;
+    const next = this.reaches(access, board) ? board : null;
+    if (a.board && next) {
+      // Those following come along, if their link reaches that board too.
+      for (const [w, o] of this.watchers(a, ws)) {
+        const theirs = this.access(o.who);
+        if (theirs && this.reaches(theirs, next)) this.send(w, { t: "goto", id: a.id, board: next });
+      }
+    }
     if (a.board) this.tell(a.board, { t: "leave", id: a.id }, ws);
-    a.board = this.reaches(access, board) ? board : null;
+    a.board = next;
     a.x = a.y = null;
+    a.view = null;
     ws.serializeAttachment(a);
     if (!a.board) return this.send(ws, { t: "peers", board, peers: [] });
     const peers = this.live().filter(([w, o]) => w !== ws && o.board === a.board).map(([, o]) => this.peer(o));
@@ -495,8 +559,8 @@ export class LibraryDO extends DurableObject {
   access(who) {
     const owner = this.env.OWNER_HASH;
     if (owner && HASH.test(owner) && who === owner) return { role: "owner", board: null, link: null };
-    const l = this.rows("SELECT id, role, board, person FROM links WHERE secret = ? AND revoked = 0", who)[0];
-    return l ? { role: l.role, board: l.board, link: l.id, person: l.person || "" } : null;
+    const l = this.rows("SELECT id, role, board, person, expires FROM links WHERE secret = ? AND revoked = 0 AND (expires = 0 OR expires > ?)", who, Date.now())[0];
+    return l ? { role: l.role, board: l.board, link: l.id, person: l.person || "", expires: l.expires || 0 } : null;
   }
 
   // The boards a link reaches: null for all, else a Set of ids.
@@ -540,7 +604,7 @@ export class LibraryDO extends DurableObject {
     const a = this.access(who);
     if (!a) return no(403, "this link doesn't work (any more)");
     const used = this.used();
-    return { role: a.role, board: a.board, seq: this.seq(), ...(a.role === "owner" ? { media_bytes: used, max_media_bytes: this.max() } : {}) };
+    return { role: a.role, board: a.board, seq: this.seq(), ...(a.expires ? { expires: a.expires } : {}), ...(a.role === "owner" ? { media_bytes: used, max_media_bytes: this.max() } : {}) };
   }
 
   max() {
@@ -970,7 +1034,9 @@ export class LibraryDO extends DurableObject {
 
   async listLinks(who) {
     if (this.access(who)?.role !== "owner") return no(403, "owner only");
-    return { links: this.rows("SELECT id, role, board, label, person, created FROM links WHERE revoked = 0 ORDER BY created") };
+    // Expired links are listed too (the app shows them as ended) until
+    // they're turned off.
+    return { links: this.rows("SELECT id, role, board, label, person, created, expires FROM links WHERE revoked = 0 ORDER BY created") };
   }
 
   async makeLink(who, req) {
@@ -983,11 +1049,21 @@ export class LibraryDO extends DurableObject {
     const secret = newSecret();
     const id = crypto.randomUUID();
     const person = cleanName(req.person, "");
+    // An end date: `expires` (ms) or `days` from now; neither for never.
+    const now = Date.now();
+    let expires = 0;
+    if (req.expires !== undefined && req.expires !== null && req.expires !== 0) {
+      if (!Number.isSafeInteger(req.expires) || req.expires <= now || req.expires > now + MAX_LINK_DAYS * DAY) return no(400, "bad end date");
+      expires = req.expires;
+    } else if (req.days !== undefined && req.days !== null && req.days !== 0) {
+      if (!Number.isSafeInteger(req.days) || req.days < 1 || req.days > MAX_LINK_DAYS) return no(400, "bad number of days");
+      expires = now + req.days * DAY;
+    }
     this.sql.exec(
-      "INSERT INTO links (id, secret, role, board, label, created, revoked, person) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-      id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), Date.now(), person,
+      "INSERT INTO links (id, secret, role, board, label, created, revoked, person, expires) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      id, await sha256(secret), role, board, String(req.label || "").slice(0, 100), now, person, expires,
     );
-    return { id, secret, role, board, person };
+    return { id, secret, role, board, person, expires };
   }
 
   async revokeLink(who, id) {

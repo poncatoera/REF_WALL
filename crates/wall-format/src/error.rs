@@ -18,6 +18,8 @@ pub enum Error {
     AlreadyExists(PathBuf),
     #[error("{0} is not in the trash")]
     NotInTrash(String),
+    #[error("{0}")]
+    Backup(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -7,7 +7,7 @@ use crate::{menu, App};
 use wall_render::{BoxInstance, Renderer, ViewUniform};
 
 /// Someone else looking at the board this app has open.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Peer {
     /// Their connection, stable while they stay.
     pub id: String,
@@ -16,6 +16,13 @@ pub struct Peer {
     pub at: Option<[f32; 2]>,
     /// The colour they picked (an index into the 8), else one by their id.
     pub color: Option<u8>,
+    /// The part of the board they see ([x, y, w, h]), sent while someone
+    /// follows them or they lead.
+    pub view: Option<[f32; 4]>,
+    /// Whose view they follow (an id), if anyone's.
+    pub follow: Option<String>,
+    /// They bring everyone on the board to their view (spotlight, presenting).
+    pub spot: bool,
 }
 
 impl Peer {
@@ -72,6 +79,8 @@ pub(crate) struct PresenceLayout {
     pub card: Option<[f32; 4]>,
     /// The colour swatches on the card.
     pub swatches: Vec<([f32; 4], u8)>,
+    /// Everyone else's badge, with their id: a click follows them.
+    pub badges: Vec<([f32; 4], String)>,
 }
 
 /// Ourselves, for the layout: our name, and the text being typed if the
@@ -90,12 +99,13 @@ const CARD_W: f32 = 280.0;
 
 /// Badges and pointers for `peers`, in screen pixels. The badges sit in the
 /// menu bar and end at `right` (left of the board's name).
-pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], viewport: [f32; 2], right: f32, width: &mut dyn FnMut(&str, f32) -> f32) -> PresenceLayout {
+pub(crate) fn layout(peers: &[Peer], me: Option<Me>, leader: Option<&str>, to_screen: &dyn Fn([f32; 2]) -> [f32; 2], viewport: [f32; 2], right: f32, width: &mut dyn FnMut(&str, f32) -> f32) -> PresenceLayout {
     let mut boxes = Vec::new();
     let mut texts = Vec::new();
     let mut me_rect = None;
     let mut card = None;
     let mut swatches = Vec::new();
+    let mut badges = Vec::new();
 
     // Pointers first, so the badges stay on top.
     for p in peers {
@@ -170,13 +180,16 @@ pub(crate) fn layout(peers: &[Peer], me: Option<Me>, to_screen: &dyn Fn([f32; 2]
         x = r[0] - BADGE + 6.0;
     }
     for p in peers.iter().take(shown) {
-        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: p.paint(), stroke: crate::theme::t().menu_bar, radius: BADGE / 2.0, stroke_w: 2.0 });
+        // The one we follow gets a ring in the accent colour.
+        let ring = if leader == Some(p.id.as_str()) { (crate::theme::t().accent, 2.5) } else { (crate::theme::t().menu_bar, 2.0) };
+        boxes.push(PanelBox { rect: [x, y, BADGE, BADGE], fill: p.paint(), stroke: ring.0, radius: BADGE / 2.0, stroke_w: ring.1 });
+        badges.push(([x, y, BADGE, BADGE], p.id.clone()));
         let i = initial(&p.name);
         texts.push(TextRun { at: [x + (BADGE - width(&i, 13.0)) / 2.0, y + 16.5], text: i, size: 13.0, color: WHITE });
         // Overlap a little, like a stack of people.
         x -= BADGE - 6.0;
     }
-    PresenceLayout { boxes, texts, me: me_rect, card, swatches }
+    PresenceLayout { boxes, texts, me: me_rect, card, swatches, badges }
 }
 
 /// Names are one line, at most this many characters (the server cuts there too).
@@ -246,10 +259,21 @@ impl App {
     /// A press on our badge opens the name card; a press outside it keeps
     /// what was typed. True when the press was used up.
     pub(crate) fn presence_press(&mut self, pos: [f32; 2]) -> bool {
-        if self.my_name.is_none() {
+        if self.my_name.is_none() && self.peers.is_empty() {
             return false;
         }
         let l = self.presence_layout();
+        if l.card.is_none() {
+            // Badges overlap: the one drawn last (leftmost) is on top.
+            if let Some((_, id)) = l.badges.iter().rev().find(|(r, _)| panel::inside(*r, pos)) {
+                let id = id.clone();
+                self.badge_follow(id);
+                return true;
+            }
+        }
+        if self.my_name.is_none() {
+            return false;
+        }
         if let Some(c) = l.card {
             if let Some((_, i)) = l.swatches.iter().find(|(r, _)| panel::inside(*r, pos)) {
                 if self.my_color != Some(*i) {
@@ -328,9 +352,10 @@ impl App {
         let to_screen = move |p: [f32; 2]| [(p[0] - cam.center[0]) * cam.zoom + vp[0] * 0.5, (p[1] - cam.center[1]) * cam.zoom + vp[1] * 0.5];
         let caret = (self.now_ms / 530) % 2 == 0;
         let me = self.my_name.as_deref().map(|name| Me { name, editing: self.name_edit.as_deref(), caret, color: self.my_color, fixed: self.name_fixed });
+        let leader = self.leader().map(|p| p.id.clone());
         let font = &mut self.font;
         // At the right of the menu bar, left of the Share button.
-        layout(&self.peers, me, &to_screen, vp, menu::badges_right(vp, self.desktop), &mut |s, size| panel::text_width(font, s, size))
+        layout(&self.peers, me, leader.as_deref(), &to_screen, vp, menu::badges_right(vp, self.desktop), &mut |s, size| panel::text_width(font, s, size))
     }
 
     pub(crate) fn draw_presence(&mut self, renderer: &mut Renderer) {
@@ -366,13 +391,13 @@ mod tests {
     }
 
     fn peer(id: &str, name: &str, at: Option<[f32; 2]>) -> Peer {
-        Peer { id: id.into(), name: name.into(), at, color: None }
+        Peer { id: id.into(), name: name.into(), at, ..Default::default() }
     }
 
     #[test]
     fn each_person_gets_a_badge_and_a_named_pointer_where_they_point() {
         let peers = [peer("a1", "Mia", Some([100.0, 200.0])), peer("b2", "jon", None)];
-        let l = layout(&peers, None, &|p| p, [1000.0, 700.0], 900.0, &mut width);
+        let l = layout(&peers, None, None, &|p| p, [1000.0, 700.0], 900.0, &mut width);
         // Mia: dot + name tag + badge; Jon: badge only (pointer off the board).
         assert_eq!(l.boxes.len(), 4);
         assert!(l.texts.iter().any(|t| t.text == "Mia" && t.at[0] > 100.0 && t.at[1] > 200.0), "name beside the pointer");
@@ -386,7 +411,7 @@ mod tests {
     #[test]
     fn a_crowd_shows_six_badges_and_a_count_and_off_screen_pointers_are_left_out() {
         let peers: Vec<Peer> = (0..9).map(|i| peer(&format!("p{i}"), &format!("P{i}"), Some([5000.0, 5000.0]))).collect();
-        let l = layout(&peers, None, &|p| p, [1000.0, 700.0], 900.0, &mut width);
+        let l = layout(&peers, None, None, &|p| p, [1000.0, 700.0], 900.0, &mut width);
         assert_eq!(l.boxes.len(), 7, "no pointers off screen, 6 badges, 1 count");
         assert!(l.texts.iter().any(|t| t.text == "+3"));
     }

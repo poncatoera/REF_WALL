@@ -164,6 +164,9 @@ pub struct Link {
     /// The name of the one it's for ("" for anyone).
     #[serde(default)]
     pub person: String,
+    /// When it stops working (ms since 1970), 0 for never.
+    #[serde(default)]
+    pub expires: u64,
     /// Only when just made.
     #[serde(default)]
     pub secret: Option<String>,
@@ -269,9 +272,10 @@ impl Client {
     }
 
     /// A new link: the whole library or one board, to view or to edit. Its
-    /// secret is in the answer, this once.
-    pub fn make_link(&self, board: Option<Uuid>, edit: bool, label: &str, person: &str) -> Result<Link, CloudError> {
-        let v = serde_json::json!({ "role": if edit { "edit" } else { "view" }, "board": board, "label": label, "person": person });
+    /// secret is in the answer, this once. `days`: it stops working that
+    /// many days from now (None: until it's turned off).
+    pub fn make_link(&self, board: Option<Uuid>, edit: bool, label: &str, person: &str, days: Option<u32>) -> Result<Link, CloudError> {
+        let v = serde_json::json!({ "role": if edit { "edit" } else { "view" }, "board": board, "label": label, "person": person, "days": days });
         self.json("POST", "links", Some(&v))
     }
 
@@ -438,7 +442,9 @@ impl Engine {
                 }
                 Ok(Err(e)) => {
                     fails += 1;
-                    wait = Duration::from_secs((5u64 << fails.min(6)).min(300));
+                    // At most a minute between tries, so a connection that comes back is
+                    // noticed soon (edits made meanwhile try at once anyway).
+                    wait = Duration::from_secs((5u64 << fails.min(6)).min(60));
                     if self.say(Status::Offline(e.to_string())).is_err() {
                         return;
                     }

@@ -12,6 +12,7 @@ blake3.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 flate2 = "1"
+crc32fast = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

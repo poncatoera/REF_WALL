@@ -500,6 +500,53 @@ test("live: a board moved out of a share takes its guests off it", async () => {
   await new Promise((r) => setTimeout(r, 300));
 });
 
+test("live: following someone, a spotlight, and coming along to another board", async () => {
+  const paul = live(owner, A, "Paul");
+  const pid = (await paul.next((m) => m.t === "welcome")).id;
+  await paul.next((m) => m.t === "peers");
+  const client = live(view.secret, A, "Client");
+  await client.next((m) => m.t === "peers");
+  const mia = live(edit.secret, A, "Mia");
+  await mia.next((m) => m.t === "peers");
+  // The client follows Paul: everyone sees it, and only the client gets his view.
+  client.send({ t: "follow", id: pid });
+  const f = await paul.next((m) => m.t === "peer" && m.peer.follow === pid);
+  assert.equal(f.peer.name, "Client");
+  paul.send({ t: "view", x: 10, y: 20, w: 1000, h: 800 });
+  const v = await client.next((m) => m.t === "view");
+  assert.deepEqual([v.id, v.x, v.y, v.w, v.h], [pid, 10, 20, 1000, 800]);
+  await mia.nothing((m) => m.t === "view");
+  // Junk views are dropped.
+  await new Promise((r) => setTimeout(r, 120));
+  paul.send({ t: "view", x: 1, y: 1, w: -5, h: 1 });
+  paul.send({ t: "view", x: "1", y: 1, w: 5, h: 1 });
+  await client.nothing((m) => m.t === "view", 250);
+  // A view-only link can't bring everyone along; Paul can.
+  client.send({ t: "spot", on: true });
+  await paul.nothing((m) => m.t === "peer" && m.peer.spot);
+  paul.send({ t: "spot", on: true });
+  assert.equal((await mia.next((m) => m.t === "peer" && m.peer.id === pid)).peer.spot, true);
+  await new Promise((r) => setTimeout(r, 120));
+  paul.send({ t: "view", x: 0, y: 0, w: 500, h: 400 });
+  await mia.next((m) => m.t === "view" && m.w === 500);
+  await client.next((m) => m.t === "view" && m.w === 500);
+  // Paul opens a board inside A: both come along.
+  paul.send({ t: "board", board: B });
+  assert.equal((await client.next((m) => m.t === "goto")).board, B);
+  assert.equal((await mia.next((m) => m.t === "goto")).board, B);
+  client.send({ t: "board", board: B });
+  mia.send({ t: "board", board: B });
+  const back = await client.next((m) => m.t === "peers" && m.board === B);
+  const lead = back.peers.find((p) => p.id === pid);
+  assert.equal(lead.spot, true, "still leading on the new board");
+  // A board their links don't reach: no invitation.
+  paul.send({ t: "board", board: PRIVATE });
+  await client.nothing((m) => m.t === "goto");
+  await mia.nothing((m) => m.t === "goto");
+  for (const s of [paul, client, mia]) s.close();
+  await new Promise((r) => setTimeout(r, 300));
+});
+
 test("live: no name gives the link's label; names can change", async () => {
   const temp = (await call(owner, "links", { method: "POST", json: { role: "view", board: A, label: "Nike team" } })).data;
   const paul = live(owner, A, "Paul");
@@ -548,6 +595,36 @@ test("live: revoking a link disconnects whoever uses it", async () => {
   await call(owner, `links/${temp.id}`, { method: "DELETE" });
   assert.equal((await guest.next((m) => m.t === "closed")).code, 4003);
   assert.equal((await paul.next((m) => m.t === "leave")).id, p.peer.id);
+  paul.close();
+});
+
+test("a link with an end date works until then, and is still listed after", async () => {
+  const soon = Date.now() + 2500;
+  const temp = (await call(owner, "links", { method: "POST", json: { role: "view", board: A, expires: soon } })).data;
+  assert.equal(temp.expires, soon);
+  const week = (await call(owner, "links", { method: "POST", json: { role: "edit", board: A, days: 7 } })).data;
+  assert.ok(Math.abs(week.expires - (Date.now() + 7 * 86_400_000)) < 60_000);
+  assert.equal((await call(temp.secret, "me")).data.expires, soon, "the one who opens it can see when it ends");
+  assert.equal((await sync(temp.secret, { since: 0 })).status, 200);
+  for (const bad of [{ expires: Date.now() - 1 }, { expires: Date.now() + 400 * 86_400_000 }, { days: 0.5 }, { days: 400 }, { days: "7" }]) {
+    assert.equal((await call(owner, "links", { method: "POST", json: { role: "view", board: A, ...bad } })).status, 400, JSON.stringify(bad));
+  }
+  const paul = live(owner, A, "Paul");
+  await paul.next((m) => m.t === "peers");
+  const guest = live(temp.secret, A, "Guest");
+  await guest.next((m) => m.t === "peers");
+  await new Promise((r) => setTimeout(r, Math.max(0, soon - Date.now()) + 300));
+  assert.equal((await sync(temp.secret, { since: 0 })).status, 403);
+  assert.equal((await call(temp.secret, `media/${hPub}`)).status, 403);
+  assert.equal((await call(temp.secret, "me")).status, 403);
+  // Still connected after the end: its next message closes it.
+  guest.send({ t: "cursor", x: 1, y: 1 });
+  assert.equal((await guest.next((m) => m.t === "closed")).code, 4003);
+  const listed = (await call(owner, "links")).data.links.find((l) => l.id === temp.id);
+  assert.equal(listed.expires, soon, "an ended link is listed until it's turned off");
+  assert.equal((await call(week.secret, "me")).status, 200);
+  await call(owner, `links/${temp.id}`, { method: "DELETE" });
+  await call(owner, `links/${week.id}`, { method: "DELETE" });
   paul.close();
 });
 

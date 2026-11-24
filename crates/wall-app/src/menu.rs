@@ -46,6 +46,10 @@ pub enum Command {
     ImportOldWall,
     InstallExtension,
     ExportImage,
+    BackUpNow,
+    BackUpTo,
+    ExportLibrary,
+    ExportPdf,
     Share,
     History,
     DeletedBoards,
@@ -83,6 +87,9 @@ pub enum Command {
     TidySameHeight,
     TidyPack,
     TidyColour,
+    Present,
+    Spotlight,
+    WelcomeTour,
 }
 
 /// Commands the shell carries out, because they need the system.
@@ -98,6 +105,13 @@ pub enum ShellCommand {
     OpenLibrary { new: bool },
     /// Save the whole board as a PNG picture.
     ExportImage,
+    /// Copy the library to its backup folder now (`choose`: pick that
+    /// folder first). On the web: download a backup file.
+    BackUp { choose: bool },
+    /// Save the whole library as one .zip file.
+    ExportLibrary,
+    /// Save the board and its comments as a PDF (`App::export_pdf`).
+    ExportPdf,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
     /// Show how to add the browser extension (its folder, the browser's
@@ -117,12 +131,18 @@ pub enum ShellCommand {
     /// Versions and deleted boards, when there's no library folder; answer
     /// with `App::history_answer`.
     History(crate::history::HistoryAsk),
+    /// Fill the screen (presenting) or go back to a window.
+    Fullscreen(bool),
 }
 
 impl Command {
     /// Commands only a desktop shell can carry out; the web menus leave them out.
     pub fn desktop_only(self) -> bool {
+<<<<<<< HEAD
         matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share)
+=======
+        matches!(self, Command::OpenLibrary | Command::NewLibrary | Command::ImportOldWall | Command::InstallExtension | Command::Share | Command::BackUpTo | Command::ExportLibrary)
+>>>>>>> origin/spike/renderer
     }
 }
 
@@ -146,9 +166,14 @@ pub const MENUS: &[Menu] = &[
             ("Install browser extension…", "", Some(Command::InstallExtension)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
+            ("Export board as PDF, with comments…", "", Some(Command::ExportPdf)),
             ("Share this board…", "", Some(Command::Share)),
             ("Version history…", "", Some(Command::History)),
             ("Deleted boards…", "", Some(Command::DeletedBoards)),
+            SEP,
+            ("Back up library now", "Ctrl S", Some(Command::BackUpNow)),
+            ("Back up to folder…", "", Some(Command::BackUpTo)),
+            ("Export library as .zip…", "", Some(Command::ExportLibrary)),
             SEP,
             ("New note", "Double-click", Some(Command::NewNote)),
             ("New to-do list", "T", Some(Command::NewTodo)),
@@ -197,6 +222,9 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "View",
         entries: &[
+            ("Present this board", "Shift P", Some(Command::Present)),
+            ("Bring everyone to your view", "", Some(Command::Spotlight)),
+            SEP,
             ("Fit board", "F", Some(Command::FitBoard)),
             ("Zoom in", "+", Some(Command::ZoomIn)),
             ("Zoom out", "−", Some(Command::ZoomOut)),
@@ -224,6 +252,18 @@ pub const MENUS: &[Menu] = &[
             ("Previous / next marker", "; / '", None),
             ("Clear in and out", "Side panel", None),
             ("Scrub", "Drag the bar", None),
+        ],
+    },
+    Menu {
+        title: "Help",
+        entries: &[
+            ("Welcome tour", "", Some(Command::WelcomeTour)),
+            SEP,
+            ("Move around", "Drag empty board", None),
+            ("Zoom", "Scroll", None),
+            ("Fit everything on screen", "F", None),
+            ("New note", "Double-click", None),
+            ("All boards", "S", None),
         ],
     },
 ];

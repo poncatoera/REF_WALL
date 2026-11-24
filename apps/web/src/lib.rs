@@ -23,6 +23,8 @@ struct State {
     /// Light mode and grid as last saved to localStorage.
     saved_look: (bool, bool),
     saved_ui: String,
+    /// `App::seen_stamp` as last saved (to localStorage `wall.seen`).
+    saved_seen: u64,
     /// Boards are saved in the browser (off with `?demo`).
     store: bool,
     /// Saved boards have been looked for; saving may start.
@@ -41,10 +43,8 @@ extern "C" {
     fn store_put(key: &str, value: &JsValue) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_name = storeExport, catch)]
     fn store_export() -> Result<js_sys::Promise, JsValue>;
-    #[wasm_bindgen(js_name = storeImport, catch)]
-    fn store_import(text: &str) -> Result<js_sys::Promise, JsValue>;
-    #[wasm_bindgen(js_name = isBackup)]
-    fn is_backup(text: &str) -> bool;
+    #[wasm_bindgen(js_name = storeImportFile, catch)]
+    fn store_import_file(file: &web_sys::File) -> Result<js_sys::Promise, JsValue>;
 }
 
 #[wasm_bindgen(module = "/js/drop.js")]
@@ -310,9 +310,18 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
             });
         }
         // Libraries are folders on disk; the web menus don't offer them.
+<<<<<<< HEAD
         wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::InstallExtension | wall_app::ShellCommand::Cloud(_) => {}
+=======
+        wall_app::ShellCommand::OpenLibrary { .. } | wall_app::ShellCommand::ImportOldWall | wall_app::ShellCommand::InstallExtension | wall_app::ShellCommand::Cloud(_) | wall_app::ShellCommand::ExportLibrary => {}
+        // The boards saved in this browser, as a file to keep.
+        // A shared board is the owner's library: they back it up in Wall.
+        wall_app::ShellCommand::BackUp { .. } if cloud::link().is_some() => notice("This board belongs to the library it was shared from; its owner backs it up."),
+        wall_app::ShellCommand::BackUp { .. } => wasm_bindgen_futures::spawn_local(backup(s.clone())),
+>>>>>>> origin/spike/renderer
         wall_app::ShellCommand::SetName(name) => cloud::set_name(&name),
         wall_app::ShellCommand::SetColor(c) => cloud::set_color(c),
+        wall_app::ShellCommand::Fullscreen(on) => cloud::fullscreen(on),
         wall_app::ShellCommand::History(ask) => cloud::history(s.clone(), ask),
         wall_app::ShellCommand::CopyText(text) => {
             let _ = window.navigator().clipboard().write_text(&text);
@@ -324,6 +333,11 @@ fn shell_command(s: Rc<RefCell<State>>, cmd: wall_app::ShellCommand) {
         }
         wall_app::ShellCommand::ExportImage => {
             if let Err(e) = export_png(&s) {
+                web_sys::console::error_1(&e);
+            }
+        }
+        wall_app::ShellCommand::ExportPdf => {
+            if let Err(e) = export_pdf(&s) {
                 web_sys::console::error_1(&e);
             }
         }
@@ -348,6 +362,21 @@ fn export_png(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
     download(&web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?, &name)
 }
 
+/// File > Export board as PDF: the board (longest side up to 4096 px) and
+/// its comments, downloaded.
+fn export_pdf(s: &Rc<RefCell<State>>) -> Result<(), JsValue> {
+    let (pdf, name) = {
+        let mut st = s.borrow_mut();
+        let State { app, renderer, .. } = &mut *st;
+        let pdf = app.export_pdf(renderer, 4096).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        (pdf, format!("{}.pdf", app.board_name()))
+    };
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&pdf[..]));
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type("application/pdf");
+    download(&web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?, &name)
+}
+
 /// Hands a blob to the browser as a download.
 fn download(blob: &web_sys::Blob, name: &str) -> Result<(), JsValue> {
     let url = web_sys::Url::create_object_url_with_blob(blob)?;
@@ -368,13 +397,9 @@ async fn backup(s: Rc<RefCell<State>>) {
         if s.borrow().store {
             save(s.clone()).await;
         }
-        let text = wasm_bindgen_futures::JsFuture::from(store_export()?).await?.as_string().ok_or("empty backup")?;
-        let parts = js_sys::Array::of1(&JsValue::from_str(&text));
-        let bag = web_sys::BlobPropertyBag::new();
-        bag.set_type("application/json");
-        let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &bag)?;
+        let blob: web_sys::Blob = wasm_bindgen_futures::JsFuture::from(store_export()?).await?.dyn_into()?;
         let day: String = String::from(js_sys::Date::new_0().to_iso_string()).chars().take(10).collect();
-        download(&blob, &format!("Wall backup {day}.json"))
+        download(&blob, &format!("Wall backup {day}.zip"))
     }
     .await;
     if let Err(e) = result {
@@ -384,14 +409,10 @@ async fn backup(s: Rc<RefCell<State>>) {
 
 /// A dropped backup file: after asking, replaces what's saved and reloads.
 async fn restore_backup(file: web_sys::File) -> Result<(), JsValue> {
-    let text = wasm_bindgen_futures::JsFuture::from(file.text()).await?.as_string().unwrap_or_default();
-    if !is_backup(&text) {
-        return Err(JsValue::from_str("not a Wall backup"));
-    }
     let window = web_sys::window().ok_or("no window")?;
-    let ok = window.confirm_with_message(&format!("Replace the boards saved in this browser with \"{}\"?", file.name()))?;
+    let ok = window.confirm_with_message(&format!("Replace the boards saved in this browser with the backup \"{}\"?", file.name()))?;
     if ok {
-        wasm_bindgen_futures::JsFuture::from(store_import(&text)?).await?;
+        wasm_bindgen_futures::JsFuture::from(store_import_file(&file)?).await?;
         window.location().reload()?;
     }
     Ok(())
@@ -431,6 +452,19 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     app.set_grid(grid);
     let saved_ui = stored("wall.ui").unwrap_or_default();
     app.set_ui_setting(&saved_ui);
+    // Which comments were seen in this browser (new ones get red dots).
+    app.set_seen_setting(stored("wall.seen").as_deref(), js_sys::Date::now() as u64);
+    // First visit: the welcome walkthrough. A share link gets its own short
+    // card once we know whether it can edit (see `cloud`).
+    // `?welcome=slide:N` or `tip:N` shows one step (screenshots).
+    let search = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+    if let Some(v) = search.split(['?', '&']).find_map(|p| p.strip_prefix("welcome=")) {
+        if let Some((kind, n)) = v.split_once(':') {
+            app.welcome_show(n.parse().unwrap_or(0), kind == "tip");
+        }
+    } else if share.is_none() && !search.contains("demo") {
+        app.welcome_if_new();
+    }
     app.set_utc_offset(-(js_sys::Date::new_0().get_timezone_offset() as i32));
     // A shared board's history is kept in the cloud.
     app.set_history_remote(share.is_some());
@@ -439,6 +473,7 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
     let state = Rc::new(RefCell::new(State { players: Default::default(), app, renderer, canvas: canvas.clone(),
         saved_look: (light, grid),
         saved_ui,
+        saved_seen: 0,
         // `?demo` shows the demo as it ships, without saving.
         // A shared library stays in the cloud, not among this browser's boards.
         store: share.is_none() && !web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default().contains("demo"),
@@ -521,7 +556,9 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             if down && cmd && (k == "s" || k == "S") {
                 // Instead of the browser's "save page": a backup file.
                 e.prevent_default();
-                wasm_bindgen_futures::spawn_local(backup(s.clone()));
+                let mut st = s.borrow_mut();
+                st.app.run_command(wall_app::menu::Command::BackUpNow);
+                st.app.needs_redraw = true;
                 return;
             }
             let mut s = s.borrow_mut();
@@ -535,7 +572,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                 "Enter" => Some(Key::Enter),
                 "Escape" => Some(Key::Escape),
                 "ArrowLeft" => Some(Key::Left),
-                "ArrowRight" => Some(Key::Right),
+                "ArrowRight" | "PageDown" => Some(Key::Right),
+                "PageUp" => Some(Key::Left),
                 "Home" => Some(Key::Home),
                 "End" => Some(Key::End),
                 "z" | "Z" if cmd => Some(if e.shift_key() { Key::Redo } else { Key::Undo }),
@@ -664,6 +702,8 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
             }
             cloud::tick(&mut s.app);
             if s.app.needs_redraw {
+                // Glides (following someone, presenting) go by the clock.
+                s.app.set_time(js_sys::Date::now() as u64);
                 let State { app, renderer, .. } = &mut *s;
                 app.render(renderer, size);
             }
@@ -678,6 +718,12 @@ fn start_state(canvas_id: &str) -> Result<Rc<RefCell<State>>, JsValue> {
                     let _ = st.set_item("wall.ui", &ui);
                 }
                 s.saved_ui = ui;
+            }
+            if s.app.seen_stamp() != s.saved_seen {
+                if let Some(st) = storage() {
+                    let _ = st.set_item("wall.seen", &s.app.seen_setting());
+                }
+                s.saved_seen = s.app.seen_stamp();
             }
         }
         request_frame(frame.borrow().as_ref().unwrap());
@@ -708,7 +754,8 @@ fn import_many(s: Rc<RefCell<State>>, files: Vec<web_sys::File>) {
 }
 
 fn import_any(s: Rc<RefCell<State>>, file: web_sys::File) {
-    if file.name().to_lowercase().ends_with(".json") {
+    let lower = file.name().to_lowercase();
+    if lower.ends_with(".json") || (lower.ends_with(".zip") && lower.starts_with("wall backup")) {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = restore_backup(file).await {
                 import_failed("the backup", &err_text(&e));

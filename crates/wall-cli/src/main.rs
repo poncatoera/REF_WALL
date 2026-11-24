@@ -7,12 +7,19 @@
 //! wall-cli export <library> <board> <folder> copy a board's pictures and videos out
 //! wall-cli import <library> <file>... [--board <board>]   pictures and videos (videos need ffmpeg)
 //! wall-cli check  <library>                  look for missing or damaged files
+//! wall-cli backup <library> <folder>         keep a copy of the library up to date there
+//! wall-cli export-library <library> <file.zip>  the whole library as one zip file
+//! wall-cli restore <file.zip> <folder>       unpack an exported library
+//! wall-cli stress <library> [--pictures N] [--videos N] [--notes N]
+//!                                            a big test board (made if missing)
 //! wall-cli import-old <old Wall library folder> <library>
 //!                                            bring in the old Electron Wall's boards
 //! ```
 //!
 //! `<board>` is a board's name or id. The format is described in
 //! `docs/wall-format.md`.
+
+mod stress;
 
 use wall_import::media::import_one;
 use wall_import::{old_wall, Res};
@@ -30,6 +37,10 @@ const USAGE: &str = "usage:
   wall-cli import <library> <file>... [--board <board>]
   wall-cli check  <library>
   wall-cli import-old <old Wall library folder> <library>
+  wall-cli backup <library> <folder>
+  wall-cli export-library <library> <file.zip>
+  wall-cli restore <file.zip> <folder>
+  wall-cli stress <library> [--pictures N] [--videos N] [--notes N]
   wall-cli cloud-key     <library>            (prints OWNER_HASH for the server)
   wall-cli cloud-connect <library> <server>
   wall-cli share   <library> <board|all> <view|edit> [label]
@@ -53,7 +64,20 @@ fn run(args: &[String]) -> Res<String> {
         let [old, new] = rest else { return Err(USAGE.into()) };
         return old_wall::import(Path::new(old), Path::new(new), now_ms()).map(|r| r.text());
     }
+    if cmd == "restore" {
+        let [zip, into] = rest else { return Err(USAGE.into()) };
+        let lib = wall_format::backup::unzip(Path::new(zip), Path::new(into)).map_err(|e| e.to_string())?;
+        return Ok(format!("restored to {}\n", lib.display()));
+    }
     let lib_path = rest.first().ok_or(USAGE)?;
+    if cmd == "stress" {
+        let counts = stress::counts(&rest[1..])?;
+        let lib = match Library::open(lib_path) {
+            Ok(l) => l,
+            Err(_) => Library::create(lib_path, "Stress test", now_ms()).map_err(|e| e.to_string())?,
+        };
+        return stress::run(&lib, &counts, now_ms());
+    }
     let lib = Library::open(lib_path).map_err(|e| e.to_string())?;
     let rest = &rest[1..];
     match cmd.as_str() {
@@ -69,6 +93,14 @@ fn run(args: &[String]) -> Res<String> {
             import(&lib, files, board, now_ms())
         }
         "check" => check(&lib),
+        "backup" if rest.len() == 1 => {
+            let r = lib.back_up_to(Path::new(&rest[0])).map_err(|e| e.to_string())?;
+            Ok(format!("backed up to {}: {} of {} files copied ({})\n", rest[0], r.copied, r.files, megabytes(r.bytes)))
+        }
+        "export-library" if rest.len() == 1 => {
+            let r = lib.export_zip(Path::new(&rest[0])).map_err(|e| e.to_string())?;
+            Ok(format!("exported {} files ({}) to {}\n", r.files, megabytes(r.bytes), rest[0]))
+        }
         "cloud-key" if rest.is_empty() => cloud_key(&lib),
         "cloud-connect" if rest.len() == 1 => cloud_connect(&lib, &rest[0]),
         "share" if rest.len() >= 2 => share(&lib, &rest[0], &rest[1], rest.get(2).map_or("", String::as_str)),
@@ -76,6 +108,10 @@ fn run(args: &[String]) -> Res<String> {
         "unshare" if rest.len() == 1 => unshare(&lib, &rest[0]),
         _ => Err(USAGE.into()),
     }
+}
+
+fn megabytes(b: u64) -> String {
+    format!("{:.1} MB", b as f64 / 1e6)
 }
 
 // ---- cloud ----------------------------------------------------------------
@@ -127,7 +163,7 @@ fn share(lib: &Library, board: &str, how: &str, label: &str) -> Res<String> {
     };
     let board = if board == "all" { None } else { Some(pick_board(&all_boards(lib)?, board)?.id) };
     let c = cloud_client(lib)?;
-    let l = c.make_link(board, edit, label, "").map_err(|e| e.to_string())?;
+    let l = c.make_link(board, edit, label, "", None).map_err(|e| e.to_string())?;
     let secret = l.secret.ok_or("the server gave no link")?;
     Ok(format!("{}\nAnyone with this address can {} it until: wall-cli unshare <library> {}\n", c.link_address(&secret), if edit { "change" } else { "look at" }, l.id))
 }

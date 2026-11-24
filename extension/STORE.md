@@ -50,3 +50,34 @@ The extension works with the Wall desktop app (Windows). Without it, open https:
 - scripting: on the user's request only: area-screenshot overlay, reading a video's current time, fetching a picture the page loaded itself (blob: URLs).
 - cookies: as in "Permission notes" above.
 - Remote code: none. Data handled (disclose, don't tick "none"): site cookies for the listed video sites, page addresses and titles, and the content the user picks; all go only to the user's own Wall (the app at 127.0.0.1, or their open Wall page, which saves it through the Wall server like any drop); cookies are used only to sign in to that same site for the download.
+
+# Chrome Web Store listing
+
+Same zip as Edge (`tools/package-extension.sh`). Dashboard: chrome.google.com/webstore/devconsole.
+Account: one-time US$5 registration fee, 2-Step Verification on the Google account, a verified contact email,
+and the EU trader question: **non-trader** (personal tool, not selling it).
+
+## Package tab
+Upload `wall-extension-<version>.zip`. Icon comes from the zip (icons/128.png).
+
+## Store listing tab
+- Description: the Edge **Description** above (the first line doubles as the summary; the manifest description is the short one).
+- Category: Productivity (Workflow & Planning). Language: English.
+- Screenshots: store-screenshot-1.png (1280x800).
+- Small promo tile (required): store-tile-440x280.png. Marquee (optional): store-tile-1400x560.png.
+- Homepage URL: https://wall.poncatoera.workers.dev
+
+## Privacy tab
+- Single purpose: as the Edge "Single purpose" above.
+- Permission justifications: contextMenus, storage, alarms, scripting, cookies as above.
+  Host permission (`<all_urls>`): fetch the picture the user right-clicked with that page's sign-in, take the screenshot the user asked for, read a video's current time for clip marks, and hand items to the user's open Wall page.
+- Remote code: **No, I am not using remote code.**
+- Data collected: tick **Authentication information** (site cookies, video sites only, passed to the user's own Wall app), **Website content** (the picture, video or screenshot the user picks) and **Web history** (the address and title of the page an item came from). Nothing else.
+- Tick all three certifications (not sold, not used for unrelated purposes, not used for credit).
+- Privacy policy URL: https://wall.poncatoera.workers.dev/extension-privacy
+
+## Distribution tab
+- Visibility: **Unlisted** (only people with the link). Regions: all. Free.
+
+## Test instructions (Chrome has a field for these)
+As the Edge "Testing notes for reviewers" above. No sign-in needed.

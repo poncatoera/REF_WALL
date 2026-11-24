@@ -23,6 +23,7 @@
 // Release builds on Windows have no console window; see console.rs.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod backup;
 mod console;
 mod collect;
 mod lock;
@@ -57,6 +58,11 @@ struct Shell {
     gfx: Option<Gfx>,
     frames: u32,
     fps_clock: Instant,
+    /// Time spent this fps period in video upkeep, posters and drawing (WALL_BENCH).
+    spent: [f32; 3],
+    /// Longest time between two frames this period, and when the last one was.
+    worst_gap: f32,
+    last_frame: Option<Instant>,
     screenshot: Option<String>,
     bench: bool,
     mods: ModifiersState,
@@ -70,6 +76,7 @@ struct Shell {
     title: String,
     /// An old-Wall import running in the background.
     old_import: Option<std::sync::mpsc::Receiver<Result<wall_import::old_wall::Report, String>>>,
+    backups: backup::Backups,
     /// Keeps the library and its cloud copy the same, when it has one.
     cloud: Option<Cloud>,
     /// The library [`Self::cloud`] was last tried for.
@@ -84,6 +91,8 @@ struct Shell {
     saved_look: (bool, bool),
     /// Tool rail place and left panel, as last saved.
     saved_ui: String,
+    /// `App::seen_stamp` as last saved.
+    saved_seen: u64,
     /// Pictures and videos sent from the browser extension.
     collector: Option<collect::Collector>,
 }
@@ -271,6 +280,30 @@ fn pick_library(new: bool) -> Option<std::path::PathBuf> {
     }
 }
 
+/// File > Back up to folder: an empty folder, or an earlier backup of this
+/// library. Somewhere else than the library's own drive is best.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_backup_folder(_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title("Back up the library to… (an empty folder, ideally on another drive or a synced folder)").pick_folder()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_backup_folder(_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_PICK_BACKUP").map(Into::into)
+}
+
+/// File > Export library as .zip: where to save it.
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_zip(name: &str) -> Option<std::path::PathBuf> {
+    let p = rfd::FileDialog::new().set_title("Export the library as one .zip file").set_file_name(name).add_filter("Zip file", &["zip"]).save_file()?;
+    Some(if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) { p } else { p.with_extension("zip") })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn pick_zip(_name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("WALL_EXPORT_LIBRARY").map(Into::into)
+}
+
 /// File > Import old Wall library: the old library's folder (with library.json).
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_old_wall() -> Option<std::path::PathBuf> {
@@ -305,16 +338,26 @@ fn pick_library(_new: bool) -> Option<std::path::PathBuf> {
     std::env::var_os("WALL_PICK_LIBRARY").map(Into::into)
 }
 
-/// File > Export board as picture: where to save the PNG.
+/// File > Export board as picture / PDF: where to save it.
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_export(name: &str) -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().set_title("Export board as picture").set_file_name(name).add_filter("PNG picture", &["png"]).save_file()
+    let d = rfd::FileDialog::new().set_file_name(name);
+    let d = if name.ends_with(".pdf") { d.set_title("Export board as PDF").add_filter("PDF document", &["pdf"]) } else { d.set_title("Export board as picture").add_filter("PNG picture", &["png"]) };
+    d.save_file()
 }
 
-/// No save dialog on Linux yet: WALL_EXPORT names the file (tests).
+/// No save dialog on Linux yet: WALL_EXPORT / WALL_EXPORT_PDF name the file (tests).
 #[cfg(not(any(windows, target_os = "macos")))]
-fn pick_export(_name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("WALL_EXPORT").map(Into::into)
+fn pick_export(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(if name.ends_with(".pdf") { "WALL_EXPORT_PDF" } else { "WALL_EXPORT" }).map(Into::into)
+}
+
+fn export_pdf(app: &mut App, renderer: &mut Renderer, path: &std::path::Path) {
+    let result = app.export_pdf(renderer, EXPORT_MAX).map_err(|e| e.to_string()).and_then(|pdf| std::fs::write(path, &pdf).map(|_| pdf.len()).map_err(|e| e.to_string()));
+    match result {
+        Ok(n) => println!("wall: exported {} ({} KB)", path.display(), n / 1024),
+        Err(e) => show_error(&format!("Could not export the board: {e}")),
+    }
 }
 
 /// Longest side of an exported board picture, in pixels.
@@ -356,6 +399,8 @@ fn open_library(path: &std::path::Path) -> Result<App, Box<dyn std::error::Error
     lock::keep(lock);
     app.desktop = true;
     app.set_utc_offset(local_offset_min());
+    // Which comments were seen here (new ones get red dots).
+    app.set_seen_setting(settings::get_str("seen").as_deref(), now_ms());
     settings::remember_library(path);
     Ok(app)
 }
@@ -527,12 +572,12 @@ fn cloud_ask(root: Option<&std::path::Path>, ask: wall_app::CloudAsk) -> wall_ap
         CloudAsk::Links => client.links().map(|links| {
             let me = client.me().ok();
             CloudAnswer::Links {
-                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label, person: k.person }).collect(),
+                links: links.into_iter().map(|k| wall_app::ShareLink { id: k.id, edit: k.role == "edit", board: k.board, label: k.label, person: k.person, expires_ms: k.expires }).collect(),
                 used: me.as_ref().and_then(|m| m.media_bytes),
                 max: me.as_ref().and_then(|m| m.max_media_bytes),
             }
         }),
-        CloudAsk::Make { board, edit, label, person } => client.make_link(board, edit, &label, &person).map_err(|e| match e {
+        CloudAsk::Make { board, edit, label, person, days } => client.make_link(board, edit, &label, &person, days).map_err(|e| match e {
             wall_cloud::CloudError::Missing => wall_cloud::CloudError::Other("this board isn't in the cloud yet; try again in a moment".into()),
             e => e,
         }).and_then(|k| {
@@ -553,6 +598,10 @@ struct Cloud {
     live: Option<wall_cloud::live::Live>,
     live_board: Option<uuid::Uuid>,
     live_cursor: Option<[f32; 2]>,
+    /// What we last told it about following and leading.
+    live_view: Option<[f32; 4]>,
+    live_follow: Option<String>,
+    live_spot: bool,
 }
 
 /// How often the window looks for news while others are on the board
@@ -574,7 +623,7 @@ impl Cloud {
         app.set_my_name(Some(name));
         app.set_my_color(account.color);
         match wall_cloud::Worker::start(&root, account, &dir, app.sync_boards()?) {
-            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None }),
+            Ok(worker) => Some(Cloud { worker, stamp: app.sync_stamp(), root, live: Some(live), live_board: None, live_cursor: None, live_view: None, live_follow: None, live_spot: false }),
             Err(e) => {
                 eprintln!("wall: cloud: {e}");
                 None
@@ -646,10 +695,27 @@ impl Cloud {
             live.cursor(at);
             self.live_cursor = at;
         }
+        // Following and leading.
+        let follow = app.follow_target();
+        if follow != self.live_follow {
+            live.follow(follow.clone());
+            self.live_follow = follow;
+        }
+        if app.spotlight_on() != self.live_spot {
+            self.live_spot = app.spotlight_on();
+            live.spot(self.live_spot);
+        }
+        let view = app.shared_view();
+        if wall_app::together::view_moved(view, self.live_view, app.camera.zoom) {
+            live.view(view);
+            self.live_view = view;
+        }
         let mut stop = false;
         while let Some(e) = live.try_event() {
             match e {
-                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at, color: p.color }).collect()),
+                LiveEvent::Peers(p) => app.set_peers(p.into_iter().map(|p| wall_app::Peer { id: p.id, name: p.name, at: p.at, color: p.color, view: p.view, follow: p.follow, spot: p.spot }).collect()),
+                LiveEvent::Me(id) => app.set_live_id(Some(id)),
+                LiveEvent::Goto { id, board } => app.peer_went(&id, board),
                 LiveEvent::Changed => self.worker.poke(),
                 LiveEvent::Stopped(why) => {
                     eprintln!("wall: live: {why}");
@@ -659,6 +725,7 @@ impl Cloud {
         }
         if stop {
             app.set_peers(Vec::new());
+            app.set_live_id(None);
             app.set_my_name(None);
             self.live = None;
         }
@@ -746,7 +813,13 @@ impl ApplicationHandler for Shell {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let size = gfx.window.inner_size();
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if let Err(e) = self.app.save_if_dirty() {
+                    eprintln!("wall: could not save: {e}");
+                }
+                self.backups.on_close(self.app.library_root());
+                event_loop.exit();
+            }
             WindowEvent::Resized(s) => {
                 if let (Some(w), Some(h)) = (NonZeroU32::new(s.width), NonZeroU32::new(s.height)) {
                     gfx.surface.resize(&gfx.context, w, h);
@@ -787,7 +860,8 @@ impl ApplicationHandler for Shell {
                     WKey::Named(NamedKey::Enter) => Some(Key::Enter),
                     WKey::Named(NamedKey::Escape) => Some(Key::Escape),
                     WKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
-                    WKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
+                    WKey::Named(NamedKey::ArrowRight | NamedKey::PageDown) => Some(Key::Right),
+                    WKey::Named(NamedKey::PageUp) => Some(Key::Left),
                     WKey::Named(NamedKey::Home) => Some(Key::Home),
                     WKey::Named(NamedKey::End) => Some(Key::End),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("z") => Some(if m.shift { Key::Redo } else { Key::Undo }),
@@ -795,6 +869,11 @@ impl ApplicationHandler for Shell {
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("a") => Some(Key::SelectAll),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("d") => Some(Key::Duplicate),
                     WKey::Character(c) if m.command && c.eq_ignore_ascii_case("f") => Some(Key::Find),
+                    WKey::Character(c) if m.command && c.eq_ignore_ascii_case("s") => {
+                        self.app.run_command(wall_app::menu::Command::BackUpNow);
+                        gfx.window.request_redraw();
+                        None
+                    }
                     WKey::Character("]") if m.command => Some(Key::BringToFront),
                     WKey::Character("[") if m.command => Some(Key::SendToBack),
                     WKey::Character(c) if m.command && !editing && (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x")) => {
@@ -882,10 +961,46 @@ impl ApplicationHandler for Shell {
                                 }
                             }
                         }
+                        wall_app::ShellCommand::BackUp { choose } => match self.app.library_root().map(|p| p.to_owned()) {
+                            None => show_error("Open a library first."),
+                            Some(_) if self.backups.busy() => show_info("A backup is already running."),
+                            Some(root) => {
+                                if let Err(e) = self.app.save_if_dirty() {
+                                    eprintln!("wall: could not save: {e}");
+                                }
+                                let dest = if choose { None } else { backup::folder(&root) }.or_else(|| pick_backup_folder(&root));
+                                if let Some(dest) = dest {
+                                    backup::set_folder(&root, &dest);
+                                    self.backups.back_up(&root, &dest, true);
+                                    gfx.window.set_title(&format!("{} (backing up…)", self.title));
+                                }
+                            }
+                        },
+                        wall_app::ShellCommand::ExportLibrary => match self.app.library_root().map(|p| p.to_owned()) {
+                            None => show_error("Open a library first."),
+                            Some(_) if self.backups.busy() => show_info("A backup is already running."),
+                            Some(root) => {
+                                if let Err(e) = self.app.save_if_dirty() {
+                                    eprintln!("wall: could not save: {e}");
+                                }
+                                let stem = root.file_stem().and_then(|s| s.to_str()).unwrap_or("Library");
+                                let day = backup::today();
+                                if let Some(to) = pick_zip(&format!("{stem} {day}.zip")) {
+                                    self.backups.export(&root, &to);
+                                    gfx.window.set_title(&format!("{} (exporting…)", self.title));
+                                }
+                            }
+                        },
                         wall_app::ShellCommand::ExportImage => {
                             let name = format!("{}.png", self.app.board_name());
                             if let Some(path) = pick_export(&name) {
                                 export_png(&mut self.app, &mut gfx.renderer, &path);
+                            }
+                        }
+                        wall_app::ShellCommand::ExportPdf => {
+                            let name = format!("{}.pdf", self.app.board_name());
+                            if let Some(path) = pick_export(&name) {
+                                export_pdf(&mut self.app, &mut gfx.renderer, &path);
                             }
                         }
                         wall_app::ShellCommand::SetName(name) => {
@@ -902,6 +1017,9 @@ impl ApplicationHandler for Shell {
                         }
                         // The library answers history questions itself.
                         wall_app::ShellCommand::History(_) => {}
+                        wall_app::ShellCommand::Fullscreen(on) => {
+                            gfx.window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                        }
                         wall_app::ShellCommand::SetColor(c) => {
                             if let Some(live) = self.cloud.as_ref().and_then(|c| c.live.as_ref()) {
                                 live.color(Some(c));
@@ -947,9 +1065,19 @@ impl ApplicationHandler for Shell {
                         Err(e) => show_error(&format!("Could not import the old Wall library: {e}")),
                     }
                 }
+                let t0 = Instant::now();
+                if let Some(l) = self.last_frame.replace(t0) {
+                    self.worst_gap = self.worst_gap.max((t0 - l).as_secs_f32() * 1000.0);
+                }
                 self.videos.pump(&mut self.app, &mut gfx.renderer);
+                let t1 = Instant::now();
                 self.posters.pump(&mut self.app);
+                let t2 = Instant::now();
                 self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                let t3 = Instant::now();
+                for (s, d) in self.spent.iter_mut().zip([t1 - t0, t2 - t1, t3 - t2]) {
+                    *s += d.as_secs_f32() * 1000.0;
+                }
                 // Remember a changed theme or grid (View menu, G key).
                 let look = (self.app.light_mode(), self.app.grid());
                 if look != self.saved_look {
@@ -968,11 +1096,19 @@ impl ApplicationHandler for Shell {
                     settings::set_str("ui", &ui);
                     self.saved_ui = ui;
                 }
+                if self.app.seen_stamp() != self.saved_seen {
+                    settings::set_str("seen", &self.app.seen_setting());
+                    self.saved_seen = self.app.seen_stamp();
+                }
                 let settled = self.videos.settled(1500) && !self.app.library_waiting() && !self.app.pictures_loading();
                 if let Some(path) = self.screenshot.as_deref().filter(|_| self.frames >= self.screenshot_frame && settled) {
                     // WALL_EXPORT=board.png also exports the board (tests).
                     if let Some(export) = std::env::var_os("WALL_EXPORT") {
                         export_png(&mut self.app, &mut gfx.renderer, std::path::Path::new(&export));
+                        self.app.render(&mut gfx.renderer, [size.width, size.height]);
+                    }
+                    if let Some(export) = std::env::var_os("WALL_EXPORT_PDF") {
+                        export_pdf(&mut self.app, &mut gfx.renderer, std::path::Path::new(&export));
                         self.app.render(&mut gfx.renderer, [size.width, size.height]);
                     }
                     match save_screenshot(&gfx.renderer, size.width, size.height, path) {
@@ -987,7 +1123,15 @@ impl ApplicationHandler for Shell {
                 self.frames += 1;
                 let elapsed = self.fps_clock.elapsed().as_secs_f32();
                 if elapsed >= 2.0 && self.screenshot.is_none() {
-                    println!("wall: {:.0} fps", self.frames as f32 / elapsed);
+                    let n = self.frames.max(1) as f32;
+                    if self.bench {
+                        let [v, p, r] = self.spent.map(|s| s / n);
+                        println!("wall: {:.0} fps (per frame: videos {v:.1} ms, posters {p:.1} ms, draw {r:.1} ms; worst gap {:.0} ms)", self.frames as f32 / elapsed, self.worst_gap);
+                    } else {
+                        println!("wall: {:.0} fps", self.frames as f32 / elapsed);
+                    }
+                    self.spent = [0.0; 3];
+                    self.worst_gap = 0.0;
                     self.frames = 0;
                     self.fps_clock = Instant::now();
                 }
@@ -1006,6 +1150,18 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(done) = self.backups.tick(self.app.library_root()) {
+            if let Some(gfx) = &self.gfx {
+                gfx.window.set_title(&self.title);
+            }
+            let text = backup::describe(&done);
+            match done {
+                backup::Done::Failed { asked: true, .. } => show_error(&text),
+                backup::Done::Failed { asked: false, .. } => eprintln!("wall: {text}"),
+                backup::Done::BackedUp { asked: false, .. } => println!("wall: {text}"),
+                _ => show_info(&text),
+            }
+        }
         if let Some(c) = &mut self.collector {
             let changed = c.pump(&mut self.app, &mut self.videos, &mut self.failed);
             if changed || self.app.needs_redraw || self.videos.busy() {
@@ -1033,7 +1189,13 @@ impl ApplicationHandler for Shell {
             self.cloud_for = self.app.library_root().map(|p| p.to_owned());
         }
         let Some(cloud) = &mut self.cloud else {
-            event_loop.set_control_flow(if self.failed.is_empty() { winit::event_loop::ControlFlow::Wait } else { winit::event_loop::ControlFlow::WaitUntil(Instant::now() + CLOUD_LOOK) });
+            // Look again for failures to show, a backup to finish or the
+            // next half-hourly backup.
+            let wait = if !self.failed.is_empty() || self.backups.busy() { Some(CLOUD_LOOK) } else { self.app.library_root().map(|_| std::time::Duration::from_secs(60)) };
+            event_loop.set_control_flow(match wait {
+                Some(w) => winit::event_loop::ControlFlow::WaitUntil(Instant::now() + w),
+                None => winit::event_loop::ControlFlow::Wait,
+            });
             return;
         };
         self.app.set_time(now_ms());
@@ -1215,6 +1377,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ui) = settings::get_str("ui") {
         app.set_ui_setting(&ui);
     }
+    // First run: the welcome walkthrough (not in screenshot runs).
+    // WALL_WELCOME=slide:N or tip:N shows one step (screenshots).
+    match std::env::var("WALL_WELCOME").ok().as_deref().and_then(|v| v.split_once(':')) {
+        Some(("guest", n)) => app.start_welcome(wall_app::welcome::Kind::Guest { view: n == "view" }),
+        Some((kind, n)) => app.welcome_show(n.parse().unwrap_or(0), kind == "tip"),
+        None if std::env::var_os("WALL_SCREENSHOT").is_none() => app.welcome_if_new(),
+        None => {}
+    }
     // WALL_BOARD=<board id> opens that board of the library at start (tests).
     if let Some(id) = std::env::var("WALL_BOARD").ok().and_then(|s| s.trim().parse::<uuid::Uuid>().ok()) {
         app.open_board(id, true);
@@ -1250,6 +1420,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gfx: None,
         frames: 0,
         fps_clock: Instant::now(),
+        spent: [0.0; 3],
+        worst_gap: 0.0,
+        last_frame: None,
         screenshot: std::env::var("WALL_SCREENSHOT").ok(),
         bench: std::env::var_os("WALL_BENCH").is_some(),
         mods: ModifiersState::empty(),
@@ -1259,6 +1432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         posters: LibraryPosters::default(),
         title,
         old_import: None,
+        backups: backup::Backups::default(),
         batch: None,
         failed: Vec::new(),
         cloud: None,
@@ -1266,6 +1440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloud_asks: Vec::new(),
         saved_look: (light, grid),
         saved_ui: settings::get_str("ui").unwrap_or_default(),
+        saved_seen: 0,
         collector: None,
     };
     let proxy = event_loop.create_proxy();
