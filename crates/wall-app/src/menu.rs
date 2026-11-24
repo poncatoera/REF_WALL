@@ -46,6 +46,7 @@ pub enum Command {
     ImportOldWall,
     InstallExtension,
     ExportImage,
+    ExportPdf,
     Share,
     History,
     DeletedBoards,
@@ -101,6 +102,8 @@ pub enum ShellCommand {
     OpenLibrary { new: bool },
     /// Save the whole board as a PNG picture.
     ExportImage,
+    /// Save the board and its comments as a PDF (`App::export_pdf`).
+    ExportPdf,
     /// Pick an old (Electron) Wall library and bring its boards in.
     ImportOldWall,
     /// Show how to add the browser extension (its folder, the browser's
@@ -151,6 +154,7 @@ pub const MENUS: &[Menu] = &[
             ("Install browser extension…", "", Some(Command::InstallExtension)),
             SEP,
             ("Export board as picture…", "", Some(Command::ExportImage)),
+            ("Export board as PDF, with comments…", "", Some(Command::ExportPdf)),
             ("Share this board…", "", Some(Command::Share)),
             ("Version history…", "", Some(Command::History)),
             ("Deleted boards…", "", Some(Command::DeletedBoards)),

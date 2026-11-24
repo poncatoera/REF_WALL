@@ -8,6 +8,8 @@ pub mod brush;
 pub mod share;
 pub mod history;
 pub mod comments;
+pub mod unread;
+pub mod export;
 pub mod presence;
 pub mod together;
 pub mod doc;
@@ -309,6 +311,8 @@ pub struct App {
     cursor_out: bool,
     /// Our name on shared boards, when there's a live connection.
     my_name: Option<String>,
+    /// Which comments this person has seen (see `unread`).
+    seen: unread::Seen,
     /// Typing a new name for ourselves.
     name_edit: Option<String>,
     my_color: Option<u8>,
@@ -423,6 +427,7 @@ impl App {
             peers: Vec::new(),
             cursor_out: false,
             my_name: None,
+            seen: unread::Seen::default(),
             name_edit: None,
             my_color: None,
             comment_card: None,
@@ -1135,7 +1140,7 @@ impl App {
         if self.comment_card_press(pos) {
             return;
         }
-        if self.pen_bar_press(pos) || self.stamp_bar_press(pos) {
+        if self.pen_bar_press(pos) || self.stamp_bar_press(pos) || self.unread_pill_press(pos) {
             return;
         }
         if self.sidebar_press(pos) {
@@ -2335,6 +2340,12 @@ impl App {
     /// Draws the whole board, without selection, panels or menus, into an
     /// off-screen picture. Returns straight RGBA8 pixels and their size.
     pub fn export_board(&mut self, renderer: &mut Renderer, max_side: u32) -> Result<(Vec<u8>, [u32; 2]), AppError> {
+        self.export_board_marked(renderer, max_side, &[])
+    }
+
+    /// [`Self::export_board`] with numbered pins at board points (the PDF's
+    /// comments), each `pin_px` pixels across in the picture.
+    pub(crate) fn export_board_marked(&mut self, renderer: &mut Renderer, max_side: u32, pins: &[([f32; 2], String)]) -> Result<(Vec<u8>, [u32; 2]), AppError> {
         let max_side = max_side.min(renderer.max_picture_size());
         let (size, zoom) = self.export_size(max_side).ok_or_else(|| AppError::Other("the board is empty".into()))?;
         let b = self.board_bounds().unwrap_or_default();
@@ -2392,6 +2403,7 @@ impl App {
         }
         let textures: HashMap<&ContentHash, ImageId> = ids.iter().map(|(h, id)| (h, *id)).collect();
         self.scene.update(&self.doc, &mut self.font, &self.board_names);
+        let (pin_boxes, pin_glyphs) = export::pin_marks(&mut self.font, pins, zoom, size);
         if self.font.atlas.dirty {
             renderer.upload_glyph_data(&self.font.atlas.curve_texture(), &self.font.atlas.band_texture());
             self.font.atlas.dirty = false;
@@ -2403,6 +2415,8 @@ impl App {
                 r.begin_frame(size, BACKGROUND());
                 // Always the full-size picture, whatever its size in the export.
                 scene.draw(r, &view, &|h, _| textures.get(h).map(|id| (*id, [0.0, 0.0, 1.0, 1.0])));
+                r.draw_boxes(&view, &pin_boxes);
+                r.draw_glyphs(&view, &pin_glyphs);
             })
             .map_err(|e| AppError::Other(e.to_string()));
         for id in temporary {
@@ -3320,6 +3334,7 @@ impl App {
             C::OpenLibrary => self.shell_commands.push(S::OpenLibrary { new: false }),
             C::NewLibrary => self.shell_commands.push(S::OpenLibrary { new: true }),
             C::ExportImage => self.shell_commands.push(S::ExportImage),
+            C::ExportPdf => self.shell_commands.push(S::ExportPdf),
             C::Share => self.open_share(),
             C::WelcomeTour => self.start_welcome(welcome::Kind::Full),
             C::History => self.open_history(history::Tab::Versions),

@@ -10,6 +10,7 @@ until the next day. Uploads stop at `MAX_MEDIA_BYTES` (4 GB).
 - The owner's key stays on the owner's PC; the server has its SHA-256
   (`OWNER_HASH`). Share links are kept as hashes too, and can be revoked.
 - A link opens the whole library or one board with the boards inside it, to
-  view or to edit. Anyone who has a link can use it until it's revoked.
+  view or to edit. Anyone who has a link can use it until it's revoked, or
+  until its end date when it was made with one (`days` or `expires`).
 - File bytes aren't checked against their hash here (that would cost more
   CPU than the free plan gives): apps check after downloading.

@@ -314,6 +314,20 @@ async fn sleep(ms: i32) {
 #[derive(Deserialize)]
 struct Me {
     role: String,
+    /// When the link stops working (ms), absent for never.
+    #[serde(default)]
+    expires: u64,
+}
+
+/// "Works until Mon, 1 Dec": a link's end date in the reader's own words.
+fn until(expires_ms: u64) -> String {
+    let d = js_sys::Date::new(&JsValue::from_f64(expires_ms as f64));
+    let opts = js_sys::Object::new();
+    for (k, v) in [("weekday", "short"), ("day", "numeric"), ("month", "short"), ("hour", "numeric"), ("minute", "2-digit")] {
+        let _ = js_sys::Reflect::set(&opts, &k.into(), &v.into());
+    }
+    let when = String::from(d.to_locale_string("default", &opts));
+    format!("This link works until {when}")
 }
 
 #[derive(Deserialize)]
@@ -330,6 +344,7 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
     LIVE.with(|l| *l.borrow_mut() = Some(Live { board: None, cursor: None, view: None }));
     let mut view = true;
     let mut known = false;
+    let mut ends = String::new();
     let mut sync = Sync::default();
     let blank = s.borrow().app.board_id();
     let mut opened = false;
@@ -342,7 +357,11 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
     loop {
         let done = async {
             if !known {
-                view = json::<Me>(&key, "GET", "me", None).await?.role == "view";
+                let me = json::<Me>(&key, "GET", "me", None).await?;
+                view = me.role == "view";
+                if me.expires > 0 {
+                    ends = until(me.expires);
+                }
                 s.borrow_mut().app.set_view_only(view);
                 s.borrow_mut().app.welcome_guest(view);
                 known = true;
@@ -359,11 +378,16 @@ pub async fn run(s: Rc<RefCell<State>>, key: String) {
         match done {
             Ok(moved) => {
                 quiet = if moved { 0 } else { quiet + 1 };
-                note(match (opened, view) {
+                let said = match (opened, view) {
                     (false, _) => "There's nothing on this link.",
                     (true, true) => "View only: comments (C) and stamps (E) are kept; other changes aren't saved",
                     (true, false) => "",
-                });
+                };
+                match (said, ends.as_str()) {
+                    (s, "") => note(s),
+                    ("", e) => note(e),
+                    (s, e) => note(&format!("{s}. {e}")),
+                }
             }
             Err(Fail::Refused(e)) => {
                 note(&format!("Not up to date: {e}"));
